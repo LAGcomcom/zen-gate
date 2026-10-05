@@ -234,7 +234,9 @@ func bearerOf(r *http.Request) string {
 
 // handleListModels advertises the servable models in OpenAI shape. Reasoning
 // models additionally expose (light)/(deep) variants so a client's model
-// picker can select the effort directly.
+// picker can select the effort directly. User-configured upstreams are
+// appended: they are servable through this same gateway, so a client that
+// discovers models here can reach them.
 func (s *Server) handleListModels(w http.ResponseWriter, r *http.Request) {
 	data := []map[string]any{}
 	for _, m := range s.Lane.ServableModels() {
@@ -252,6 +254,13 @@ func (s *Server) handleListModels(w http.ResponseWriter, r *http.Request) {
 				})
 			}
 		}
+	}
+	for _, um := range s.upstreamModels() {
+		data = append(data, map[string]any{
+			"id":       um.info.ID,
+			"object":   "model",
+			"owned_by": "zen-gate/" + um.upstreamID,
+		})
 	}
 	writeJSON(w, 200, map[string]any{"object": "list", "data": data})
 }
@@ -313,7 +322,7 @@ func (s *Server) handleCodexCatalog(w http.ResponseWriter, r *http.Request) {
 			"slug":                         m.ID,
 			"display_name":                 m.Name,
 			"description":                  desc,
-			"base_instructions":            fmt.Sprintf("You are %s (model id: %s), a coding agent serving the user's Codex app through the Zen Gate local gateway. Work toward the user's goal with the available tools and verify your changes. Always reply in the same language as the user's latest message — when the user writes Chinese, reply in Simplified Chinese. Be concise.", m.Name, m.ID),
+			"base_instructions":            codexInstructions(m.Name, m.ID),
 			"default_reasoning_level":      "medium",
 			"supported_reasoning_levels":   lv,
 			"shell_type":                   "unified_exec",
@@ -324,12 +333,62 @@ func (s *Server) handleCodexCatalog(w http.ResponseWriter, r *http.Request) {
 			"visibility":                   "list",
 			"supported_in_api":             true,
 			"priority":                     priority[stateOf(m.ID)],
-			"provider_id":                  "zen_gate",
+			"provider_id":                  codexProviderID,
 			"context_window":               m.ContextWindow,
 			"max_output_tokens":            m.MaxOutput,
 		})
 	}
+	// User-configured upstream models ride the same catalog so the picker shows
+	// local models next to the free ones and keeps following upstream changes.
+	// They sort below the free lane by priority, which is deliberate: the free
+	// models are the product, a custom endpoint is the user's own addition.
+	for _, um := range s.upstreamModels() {
+		f := um.info
+		desc := f.Blurb
+		if f.RegionGated {
+			desc += " · 可能被地区门拦截"
+		}
+		lv := levels
+		if !f.Reasoning {
+			lv = []map[string]any{{"effort": "medium", "description": "默认"}}
+		}
+		mods := []string{"text"}
+		if f.Vision {
+			mods = append(mods, "image")
+		}
+		out = append(out, map[string]any{
+			"slug":                         f.ID,
+			"display_name":                 f.Name,
+			"description":                  desc,
+			"base_instructions":            codexInstructions(f.Name, f.ID),
+			"default_reasoning_level":      "medium",
+			"supported_reasoning_levels":   lv,
+			"shell_type":                   "unified_exec",
+			"support_verbosity":            false,
+			"truncation_policy":            map[string]any{"mode": "tokens", "limit": 10000},
+			"experimental_supported_tools": []string{},
+			"input_modalities":             mods,
+			"visibility":                   "list",
+			"supported_in_api":             true,
+			"priority":                     5,
+			"provider_id":                  codexProviderID,
+			"context_window":               f.ContextWindow,
+			"max_output_tokens":            f.MaxOutput,
+		})
+	}
 	writeJSON(w, 200, map[string]any{"models": out})
+}
+
+// codexProviderID is the provider the free-lane models are pinned to. Custom
+// upstream models get one provider each so the picker can tell them apart and
+// so a name collision with a free model cannot misroute a request.
+const codexProviderID = "zen_gate"
+
+// codexInstructions is the system preamble Codex bakes into every model it
+// loads. One wording for both free-lane and custom models: the coding-agent
+// contract does not change with the provider.
+func codexInstructions(name, model string) string {
+	return fmt.Sprintf("You are %s (model id: %s), a coding agent serving the user's Codex app through the Zen Gate local gateway. Work toward the user's goal with the available tools and verify your changes. Always reply in the same language as the user's latest message — when the user writes Chinese, reply in Simplified Chinese. Be concise.", name, model)
 }
 
 // resolveEffort maps a requested model id onto an effort level: an explicit

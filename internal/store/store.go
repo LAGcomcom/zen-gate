@@ -7,8 +7,11 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
+	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -60,7 +63,131 @@ type Config struct {
 	FailoverEnabled      bool   `json:"failoverEnabled"`
 	FailoverMax          int    `json:"failoverMax"`
 	Window               WindowState `json:"window"`
+	// Upstreams are user-declared OpenAI-compatible endpoints served through
+	// the same local gateway. The free lane needs no configuration; this is
+	// for models zen-gate cannot know about — a local llama.cpp/Ollama server,
+	// a LAN box, any other OpenAI-compatible endpoint. Requests naming one of
+	// their models are forwarded verbatim, without the fingerprint gate or the
+	// session minting that the Zen free lane requires.
+	Upstreams []Upstream `json:"upstreams,omitempty"`
 }
+
+// Upstream is one user-configured OpenAI-compatible endpoint.
+//
+// The zero value is not usable: ID must be a non-empty identifier safe for a
+// config.toml table name ([model_providers.<id>]), and BaseURL must be an
+// absolute http(s) origin.
+type Upstream struct {
+	// ID identifies the upstream and becomes the Codex provider id
+	// (`model_providers.<id>`). Lowercase letters, digits and underscores.
+	ID   string `json:"id"`
+	Name string `json:"name,omitempty"`
+	// BaseURL is the endpoint root, e.g. http://127.0.0.1:8090. A path is
+	// allowed and is prefixed to the request path.
+	BaseURL string `json:"baseUrl"`
+	// APIKey is sent as `Authorization: Bearer …` when non-empty. Many local
+	// servers ignore it; leave empty when the endpoint needs no credential.
+	APIKey string `json:"apiKey,omitempty"`
+	// Models are the model ids this upstream serves, declared by hand because
+	// the gateway does not probe foreign endpoints (no fingerprint, no quota).
+	Models []UpstreamModel `json:"models"`
+	// ExposeRegion marks every model of this upstream region-gated, which
+	// sinks them to the bottom of the pickers — for endpoints that are only
+	// reachable from certain egress addresses.
+	ExposeRegion bool `json:"exposeRegion,omitempty"`
+}
+
+// UpstreamModel is one model served by a user-configured upstream.
+type UpstreamModel struct {
+	ID            string `json:"id"`
+	Name          string `json:"name,omitempty"`
+	Blurb         string `json:"blurb,omitempty"`
+	Vision        bool   `json:"vision,omitempty"`
+	Reasoning     bool   `json:"reasoning,omitempty"`
+	ContextWindow int    `json:"contextWindow,omitempty"`
+	MaxOutput     int    `json:"maxOutput,omitempty"`
+	// Wire is the protocol the endpoint speaks: chat | responses | messages.
+	// Empty means chat (OpenAI chat completions), the common case.
+	Wire string `json:"wire,omitempty"`
+}
+
+// idRe guards the provider/table name: Codex reads [model_providers.<id>]
+// out of TOML, so an id that is not a bare identifier would break the config.
+var idRe = regexp.MustCompile(`^[a-z0-9_]+$`)
+
+// Validate reports whether the upstream is usable, with a human-readable
+// reason. It is the single gate for every write path.
+func (u Upstream) Validate() error {
+	id := strings.TrimSpace(u.ID)
+	if id == "" {
+		return errors.New("id is required")
+	}
+	if !idRe.MatchString(id) {
+		return errors.New("id must be lowercase letters, digits or underscores (it becomes a TOML table name)")
+	}
+	if strings.TrimSpace(u.BaseURL) == "" {
+		return errors.New("baseUrl is required")
+	}
+	p, err := url.Parse(strings.TrimSpace(u.BaseURL))
+	if err != nil {
+		return errors.New("baseUrl is not a valid URL: " + err.Error())
+	}
+	if p.Scheme != "http" && p.Scheme != "https" {
+		return errors.New("baseUrl must start with http:// or https://")
+	}
+	if p.Host == "" {
+		return errors.New("baseUrl must include a host")
+	}
+	if len(u.Models) == 0 {
+		return errors.New("at least one model is required")
+	}
+	seen := map[string]bool{}
+	for _, m := range u.Models {
+		mid := strings.TrimSpace(m.ID)
+		if mid == "" {
+			return errors.New("every model needs an id")
+		}
+		if seen[mid] {
+			return errors.New("duplicate model id: " + mid)
+		}
+		seen[mid] = true
+	}
+	return nil
+}
+
+// Wire normalizes the declared protocol, defaulting to chat.
+func (m UpstreamModel) Wire_() string {
+	switch strings.TrimSpace(m.Wire) {
+	case "responses":
+		return "responses"
+	case "messages":
+		return "messages"
+	default:
+		return "chat"
+	}
+}
+
+// Trim normalizes whitespace on every field so a hand-edited config.json
+// behaves like one written through the dashboard.
+func (u *Upstream) Trim() {
+	u.ID = strings.TrimSpace(u.ID)
+	u.Name = strings.TrimSpace(u.Name)
+	u.BaseURL = strings.TrimSpace(u.BaseURL)
+	u.APIKey = strings.TrimSpace(u.APIKey)
+	for i := range u.Models {
+		u.Models[i].ID = strings.TrimSpace(u.Models[i].ID)
+		u.Models[i].Name = strings.TrimSpace(u.Models[i].Name)
+		u.Models[i].Blurb = strings.TrimSpace(u.Models[i].Blurb)
+		u.Models[i].Wire = strings.TrimSpace(u.Models[i].Wire)
+	}
+}
+
+// DefaultContextWindow / DefaultMaxOutput fill in unstated capacities so every
+// served model carries the fields Codex's catalog schema requires.
+const (
+	DefaultContextWindow = 131072
+	DefaultMaxOutput     = 32768
+)
 
 // DayStat aggregates one calendar day.
 type DayStat struct {

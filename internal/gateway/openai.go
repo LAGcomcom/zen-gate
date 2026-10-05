@@ -201,10 +201,25 @@ func convertOpenAITools(in []openaiToolDef) []lane.ToolDef {
 
 // --- chat completions ---------------------------------------------------------
 
+// handleChatCompletions serves an OpenAI chat request. A model claimed by a
+// user-configured upstream is forwarded verbatim before any lane logic runs:
+// the free lane's fingerprint gate, session minting and body rewrite would
+// only corrupt a payload the local endpoint already understands.
+//
+// The raw body is buffered because the passthrough path needs it untouched
+// while the lane path needs it decoded.
 func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
+	raw, err := readBody(w, r)
+	if err != nil {
+		writeJSON(w, 400, openaiError(err.Error(), "invalid_request_error"))
+		return
+	}
 	var req openaiChatRequest
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 8<<20)).Decode(&req); err != nil {
+	if err := json.Unmarshal(raw, &req); err != nil {
 		writeJSON(w, 400, openaiError("invalid request body: "+err.Error(), "invalid_request_error"))
+		return
+	}
+	if s.passthrough(w, r, req.Model, "chat", raw) {
 		return
 	}
 	agent := s.agentOf(r)
@@ -605,9 +620,17 @@ func convertResponsesInput(raw json.RawMessage, instructions string) []lane.Mess
 }
 
 func (s *Server) handleResponses(w http.ResponseWriter, r *http.Request) {
+	raw, err := readBody(w, r)
+	if err != nil {
+		writeJSON(w, 400, openaiError(err.Error(), "invalid_request_error"))
+		return
+	}
 	var req responsesRequest
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 8<<20)).Decode(&req); err != nil {
+	if err := json.Unmarshal(raw, &req); err != nil {
 		writeJSON(w, 400, openaiError("invalid request body: "+err.Error(), "invalid_request_error"))
+		return
+	}
+	if s.passthrough(w, r, req.Model, "responses", raw) {
 		return
 	}
 	agent := s.agentOf(r)

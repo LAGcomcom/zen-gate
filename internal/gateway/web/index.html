@@ -127,6 +127,31 @@
   .row { display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
   .muted { color:var(--ink-mute); } .dim { color:var(--ink-dim); }
   .mono { font-family:var(--mono); font-size:12px; font-variant-numeric:tabular-nums; }
+
+  /* ---- 表单（上游配置用） ---- */
+  /* The shared input[type=number] rule carries a fixed 90px width for the
+     settings page's compact steppers; inside .up-row the grid owns the width,
+     so .in has to win the cascade. */
+  .fgrid { display:grid; grid-template-columns:repeat(auto-fit,minmax(220px,1fr)); gap:12px; }
+  .fgrid label { display:flex; flex-direction:column; gap:5px; font-size:12px; color:var(--ink-dim); }
+  .fgrid label > .req { color:var(--bad); }
+  input.in, select.in, .in {
+    width:100%; background:var(--panel-2); border:1px solid var(--hairline); border-radius:var(--r-sm);
+    color:var(--ink); font-size:12.5px; font-family:inherit; padding:7px 9px; min-width:0;
+    transition:border-color .16s ease, box-shadow .16s ease; }
+  input.in[type=number] { width:100%; padding:7px 9px; font-family:var(--mono); }
+  .in:focus { outline:none; border-color:var(--accent);
+    box-shadow:0 0 0 3px var(--accent-soft); }
+  .in[readonly] { color:var(--ink-mute); background:var(--panel); cursor:not-allowed; }
+  .in::placeholder { color:var(--ink-mute); }
+  select.in { cursor:pointer; }
+  .hint { font-size:11px; color:var(--ink-mute); line-height:1.45; }
+  .up-row { display:grid; grid-template-columns:minmax(120px,1.4fr) minmax(90px,1.2fr) 104px 84px 84px auto auto 26px;
+    gap:6px; align-items:center; margin-bottom:6px; }
+  .ck { display:flex; align-items:center; gap:4px; font-size:11.5px; color:var(--ink-dim); white-space:nowrap; cursor:pointer; }
+  .ck input { accent-color:var(--accent); cursor:pointer; }
+  button.act[disabled] { opacity:.45; cursor:default; }
+  @media (max-width:760px) { .up-row { grid-template-columns:1fr 1fr; } }
   code.k { background:var(--panel-2); border:1px solid var(--hairline-soft); border-radius:5px; padding:2px 7px; font-family:var(--mono); font-size:11.5px; user-select:all; }
   pre { background:var(--side); border:1px solid var(--hairline-soft); border-radius:var(--r-md); padding:10px 12px;
     overflow-x:auto; font-family:var(--mono); font-size:11.5px; color:var(--ink-dim); user-select:text; white-space:pre-wrap; margin:8px 0 0; }
@@ -311,6 +336,7 @@
       <div class="page" id="page-dash"></div>
       <div class="page" id="page-agents"></div>
       <div class="page" id="page-models"></div>
+      <div class="page" id="page-upstreams"></div>
       <div class="page" id="page-access"></div>
       <div class="page" id="page-usage"></div>
       <div class="page" id="page-logs"></div>
@@ -323,7 +349,7 @@
 
 <script>
 const $ = s => document.querySelector(s);
-const PAGES = [["dash","总览","dash"],["agents","Agent 适配","agents"],["models","模型","models"],["access","接入","access"],["usage","用量","usage"],["logs","日志","logs"],["settings","设置","settings"]];
+const PAGES = [["dash","总览","dash"],["agents","Agent 适配","agents"],["models","模型","models"],["upstreams","上游","upstreams"],["access","接入","access"],["usage","用量","usage"],["logs","日志","logs"],["settings","设置","settings"]];
 let cur = localStorage.getItem("zengate.page") || "dash";
 if (!PAGES.some(p=>p[0]===cur)) cur = "dash";
 let STATE = null;
@@ -351,6 +377,7 @@ const ICONS = {
   dash: '<rect x="3" y="3" width="7" height="9" rx="1"/><rect x="14" y="3" width="7" height="5" rx="1"/><rect x="14" y="12" width="7" height="9" rx="1"/><rect x="3" y="16" width="7" height="5" rx="1"/>',
   agents: '<path d="M12 22v-5"/><path d="M9 8V2"/><path d="M15 8V2"/><path d="M18 8v5a4 4 0 0 1-4 4h-4a4 4 0 0 1-4-4V8z"/>',
   models: '<rect x="4" y="4" width="16" height="16" rx="2"/><rect x="9" y="9" width="6" height="6"/><path d="M9 2v2"/><path d="M15 2v2"/><path d="M9 20v2"/><path d="M15 20v2"/><path d="M2 9h2"/><path d="M2 15h2"/><path d="M20 9h2"/><path d="M20 15h2"/>',
+  upstreams: '<path d="M4 7V5a2 2 0 0 1 2-2h4"/><path d="M20 7V5a2 2 0 0 0-2-2h-4"/><path d="M4 17v2a2 2 0 0 0 2 2h4"/><path d="M20 17v2a2 2 0 0 1-2 2h-4"/><rect x="8" y="8" width="8" height="8" rx="1"/><path d="M2 12h4"/><path d="M18 12h4"/>',
   access: '<path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/>',
   usage: '<path d="M3 3v18h18"/><path d="M18 17V9"/><path d="M13 17V5"/><path d="M8 17v-3"/>',
   logs: '<path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"/><path d="M14 2v4a2 2 0 0 0 2 2h4"/><path d="M10 9H8"/><path d="M16 13H8"/><path d="M16 17H8"/>',
@@ -381,7 +408,7 @@ function initSegs(){
 }
 window.addEventListener("resize", ()=> initSegs());
 
-const NAV_GROUPS = [["网关",0,4],["数据",4,6],["系统",6,7]];
+const NAV_GROUPS = [["网关",0,4],["模型",4,5],["数据",5,7],["系统",7,8]];
 function nav(){
   let html = "";
   for(const [title, from, to] of NAV_GROUPS){
@@ -420,7 +447,7 @@ function render(){ if(!STATE) return; const s=STATE;
   $("#side-models").textContent = s.models.filter(m=>m.state==="available").length + "/" + s.models.length;
   $("#side-ver").textContent = s.version || "";
   $("#egress-foot").textContent = s.egress&&s.egress.ip ? `${s.egress.ip} (${s.egress.country||"?"})` : "出口未知";
-  renderDash(s); renderAgents(s); renderModels(s); renderAccess(s); renderUsage(s); renderSettings(s);
+  renderDash(s); renderAgents(s); renderModels(s); renderUpstreams(s); renderAccess(s); renderUsage(s); renderSettings(s);
   if (cur === "logs") renderLogs();
   renderDashExtras(s);
 }
@@ -647,6 +674,169 @@ function renderModels(s){
 }
 
 /* ---- 接入 ---- */
+/* ---- 上游（用户自建端点） ---- */
+// Draft state: the form edits this list, Save posts the whole set. Keys are
+// never rendered back (the API redacts them), so a draft entry with hasKey set
+// and an empty key means "keep the stored key".
+let UPSTREAM_DRAFT = null, UPSTREAM_KEYS = {}, UPSTREAM_EDIT = null;
+
+function upstreamModels(s){
+  return (s.upstreams||[]).map((u,i)=>({
+    id:u.id, name:u.name||"", baseUrl:u.baseUrl, hasKey:!!u.hasKey,
+    exposeRegion:!!u.exposeRegion,
+    models:(u.models||[]).map(m=>({...m})),
+  }));
+}
+function upstreamSync(){ if(STATE) UPSTREAM_DRAFT = upstreamModels(STATE); }
+function renderUpstreams(s){
+  if(UPSTREAM_DRAFT === null || UPSTREAM_DRAFT.length !== (s.upstreams||[]).length) upstreamSync();
+  const list = UPSTREAM_DRAFT || [];
+  const open = UPSTREAM_EDIT;
+  $("#page-upstreams").innerHTML = `
+    <h2 class="pt">上游 <span class="sub">把自建的 OpenAI 兼容端点并进同一个网关，Agent 一处配置即可用</span></h2>
+    <div class="card">
+      <h3>为什么是直通转发</h3>
+      <div class="muted" style="font-size:12.5px;line-height:1.7">
+        免费车道需要会话铸造与指纹门才能过 opencode.ai 的校验；自建端点不需要，
+        强行套用反而会污染请求体（注入四件套工具、删掉本地服务认识的字段）。
+        因此这里的请求<strong>原样转发、原样返回</strong>，流式分片与厂商私有字段都原封不动。
+      </div>
+    </div>
+    ${list.map((u,i)=>upstreamCard(u,i,open===i)).join("")}
+    <div style="display:flex;gap:8px;margin-top:12px">
+      <button class="act" onclick="upstreamAdd()">+ 添加上游</button>
+      <button class="act" onclick="upstreamSave()" ${list.length&&upstreamDirty()?"":"disabled"}>保存</button>
+      ${upstreamDirty()?'<button class="ghost" onclick="upstreamSync();renderUpstreams(STATE)">撤销改动</button>':""}
+    </div>
+    <div class="card" style="margin-top:14px">
+      <h3>怎么用</h3>
+      <div class="muted" style="font-size:12.5px;line-height:1.8">
+        1. 在上面填地址（如 <code class="k">http://127.0.0.1:8090</code>）和模型 id，保存；<br>
+        2. 打开「Agent 适配」把对应 Agent 开关重新关开一次（保存时会自动做）；<br>
+        3. 模型会出现在该 Agent 的选择器里，和免费模型并存 —— Codex 侧靠
+        <code class="k">/v1/codex-catalog</code> 动态目录跟随，本地模型排在免费模型之后；
+        其它客户端走 <code class="k">/v1/models</code>。<br>
+        4. 模型 id 必须和上游本地服务里的<strong>完全一致</strong>（大小写敏感），否则网关不会转发。
+      </div>
+    </div>`;
+  bindUpstreamEvents();
+}
+
+function upstreamDirty(){
+  if(!STATE || !UPSTREAM_DRAFT) return false;
+  const cur = upstreamModels(STATE);
+  return JSON.stringify(cur) !== JSON.stringify(UPSTREAM_DRAFT);
+}
+
+function upstreamCard(u, i, isOpen){
+  const head = `
+    <div class="card" style="margin-top:12px">
+      <div style="display:flex;align-items:center;gap:10px;margin-bottom:${isOpen?"12px":"0"}">
+        <span class="mono" style="font-weight:600">${esc(u.id||"(未命名)")}</span>
+        ${u.name?`<span class="dim">${esc(u.name)}</span>`:""}
+        <span class="muted" style="font-size:12px">${u.models.length} 个模型${u.hasKey?" · 已设 Key":""}</span>
+        <div style="margin-left:auto;display:flex;gap:6px">
+          <button class="ghost" onclick="upstreamToggle(${i})">${isOpen?"收起":"编辑"}</button>
+          <button class="ghost" onclick="upstreamRemove(${i})">删除</button>
+        </div>
+      </div>`;
+  if(!isOpen) return head + `</div>`;
+  return head + `
+      <div class="fgrid">
+        <label>ID<span class="req">*</span><input class="in" id="up-${i}-id" value="${esc(u.id)}" placeholder="local" ${u.id?"readonly":""}>
+          <span class="hint">小写字母/数字/下划线；会成为 Codex 的 provider 名</span></label>
+        <label>名称<input class="in" id="up-${i}-name" value="${esc(u.name)}" placeholder="本地模型"></label>
+        <label>地址<span class="req">*</span><input class="in" id="up-${i}-url" value="${esc(u.baseUrl)}" placeholder="http://127.0.0.1:8090">
+          <span class="hint">OpenAI 兼容端点根；可带路径前缀，如 /llama</span></label>
+        <label>API Key<input class="in" id="up-${i}-key" type="password" value="" placeholder="${u.hasKey?"已设置，留空保持不变":"本地服务通常留空"}">
+          <span class="hint">${u.hasKey?"已保存一个 Key，留空即保留":"留空表示不需要鉴权"}</span></label>
+      </div>
+      <label style="display:flex;align-items:center;gap:8px;margin-top:10px;font-size:12.5px">
+        <input type="checkbox" id="up-${i}-region" ${u.exposeRegion?"checked":""}> 该端点受地区限制（在选择器里排到最后）
+      </label>
+      <div style="margin-top:12px">
+        <div class="dim" style="font-size:12px;margin-bottom:6px">模型（id 必须与本地服务一致）</div>
+        ${u.models.map((m,j)=>upstreamRow(u,i,m,j)).join("")}
+        <button class="ghost" onclick="upstreamAddModel(${i})">+ 添加模型</button>
+      </div>
+    </div>`;
+}
+
+function upstreamRow(u, i, m, j){
+  return `<div class="up-row" data-i="${i}" data-j="${j}">
+    <input class="in" data-f="id" value="${esc(m.id||"")}" placeholder="模型 id，如 meissa-local">
+    <input class="in" data-f="name" value="${esc(m.name||"")}" placeholder="显示名（可空）">
+    <select data-f="wire">
+      ${["","chat","responses","messages"].map(v=>`<option value="${v}" ${(m.wire||"")===v?"selected":""}>${v||"chat（默认）"}</option>`).join("")}
+    </select>
+    <input class="in" data-f="contextWindow" type="number" min="0" value="${m.contextWindow||""}" placeholder="上下文" title="上下文长度，留空用 131072">
+    <input class="in" data-f="maxOutput" type="number" min="0" value="${m.maxOutput||""}" placeholder="输出" title="最大输出，留空用 32768">
+    <label class="ck" title="支持图片输入"><input type="checkbox" data-f="vision" ${m.vision?"checked":""}> 视觉</label>
+    <label class="ck" title="支持思考"><input type="checkbox" data-f="reasoning" ${m.reasoning?"checked":""}> 思考</label>
+    <button class="ghost" onclick="upstreamDelModel(${i},${j})">×</button>
+  </div>`;
+}
+
+function bindUpstreamEvents(){
+  document.querySelectorAll(".up-row").forEach(row=>{
+    const i=+row.dataset.i, j=+row.dataset.j;
+    row.querySelectorAll("[data-f]").forEach(el=>{
+      el.onchange = ()=>{
+        const f = el.dataset.f, m = UPSTREAM_DRAFT[i].models[j];
+        m[f] = el.type==="checkbox" ? el.checked
+             : el.type==="number"  ? (el.value===""?0:+el.value)
+             : el.value;
+        renderUpstreams(STATE);
+      };
+    });
+  });
+  document.querySelectorAll("[id^=up-]").forEach(el=>{
+    el.onchange = ()=>{
+      const [,i,f] = el.id.split("-");
+      const u = UPSTREAM_DRAFT[+i];
+      if(f==="region") u.exposeRegion = el.checked;
+      else if(f==="key"){ UPSTREAM_KEYS[u.id] = el.value; }
+      else u[f] = el.value;
+      if(f!=="key") renderUpstreams(STATE);
+    };
+  });
+}
+
+function upstreamAdd(){
+  if(!UPSTREAM_DRAFT) upstreamSync();
+  UPSTREAM_DRAFT.push({id:"", name:"", baseUrl:"http://127.0.0.1:8090", hasKey:false,
+    exposeRegion:false, models:[{id:"", vision:false, reasoning:false, wire:""}]});
+  UPSTREAM_EDIT = UPSTREAM_DRAFT.length-1;
+  renderUpstreams(STATE);
+}
+function upstreamToggle(i){ UPSTREAM_EDIT = (UPSTREAM_EDIT===i) ? null : i; renderUpstreams(STATE); }
+function upstreamRemove(i){ if(!UPSTREAM_DRAFT) return; UPSTREAM_DRAFT.splice(i,1); UPSTREAM_EDIT=null; renderUpstreams(STATE); }
+function upstreamAddModel(i){
+  UPSTREAM_DRAFT[i].models.push({id:"", vision:false, reasoning:false, wire:""});
+  renderUpstreams(STATE);
+}
+function upstreamDelModel(i,j){ UPSTREAM_DRAFT[i].models.splice(j,1); renderUpstreams(STATE); }
+
+async function upstreamSave(){
+  const payload = (UPSTREAM_DRAFT||[]).map(u=>({
+    id:(u.id||"").trim(), name:(u.name||"").trim(), baseUrl:(u.baseUrl||"").trim(),
+    apiKey:(UPSTREAM_KEYS[u.id]||"").trim(),
+    exposeRegion:!!u.exposeRegion,
+    models:(u.models||[]).filter(m=>(m.id||"").trim()).map(m=>({
+      id:m.id.trim(), name:(m.name||"").trim(), blurb:(m.blurb||"").trim(),
+      vision:!!m.vision, reasoning:!!m.reasoning, wire:m.wire||"",
+      contextWindow:+m.contextWindow||0, maxOutput:+m.maxOutput||0,
+    })),
+  }));
+  // api() posts the body itself and toasts on failure, returning null then.
+  const r = await api("/upstreams", {upstreams:payload});
+  if(!r) return;
+  toast("上游已保存 · Agent 配置已重写");
+  UPSTREAM_DRAFT = null; UPSTREAM_KEYS = {}; UPSTREAM_EDIT = null;
+  lastSig = "";                 // force refresh() to see the new upstreams
+  await refresh();
+}
+
 function renderAccess(s){
   const curl = `curl ${s.baseURL}/chat/completions \\\n  -H "Authorization: Bearer ${s.mainKey}" \\\n  -H "content-type: application/json" \\\n  -d '{"model":"mimo-v2.6-flash-free (deep)","messages":[{"role":"user","content":"你好"}],"stream":true}'`;
   $("#page-access").innerHTML = `
@@ -665,6 +855,12 @@ function renderAccess(s){
         ["OpenAI SDK / 任意语言","base_url 指向 Base URL，鉴权用 Bearer 主 Key，模型列表见 /v1/models"],
       ].map(([n,d])=>`<div class="ccard"><div class="cn">${esc(n)}</div><div class="cd">${esc(d)}</div>
         <button class="ghost" data-copy="${s.baseURL}">复制 Base URL</button></div>`).join("")}
+    </div>
+    <div class="card"><h3>想接自己的本地模型？</h3>
+      <div class="muted" style="font-size:12.5px;line-height:1.7">
+        本机 llama.cpp / Ollama / 局域网另一台机器，都可以在「<button class="ghost" onclick="cur='upstreams';nav();render()">上游</button>」页登记，
+        之后它们会和免费模型一起出现在 Agent 的选择器里（走的是同一个 Base URL）。
+      </div>
     </div>
     <div class="card"><h3>curl 示例</h3><pre>${esc(curl)}</pre></div>`;
 }
@@ -1301,7 +1497,7 @@ let lastSig = "";
 async function refresh(){
   const j = await api("/state"); if(!j) return;
   if(typeof j.uptimeSec === "number") bootAt = Date.now() - j.uptimeSec*1000;
-  const sig = JSON.stringify([j.models,j.agents,j.stats,j.settings,j.egress,j.mainKey,j.baseURL,j.port]);
+  const sig = JSON.stringify([j.models,j.agents,j.stats,j.settings,j.egress,j.mainKey,j.baseURL,j.port,j.upstreams]);
   if (sig === lastSig){ tickUptime(); return; }
   lastSig = sig; STATE = j; render();
 }

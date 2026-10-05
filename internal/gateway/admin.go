@@ -87,6 +87,12 @@ func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request, rest string
 		writeJSON(w, 200, map[string]any{"ok": true, "enabled": in.Enabled})
 	case rest == "export" && r.Method == http.MethodGet:
 		s.adminExport(w, r)
+	case rest == "upstreams" && r.Method == http.MethodGet:
+		writeJSON(w, 200, map[string]any{"ok": true, "upstreams": redactUpstreams(s.upstreams())})
+	case rest == "upstreams" && r.Method == http.MethodPost:
+		s.adminUpstreamsSet(w, r)
+	case strings.HasPrefix(rest, "upstreams/") && r.Method == http.MethodDelete:
+		s.adminUpstreamDelete(w, strings.TrimSuffix(strings.TrimPrefix(rest, "upstreams/"), "/"))
 	case rest == "import" && r.Method == http.MethodPost:
 		s.adminImport(w, r)
 	case strings.HasPrefix(rest, "agent/"):
@@ -199,6 +205,7 @@ func (s *Server) adminState(w http.ResponseWriter) {
 		"egress":    egress,
 		"models":    models,
 		"agents":    agentsView,
+		"upstreams": redactUpstreams(s.upstreams()),
 		"stats":     map[string]any{"days": days, "recent": recent},
 		"settings": map[string]any{
 			"defaultMaxTokens":     cfg.DefaultMaxTokens,
