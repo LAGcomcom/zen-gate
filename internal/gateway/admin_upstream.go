@@ -21,7 +21,8 @@ import (
 // gateway in a state the user cannot see from the dashboard (a model listed in
 // one upstream but served by another), and the failure would only surface as a
 // confusing 502 on the next request.
-func (s *Server) adminUpstreamsSet(w http.ResponseWriter, r *http.Request) {	var in struct {
+func (s *Server) adminUpstreamsSet(w http.ResponseWriter, r *http.Request) {
+	var in struct {
 		Upstreams []store.Upstream `json:"upstreams"`
 	}
 	if err := decodeBody(r, &in); err != nil {

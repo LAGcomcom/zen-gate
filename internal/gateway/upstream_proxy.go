@@ -6,8 +6,8 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
-	neturl "net/url"
 	"net/http"
+	neturl "net/url"
 	"strings"
 	"time"
 	"zen-gate/internal/store"
@@ -126,8 +126,8 @@ func (s *Server) upstreamModels() []upstreamModelInfo {
 					ID: id, Name: name, Blurb: blurb,
 					Vision: m.Vision, Reasoning: m.Reasoning,
 					ContextWindow: cw, MaxOutput: mo,
-					Wire:          m.Wire_(),
-					RegionGated:   u.ExposeRegion,
+					Wire:        m.Wire_(),
+					RegionGated: u.ExposeRegion,
 				},
 			})
 		}

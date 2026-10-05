@@ -19,6 +19,12 @@ type ModelInfo struct {
 	MaxOutput          int    `json:"maxOutput"`
 	CanDisableThinking bool   `json:"canDisableThinking"`
 	RegionSensitive    bool   `json:"regionSensitive"`
+	// Custom marks a model served by a user-configured upstream rather than the
+	// Zen free lane. It changes the copy, not the routing: pickers label it as
+	// the user's own endpoint and sort it below the free models. Keeping this
+	// separate from RegionSensitive matters because the two produce different
+	// text — "可能被地区门拦截" is false for a model on the user's own disk.
+	Custom bool `json:"custom,omitempty"`
 }
 
 var alwaysFree = map[string]bool{"union-alpha": true, "space-bunny-free": true}

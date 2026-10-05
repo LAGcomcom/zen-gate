@@ -43,26 +43,26 @@ type WindowState struct {
 }
 
 type Config struct {
-	SchemaVersion        int    `json:"schemaVersion"`
-	Port                 int    `json:"port"`
-	MainKey              string `json:"mainKey"`
+	SchemaVersion        int               `json:"schemaVersion"`
+	Port                 int               `json:"port"`
+	MainKey              string            `json:"mainKey"`
 	AgentKeys            map[string]string `json:"agentKeys"`
-	DefaultMaxTokens     int    `json:"defaultMaxTokens"`
-	DefaultEffort        string `json:"defaultEffort"`
-	ProbeIntervalMinutes int    `json:"probeIntervalMinutes"`
-	ExposeRegion         bool   `json:"exposeRegion"`
+	DefaultMaxTokens     int               `json:"defaultMaxTokens"`
+	DefaultEffort        string            `json:"defaultEffort"`
+	ProbeIntervalMinutes int               `json:"probeIntervalMinutes"`
+	ExposeRegion         bool              `json:"exposeRegion"`
 	EnabledAgents        map[string]bool   `json:"enabledAgents"`
-	CloseToTray          bool   `json:"closeToTray"`
-	Notifications        bool   `json:"notifications"`
-	UpdateFeed           string `json:"updateFeed"`
-	LastVersion          string `json:"lastVersion,omitempty"`
-	StatsServerURL       string `json:"statsServerUrl,omitempty"`
-	InstallID            string `json:"installId,omitempty"`
-	ProxyMode            string `json:"proxyMode"` // env | system | direct | custom
-	ProxyURL             string `json:"proxyUrl,omitempty"`
-	FailoverEnabled      bool   `json:"failoverEnabled"`
-	FailoverMax          int    `json:"failoverMax"`
-	Window               WindowState `json:"window"`
+	CloseToTray          bool              `json:"closeToTray"`
+	Notifications        bool              `json:"notifications"`
+	UpdateFeed           string            `json:"updateFeed"`
+	LastVersion          string            `json:"lastVersion,omitempty"`
+	StatsServerURL       string            `json:"statsServerUrl,omitempty"`
+	InstallID            string            `json:"installId,omitempty"`
+	ProxyMode            string            `json:"proxyMode"` // env | system | direct | custom
+	ProxyURL             string            `json:"proxyUrl,omitempty"`
+	FailoverEnabled      bool              `json:"failoverEnabled"`
+	FailoverMax          int               `json:"failoverMax"`
+	Window               WindowState       `json:"window"`
 	// Upstreams are user-declared OpenAI-compatible endpoints served through
 	// the same local gateway. The free lane needs no configuration; this is
 	// for models zen-gate cannot know about — a local llama.cpp/Ollama server,
@@ -202,9 +202,9 @@ type DayStat struct {
 
 // Stats is the persisted usage accounting.
 type Stats struct {
-	Version int                   `json:"version"`
-	Days    map[string]*DayStat   `json:"days"`
-	Recent  []lane.CallRecord     `json:"recent,omitempty"`
+	Version int                 `json:"version"`
+	Days    map[string]*DayStat `json:"days"`
+	Recent  []lane.CallRecord   `json:"recent,omitempty"`
 	mu      sync.Mutex
 	dirty   bool
 }

@@ -137,7 +137,15 @@ func catalogJSON(o Options, def string) ([]byte, error) {
 		if m.RegionSensitive {
 			pri = 10
 		}
+		// A user's own endpoint sits below the free lane: the free models are
+		// what this app is for, and a local one is the deliberate fallback.
+		if m.Custom {
+			pri = 5
+		}
 		desc := "Zen Gate 免费车道模型"
+		if m.Custom {
+			desc = "自定义上游 · 本地模型"
+		}
 		if m.Blurb != "" {
 			desc = m.Blurb
 		}

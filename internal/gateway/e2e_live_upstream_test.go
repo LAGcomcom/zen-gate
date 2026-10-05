@@ -1,7 +1,9 @@
 // End-to-end check: a real local OpenAI-compatible server behind the gateway.
 //
 // Run manually against a live local model:
+//
 //	go test ./internal/gateway/ -run TestLiveLocalUpstream -v -timeout 120s
+//
 // with ZEN_E2E_UPSTREAM set (e.g. http://127.0.0.1:8090). Skipped otherwise, so
 // it never makes the normal suite depend on a model being loaded.
 package gateway
@@ -135,8 +137,8 @@ func TestLiveLocalUpstreamNonStream(t *testing.T) {
 			} `json:"message"`
 			FinishReason string `json:"finish_reason"`
 		} `json:"choices"`
-		Model  string `json:"model"`
-		Usage  map[string]any `json:"usage"`
+		Model string         `json:"model"`
+		Usage map[string]any `json:"usage"`
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
 		t.Fatalf("response is not OpenAI-shaped: %v — %s", err, truncateForLog(rec.Body.String()))
@@ -213,5 +215,3 @@ func truncateForLog(s string) string {
 	}
 	return s
 }
-
-

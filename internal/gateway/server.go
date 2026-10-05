@@ -342,6 +342,7 @@ func (s *Server) handleCodexCatalog(w http.ResponseWriter, r *http.Request) {
 	// local models next to the free ones and keeps following upstream changes.
 	// They sort below the free lane by priority, which is deliberate: the free
 	// models are the product, a custom endpoint is the user's own addition.
+	// Priority 5 mirrors the codex adapter's sidecar catalog so the two agree.
 	for _, um := range s.upstreamModels() {
 		f := um.info
 		desc := f.Blurb

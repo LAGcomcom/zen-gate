@@ -608,6 +608,9 @@ function renderModels(s){
   const sorted = [...s.models].sort((a,b)=>{
     if(a.id===s.probingModel) return -1;
     if(b.id===s.probingModel) return 1;
+    // Custom endpoints sort after everything the free lane offers: they are
+    // the user's own addition, not the product.
+    if(!!a.custom !== !!b.custom) return a.custom ? 1 : -1;
     return (STATE_ORDER[a.state]??1)-(STATE_ORDER[b.state]??1);
   });
   const avail = s.models.filter(m=>m.state==="available").length;
@@ -632,12 +635,16 @@ function renderModels(s){
     const card = document.createElement("div");
     card.className = "mcard st-" + (m.state||"unknown");
     const eff = (m.efforts||[]).map(e=>`<span class="eff">${e.name} <b>${(e.tokens/1024|0)}K</b>${e.isDefault?" ★":""}</span>`).join("");
-    const pill = m.id === s.probingModel
+    const pill = m.custom
+      ? `<span class="pill unknown" title="${esc(m.detail||"")}">自定义</span>`
+      : m.id === s.probingModel
       ? `<span class="pill warn">探测中…</span>`
       : statePill(m.state);
     // Observed-quota row: usage vs estimated daily ceiling + throttle ETA.
+    // A custom endpoint carries no probe history, so the quota block would be
+    // empty anyway — skipped rather than rendered as zeros.
     let quotaRow = "";
-    if(!m.systemOne){
+    if(!m.systemOne && !m.custom){
       const used = m.quotaUsed||0, est = m.quotaEstimate||0;
       const parts = [];
       if(est > 0){
@@ -656,12 +663,14 @@ function renderModels(s){
       if(parts.length) quotaRow = `<div class="mquota">${parts.join("")}</div>`;
     }
     card.innerHTML = `
-      <div class="mhead"><span class="mname">${esc(m.name)}</span><span class="mops">${pill}<button class="ghost mtest" data-m="${esc(m.id)}" title="单独探测这个模型的可用性">测试</button></span></div>
+      <div class="mhead"><span class="mname">${esc(m.name)}</span><span class="mops">${pill}${m.custom?"":`<button class="ghost mtest" data-m="${esc(m.id)}" title="单独探测这个模型的可用性">测试</button>`}</span></div>
       <div class="mid">${esc(m.id)}</div>
       ${m.blurb?`<div class="mblurb" title="${esc(m.blurb)}">${esc(m.blurb)}</div>`:""}
       <div class="mmeta">
-        <span>首字 <b>${m.ttftMs?(m.ttftMs/1000).toFixed(1)+"s":"—"}</b></span>
-        <span title="${m.ttftCount?("近 "+m.ttftCount+" 次探测平均"):"暂无探测样本"}">平均首字 <b>${m.ttftAvgMs?(m.ttftAvgMs/1000).toFixed(1)+"s":"—"}</b></span>
+        ${m.custom
+          ? `<span title="自定义端点不参与可用性探测">来源 <b>本地/自定义</b></span>`
+          : `<span>首字 <b>${m.ttftMs?(m.ttftMs/1000).toFixed(1)+"s":"—"}</b></span>
+             <span title="${m.ttftCount?("近 "+m.ttftCount+" 次探测平均"):"暂无探测样本"}">平均首字 <b>${m.ttftAvgMs?(m.ttftAvgMs/1000).toFixed(1)+"s":"—"}</b></span>`}
         <span>上下文 <b>${(m.contextWindow/1024|0)}K</b></span>
         <span>输出 <b>${(m.maxOutput/1024|0)}K</b></span>
       </div>

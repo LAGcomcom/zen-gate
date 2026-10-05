@@ -16,9 +16,9 @@ import (
 	neturl "net/url"
 	"zen-gate/internal/agents"
 	"zen-gate/internal/lane"
-	"zen-gate/internal/update"
 	"zen-gate/internal/notify"
 	"zen-gate/internal/store"
+	"zen-gate/internal/update"
 )
 
 //go:embed web/index.html
@@ -162,6 +162,9 @@ func (s *Server) adminState(w http.ResponseWriter) {
 		// Probe first-token history (persisted, survives restarts).
 		TTFTAvgMs int64 `json:"ttftAvgMs,omitempty"`
 		TTFTCount int   `json:"ttftCount,omitempty"`
+		// Custom marks a user-configured upstream's model: shown in the list,
+		// but not probed, so it carries no quota or latency fields.
+		Custom bool `json:"custom,omitempty"`
 	}
 	days, recent := s.Store.SnapshotStats()
 	notes := s.Lane.ThrottleNotes()
@@ -192,6 +195,24 @@ func (s *Server) adminState(w http.ResponseWriter) {
 			}
 		}
 		models = append(models, row)
+	}
+	// Custom upstream models appear here too, marked so the dashboard can show
+	// them without pretending they carry the free lane's live probe state.
+	for _, um := range s.upstreamModels() {
+		f := um.info
+		models = append(models, modelRow{
+			ID: f.ID, Name: f.Name, Blurb: f.Blurb,
+			// A local endpoint is reachable whenever the user's machine is up —
+			// there is nothing to probe for, so "unknown" is the honest state.
+			State:         lane.StateUnknown,
+			Detail:        "自定义上游 " + um.upstreamID + " · 不参与探测",
+			Vision:        f.Vision,
+			Reasoning:     f.Reasoning,
+			ContextWindow: f.ContextWindow,
+			MaxOutput:     f.MaxOutput,
+			Efforts:       lane.EffortsFor(lane.ModelInfo{ID: f.ID, Reasoning: f.Reasoning}, 0, cfg.DefaultMaxTokens),
+			Custom:        true,
+		})
 	}
 	agentsView := []agents.View{}
 	if s.registry != nil {
