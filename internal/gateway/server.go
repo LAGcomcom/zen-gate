@@ -314,15 +314,65 @@ func (s *Server) hiddenSet() map[string]bool {
 	return set
 }
 
-// VisibleModels lists the free-lane models a picker should show: everything
-// the lane advertises minus the ids the user unchecked. Routing is unaffected
-// — a hidden model requested explicitly still works.
+// VisibleModels lists every model a picker should show: the free lane's models
+// plus the enabled providers', minus the ids the user unchecked. Routing is
+// unaffected — a hidden model requested explicitly still works.
+//
+// Provider models are included with their gateway id ("<provider>/<model>"),
+// the same id /v1/models advertises, so an entry a user picked from any
+// adapter's menu routes the same way it is written. Without this an agent
+// picker offered only the free lane while the provider's models were
+// reachable but unreachable-by-menu — the user could not select what they had
+// configured.
 func (s *Server) VisibleModels() []lane.ModelInfo {
 	hidden := s.hiddenSet()
 	out := []lane.ModelInfo{}
 	for _, m := range s.Lane.ServableModels() {
 		if !hidden[m.ID] {
 			out = append(out, m)
+		}
+	}
+	out = append(out, s.visibleProviderModels(hidden)...)
+	return out
+}
+
+// visibleProviderModels flattens every enabled provider's models into catalog
+// entries, keyed by the gateway id (<provider>/<model>) that providerRoute
+// matches on, so an entry a user picked from a menu routes the way it reads.
+//
+// No dedup against the free lane is needed: a provider model named
+// "mimo-v2.6-flash-free" becomes "clash/mimo-v2.6-flash-free", a different id
+// that routes to the provider. providerRoute requires the "/" prefix, so the
+// two never contend for the same request.
+//
+// Providers record model ids only (Models []string), so there is no display
+// name to carry over — the id is both the menu label and the routing key,
+// which is what /v1/models advertises too.
+func (s *Server) visibleProviderModels(hidden map[string]bool) []lane.ModelInfo {
+	cfg := s.Store.Config()
+	out := []lane.ModelInfo{}
+	for i := range cfg.Providers {
+		p := &cfg.Providers[i]
+		if !p.Enabled {
+			continue
+		}
+		for _, id := range p.Models {
+			gatewayID := p.ID + "/" + id
+			if hidden[gatewayID] {
+				continue
+			}
+			out = append(out, lane.ModelInfo{
+				ID:     gatewayID,
+				Name:   id,
+				Blurb:  "自定义 API · " + p.Name,
+				Vision: false,
+				// The catalog schema requires capacities, and a wrong value
+				// surfaces as an agent-side truncation bug. Providers do not
+				// declare them, so use the same defaults the store fills in
+				// elsewhere rather than omitting the fields.
+				ContextWindow: 131072,
+				MaxOutput:     32768,
+			})
 		}
 	}
 	return out
@@ -401,7 +451,55 @@ func (s *Server) handleCodexCatalog(w http.ResponseWriter, r *http.Request) {
 			"max_output_tokens":            m.MaxOutput,
 		})
 	}
+	// Custom providers ride the same catalog so a model the user configured is
+	// selectable in Codex, not just reachable by hand-written request. Priority
+	// 5 sorts them below every free model including region-gated ones: the free
+	// lane is the product, a provider is the user's own addition. The
+	// static sidecar the codex adapter writes comes from VisibleModels(), which
+	// merges the same set — keep the two in step.
+	hidden := s.hiddenSet()
+	cfg := s.Store.Config()
+	for i := range cfg.Providers {
+		p := &cfg.Providers[i]
+		if !p.Enabled {
+			continue
+		}
+		for _, id := range p.Models {
+			gatewayID := p.ID + "/" + id
+			if hidden[gatewayID] {
+				continue
+			}
+			out = append(out, map[string]any{
+				"slug":              gatewayID,
+				"display_name":      id,
+				"description":       "自定义 API · " + p.Name,
+				"base_instructions": codexInstructions(id, gatewayID),
+				// Providers declare no reasoning levels; claiming them would
+				// let a user pick (deep) on a model that ignores the parameter.
+				"supported_reasoning_levels":   []map[string]any{{"effort": "medium", "description": "默认"}},
+				"default_reasoning_level":      "medium",
+				"shell_type":                   "unified_exec",
+				"support_verbosity":            false,
+				"truncation_policy":            map[string]any{"mode": "tokens", "limit": 10000},
+				"experimental_supported_tools": []string{},
+				"input_modalities":             []string{"text"},
+				"visibility":                   "list",
+				"supported_in_api":             true,
+				"priority":                     5,
+				"provider_id":                  "zen_gate",
+				"context_window":               131072,
+				"max_output_tokens":            32768,
+			})
+		}
+	}
 	writeJSON(w, 200, map[string]any{"models": out})
+}
+
+// codexInstructions is the system preamble Codex bakes into every model it
+// loads. One wording for both free-lane and provider models: the coding-agent
+// contract does not change with the source.
+func codexInstructions(name, model string) string {
+	return fmt.Sprintf("You are %s (model id: %s), a coding agent serving the user's Codex app through the Zen Gate local gateway. Work toward the user's goal with the available tools and verify your changes. Always reply in the same language as the user's latest message — when the user writes Chinese, reply in Simplified Chinese. Be concise.", name, model)
 }
 
 // resolveEffort maps a requested model id onto an effort level: an explicit
