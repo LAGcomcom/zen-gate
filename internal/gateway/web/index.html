@@ -1498,40 +1498,140 @@ function renderRecent(recent){
     }).join("") + '</table>';
 }
 
+const LOG_CATS = [["access","请求"],["upstream","上游尝试"],["content","内容摘要"],["routing","路由"],
+  ["admin","配置"],["probe","探测"],["lifecycle","运行"]];
+const LOG_INP = 'background:var(--panel-2);border:1px solid var(--hairline);color:var(--ink);'
+  + 'border-radius:6px;padding:6px 9px;font-family:var(--mono);font-size:12px';
 let logLevel = "";
+let logDay = "";
+let logCat = "";
+let logQ = "";
+let logFilePick = "";
+let logKeepPick = "";
+let logDaysKey = "";
 let logTimer = null;
 
 async function renderLogs(){
   const el = $("#page-logs");
   if(!el) return;
   if(!el.dataset.init){
-    el.innerHTML = '<h2 class="pt">日志 <span class="sub">内存 ring 最近 1000 条 · 文件按日切割（保留 7 天）</span></h2>'
-      + '<div class="card"><div class="row" style="margin-bottom:8px">'
-      + '<div class="seg" id="log-levels">'
-      + [["","全部"],["info","Info"],["warn","Warn"],["error","Error"]].map(([v,t])=>
+    el.innerHTML = '<h2 class="pt">日志 <span class="sub" id="log-sub">分类开关即时生效</span></h2>'
+      + '<div class="card">'
+      + '<div class="row" id="log-cats" style="row-gap:6px"></div>'
+      + '<div class="row" style="margin-top:12px;align-items:center;gap:10px;row-gap:8px">'
+      +   '<span class="dim" style="font-size:12px">显示</span>'
+      +   '<div class="seg" id="log-levels">'
+      +   [["","全部"],["debug","Debug"],["info","Info"],["warn","Warn"],["error","Error"]].map(([v,t])=>
           '<button data-l="'+v+'" class="'+(logLevel===v?"on":"")+'">'+t+'</button>').join("")
-      + '</div><span class="muted" style="font-size:12px">每 5 秒自动刷新</span></div>'
-      + '<pre id="log-view" style="max-height:60vh; overflow:auto"></pre></div>';
+      +   '</div>'
+      +   '<span class="dim" style="font-size:12px">来源</span>'
+      +   '<select id="log-day" style="'+LOG_INP+';width:150px"></select>'
+      +   '<span class="dim" style="font-size:12px">只看</span>'
+      +   '<select id="log-cat" style="'+LOG_INP+';width:120px">'
+      +     '<option value="">全部分类</option>'
+      +     LOG_CATS.map(([k,label])=>'<option value="'+k+'">'+label+'</option>').join("")
+      +   '</select>'
+      +   '<input id="log-q" style="'+LOG_INP+';width:230px" placeholder="按请求 id 或关键字过滤">'
+      +   '<button class="ghost" id="log-dl">下载</button>'
+      +   '<span class="muted" style="font-size:11.5px" id="log-count"></span>'
+      + '</div>'
+      + '<div class="row" style="margin-top:10px;align-items:center;gap:10px;row-gap:8px">'
+      +   '<span class="dim" style="font-size:12px">写入文件</span>'
+      +   '<div class="seg" id="log-file-levels">'
+      +   [["debug","Debug"],["info","Info"],["warn","Warn"],["error","Error"]].map(([v,t])=>
+          '<button data-f="'+v+'">'+t+'</button>').join("")
+      +   '</div>'
+      +   '<label class="dim" style="font-size:12px">保留天数 <input type="number" id="log-keep" style="'+LOG_INP+';width:64px" min="1" max="365"></label>'
+      +   '<button class="act" id="log-save">保存</button>'
+      +   '<span class="muted" style="font-size:11.5px">「显示」只影响这一屏；「写入文件」决定日志文件里留下什么。</span>'
+      + '</div>'
+      + '<pre id="log-view" style="max-height:60vh; overflow:auto; margin-top:10px"></pre></div>';
     el.dataset.init = "1";
     el.querySelector("#log-levels").querySelectorAll("button").forEach(b=>b.onclick=()=>{
       logLevel=b.dataset.l;
       el.querySelectorAll("#log-levels button").forEach(x=>x.classList.toggle("on", x===b));
       renderLogs();
     });
+    el.querySelector("#log-file-levels").querySelectorAll("button").forEach(b=>b.onclick=()=>{
+      logFilePick = b.dataset.f;
+      el.querySelectorAll("#log-file-levels button").forEach(x=>x.classList.toggle("on", x===b));
+    });
+    el.querySelector("#log-day").onchange = e => { logDay = e.target.value; renderLogs(); };
+    el.querySelector("#log-cat").onchange = e => { logCat = e.target.value; renderLogs(); };
+    const q = el.querySelector("#log-q");
+    q.onchange = () => { logQ = q.value.trim(); renderLogs(); };
+    q.onkeydown = e => { if(e.key==="Enter"){ logQ = q.value.trim(); renderLogs(); } };
+    el.querySelector("#log-dl").onclick = () => { window.location.href = "/admin/api/logs/download" + logQuery(); };
+    el.querySelector("#log-save").onclick = async () => {
+      const on = el.querySelector("#log-file-levels button.on");
+      const keep = parseInt(el.querySelector("#log-keep").value) || undefined;
+      const j = await api("/settings", { logLevel: on ? on.dataset.f : "debug", logKeepDays: keep });
+      if(j){ logFilePick = ""; logKeepPick = ""; toast("日志设置已保存"); refresh(); }
+    };
   }
+
+  const st = (STATE && STATE.settings) || {};
+  const cats = st.logCategories || {};
+  const box = el.querySelector("#log-cats");
+  box.innerHTML = '<span class="dim" style="font-size:12px;margin-right:2px">记录开关</span>'
+    + LOG_CATS.map(([k,label])=>'<button class="chip'+(cats[k]?" on":"")+'" data-c="'+k+'">'
+        + '<span class="dotc" style="background:'+(cats[k]?"var(--accent)":"var(--ink-mute)")+'"></span>'+label
+        + '</button>').join("")
+    + '<span class="chip" style="cursor:default;opacity:.75">未分类信息 · 始终记录</span>';
+  box.querySelectorAll(".chip[data-c]").forEach(b=>b.onclick=async ()=>{
+    const next = {};
+    LOG_CATS.forEach(([k])=>{ next[k] = !!cats[k]; });
+    next[b.dataset.c] = !cats[b.dataset.c];
+    const j = await api("/settings", { logCategories: next });
+    if(j){ toast((next[b.dataset.c]?"已开始记录 ":"已停止记录 ")+b.textContent.trim()); refresh(); }
+  });
+  const keep = el.querySelector("#log-keep");
+  if(document.activeElement !== keep) keep.value = logKeepPick || st.logKeepDays || "";
+  keep.oninput = () => { logKeepPick = keep.value; };
+  const fl = el.querySelector("#log-file-levels");
+  const fileLevel = logFilePick || st.logLevel || "debug";
+  fl.querySelectorAll("button").forEach(b=>b.classList.toggle("on", b.dataset.f===fileLevel));
+  el.querySelector("#log-sub").textContent = "分类开关即时生效 · 文件保留 " + (st.logKeepDays||7) + " 天";
+  initSegs();
+
   try {
-    const j = await fetch("/admin/api/logs?level="+encodeURIComponent(logLevel)+"&limit=300");
+    const j = await fetch("/admin/api/logs" + logQuery());
     const data = await j.json();
     const view = el.querySelector("#log-view");
     if(!view) return;
+    const days = data.days || [];
+    const key = days.join(",");
+    if(key !== logDaysKey){
+      logDaysKey = key;
+      if(logDay && days.indexOf(logDay) < 0) logDay = "";
+      el.querySelector("#log-day").innerHTML = '<option value="">实时（内存）</option>'
+        + days.map(d=>'<option value="'+d+'"'+(d===logDay?" selected":"")+'>'+d+'</option>').join("");
+      el.querySelector("#log-day").value = logDay;
+    }
     const lines = (data.entries||[]).map(e=>{
       const c = {INFO:"var(--ink-dim)",WARN:"var(--warn)",ERROR:"var(--bad)"}[e.level]||"var(--ink-dim)";
-      return '<div style="color:'+c+'">['+String(e.at).slice(11,19)+'] ['+e.level+'] '+esc(e.msg)+'</div>';
+      return '<div style="color:'+c+'">['+String(e.at).slice(11,19)+'] ['+e.level+']'
+        + (e.cat ? ' <span style="color:var(--ink-mute)">['+e.cat+']</span> ' : ' ') + esc(e.msg)+'</div>';
     }).join("");
     view.innerHTML = lines || '<span class="muted">暂无日志。</span>';
+    el.querySelector("#log-count").textContent = (data.entries||[]).length + " 条"
+      + (logDay ? "（来自 " + logDay + " 的文件）" : "");
+    initSegs();
   } catch(e) {
-    view.innerHTML = '<span class="muted">加载失败。</span>';
+    const view = el.querySelector("#log-view");
+    if(view) view.innerHTML = '<span class="muted">加载失败。</span>';
   }
+}
+
+// logQuery is the filter the panel shows, so 下载 exports exactly what you see.
+function logQuery(){
+  const p = new URLSearchParams();
+  if(logCat) p.set("cat", logCat);
+  if(logLevel) p.set("level", logLevel);
+  if(logDay) p.set("day", logDay);
+  if(logQ) p.set("q", logQ);
+  p.set("limit", "500");
+  return "?"+p.toString();
 }
 
 /* ---- 设置 ---- */

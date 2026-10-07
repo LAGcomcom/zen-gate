@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"zen-gate/internal/lane"
+	"zen-gate/internal/logx"
 	"zen-gate/internal/relay"
 	"zen-gate/internal/store"
 )
@@ -116,12 +117,12 @@ func (s *Server) providerFallback(ctx context.Context, picks []fallbackPick, uni
 			Provider: pick.p, Model: pick.model, Messages: unified,
 			Tools: tools, MaxTokens: maxTokens, Agent: agent,
 		}, emit)
-		s.recordRelay(pick.p, pick.model, agent, finish != "", usage, 0, finish, uerr)
+		s.recordRelay(ctx, pick.p, pick.model, agent, finish != "", usage, 0, finish, uerr)
 		if uerr == nil {
-			s.logInfof("免费车道耗尽，已回落自定义 API: %s/%s", pick.p.ID, pick.model)
+			s.logCat(logx.CatRouting, "info", "免费车道耗尽，已回落自定义 API: %s/%s", pick.p.ID, pick.model)
 			return usage, finish, pick.p.ID + "/" + pick.model, nil, true
 		}
-		s.logInfof("回落候选 %s/%s 失败: %s", pick.p.ID, pick.model, uerr.Message)
+		s.logCat(logx.CatRouting, "warn", "回落候选 %s/%s 失败: %s", pick.p.ID, pick.model, uerr.Message)
 	}
 	return lane.Usage{}, "", "", nil, false
 }

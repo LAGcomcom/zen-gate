@@ -67,35 +67,35 @@ type Subscription struct {
 }
 
 type Config struct {
-	SchemaVersion        int    `json:"schemaVersion"`
-	Port                 int    `json:"port"`
-	MainKey              string `json:"mainKey"`
+	SchemaVersion        int               `json:"schemaVersion"`
+	Port                 int               `json:"port"`
+	MainKey              string            `json:"mainKey"`
 	AgentKeys            map[string]string `json:"agentKeys"`
-	DefaultMaxTokens     int    `json:"defaultMaxTokens"`
-	DefaultEffort        string `json:"defaultEffort"`
-	ProbeIntervalMinutes int    `json:"probeIntervalMinutes"`
-	ExposeRegion         bool   `json:"exposeRegion"`
+	DefaultMaxTokens     int               `json:"defaultMaxTokens"`
+	DefaultEffort        string            `json:"defaultEffort"`
+	ProbeIntervalMinutes int               `json:"probeIntervalMinutes"`
+	ExposeRegion         bool              `json:"exposeRegion"`
 	EnabledAgents        map[string]bool   `json:"enabledAgents"`
-	CloseToTray          bool   `json:"closeToTray"`
-	Notifications        bool   `json:"notifications"`
-	UpdateFeed           string `json:"updateFeed"`
-	AnnouncementFeed     string `json:"announcementFeed,omitempty"`
+	CloseToTray          bool              `json:"closeToTray"`
+	Notifications        bool              `json:"notifications"`
+	UpdateFeed           string            `json:"updateFeed"`
+	AnnouncementFeed     string            `json:"announcementFeed,omitempty"`
 	// SeenAnnouncements lists dismissed announcement ids so the dashboard can
 	// mark them 已读; the admin handler caps the ring.
-	SeenAnnouncements    []string `json:"seenAnnouncements,omitempty"`
-	LastVersion          string `json:"lastVersion,omitempty"`
-	StatsServerURL       string `json:"statsServerUrl,omitempty"`
-	InstallID            string `json:"installId,omitempty"`
-	ProxyMode            string `json:"proxyMode"` // env | system | direct | custom | rotate
-	ProxyURL             string `json:"proxyUrl,omitempty"`
+	SeenAnnouncements []string `json:"seenAnnouncements,omitempty"`
+	LastVersion       string   `json:"lastVersion,omitempty"`
+	StatsServerURL    string   `json:"statsServerUrl,omitempty"`
+	InstallID         string   `json:"installId,omitempty"`
+	ProxyMode         string   `json:"proxyMode"` // env | system | direct | custom | rotate
+	ProxyURL          string   `json:"proxyUrl,omitempty"`
 	// SubsEnabled turns on the sing-box sidecar + per-request egress rotation
 	// over the subscription nodes; SingBoxPath optionally points at a
 	// user-provided sing-box.exe (empty = the auto-downloaded one).
-	SubsEnabled    bool           `json:"subsEnabled,omitempty"`
-	Subscriptions  []Subscription `json:"subscriptions,omitempty"`
-	SingBoxPath    string         `json:"singBoxPath,omitempty"`
-	FailoverEnabled      bool   `json:"failoverEnabled"`
-	FailoverMax          int    `json:"failoverMax"`
+	SubsEnabled     bool           `json:"subsEnabled,omitempty"`
+	Subscriptions   []Subscription `json:"subscriptions,omitempty"`
+	SingBoxPath     string         `json:"singBoxPath,omitempty"`
+	FailoverEnabled bool           `json:"failoverEnabled"`
+	FailoverMax     int            `json:"failoverMax"`
 	// SmartRouting is the multimodal-routing master switch: on = failover
 	// candidates are filtered by the request's modalities and ordered by the
 	// routing strategy; off = the exact pre-routing behaviour (catalog order,
@@ -113,12 +113,21 @@ type Config struct {
 	// every custom-provider model id's capabilities (vision/audio/file) into
 	// tags.json.
 	AutoTagEnabled bool `json:"autoTagEnabled"`
-	Providers            []Provider `json:"providers,omitempty"`
+	// LogCategories is the per-class logging switch set. A partial or absent
+	// map merges onto logx.DefaultCategories(), so an upgraded config never
+	// turns the high-volume classes on by itself.
+	LogCategories map[string]bool `json:"logCategories,omitempty"`
+	// LogLevel is the minimum level that reaches the log files; "" means debug,
+	// i.e. everything. The live viewer is never filtered by it.
+	LogLevel string `json:"logLevel,omitempty"`
+	// LogKeepDays is how many daily log files are retained; 0 = logx default.
+	LogKeepDays int        `json:"logKeepDays,omitempty"`
+	Providers   []Provider `json:"providers,omitempty"`
 	// HiddenModels lists gateway model ids the user unchecked on the 模型 page:
 	// they stay servable if requested explicitly but disappear from agent
 	// pickers and /v1/models.
-	HiddenModels         []string   `json:"hiddenModels,omitempty"`
-	Window               WindowState `json:"window"`
+	HiddenModels []string    `json:"hiddenModels,omitempty"`
+	Window       WindowState `json:"window"`
 }
 
 // DayStat aggregates one calendar day.
@@ -134,9 +143,9 @@ type DayStat struct {
 
 // Stats is the persisted usage accounting.
 type Stats struct {
-	Version int                   `json:"version"`
-	Days    map[string]*DayStat   `json:"days"`
-	Recent  []lane.CallRecord     `json:"recent,omitempty"`
+	Version int                 `json:"version"`
+	Days    map[string]*DayStat `json:"days"`
+	Recent  []lane.CallRecord   `json:"recent,omitempty"`
 	mu      sync.Mutex
 	dirty   bool
 }

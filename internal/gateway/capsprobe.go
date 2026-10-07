@@ -9,13 +9,14 @@ package gateway
 import (
 	"bytes"
 	"context"
-	"encoding/binary"
 	"encoding/base64"
+	"encoding/binary"
 	"fmt"
 	"strings"
 	"time"
 
 	"zen-gate/internal/lane"
+	"zen-gate/internal/logx"
 	"zen-gate/internal/relay"
 	"zen-gate/internal/store"
 )
@@ -33,8 +34,8 @@ func tinyWAV() []byte {
 	_ = binary.Write(buf, binary.LittleEndian, uint32(36+dataLen))
 	buf.WriteString("WAVEfmt ")
 	_ = binary.Write(buf, binary.LittleEndian, uint32(16))
-	_ = binary.Write(buf, binary.LittleEndian, uint16(1))  // PCM
-	_ = binary.Write(buf, binary.LittleEndian, uint16(1))  // mono
+	_ = binary.Write(buf, binary.LittleEndian, uint16(1)) // PCM
+	_ = binary.Write(buf, binary.LittleEndian, uint16(1)) // mono
 	_ = binary.Write(buf, binary.LittleEndian, uint32(sampleRate))
 	_ = binary.Write(buf, binary.LittleEndian, uint32(sampleRate*2))
 	_ = binary.Write(buf, binary.LittleEndian, uint16(2))  // block align
@@ -120,7 +121,7 @@ func (s *Server) probeCapabilities(ctx context.Context, p *store.Provider, model
 	}
 	for _, step := range steps {
 		verdicts[step.name] = probeOneModality(ctx, p, model, step.part)
-		s.logInfof("能力实测 %s [%s] → %s", model, step.name, verdicts[step.name])
+		s.logCat(logx.CatProbe, "info", "能力实测 %s [%s] → %s", model, step.name, verdicts[step.name])
 	}
 	for _, v := range verdicts {
 		if v == verdictUnknown {

@@ -8,8 +8,8 @@ import (
 	"errors"
 	io "io"
 	"net"
-	neturl "net/url"
 	"net/http"
+	neturl "net/url"
 	"regexp"
 	"strconv"
 	"strings"
@@ -19,8 +19,8 @@ import (
 )
 
 var (
-	regionRe  = regexp.MustCompile(`(?i)RegionError|not available in your country|region.?block`)
-	quotaRe   = regexp.MustCompile(`(?i)FreeUsageLimitError|usage limit|rate limit`)
+	regionRe   = regexp.MustCompile(`(?i)RegionError|not available in your country|region.?block`)
+	quotaRe    = regexp.MustCompile(`(?i)FreeUsageLimitError|usage limit|rate limit`)
 	modelErrRe = regexp.MustCompile(`(?i)ModelError|model is unavailable|model is not supported|not supported|Endpoint is unavailable`)
 )
 
@@ -161,6 +161,7 @@ func PostStreamed(ctx context.Context, path string, body map[string]any, session
 	}
 	defer resp.Body.Close()
 
+	upstreamRID := headerRID(resp.Header)
 	retryAfter := 0
 	if ra := resp.Header.Get("retry-after"); ra != "" {
 		if n, perr := strconv.Atoi(ra); perr == nil && n > 0 && n < 3600 {
@@ -177,22 +178,22 @@ func PostStreamed(ctx context.Context, path string, body map[string]any, session
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		rest, _ := io.ReadAll(io.LimitReader(pump, 1<<20))
-		return nil, ClassifyFailure(resp.StatusCode, string(head)+string(rest), retryAfter)
+		return nil, withRID(ClassifyFailure(resp.StatusCode, string(head)+string(rest), retryAfter), upstreamRID)
 	}
 
 	switch sniffBody(head) {
 	case "empty":
-		return nil, &UpstreamError{Code: CodeEmpty, Message: "empty response body"}
+		return nil, &UpstreamError{Code: CodeEmpty, Message: "empty response body", UpstreamRID: upstreamRID}
 	case "json", "unknown":
 		rest, _ := io.ReadAll(io.LimitReader(pump, 8<<20))
 		full := string(head) + string(rest)
 		var parsed any
 		if jerr := json.Unmarshal([]byte(full), &parsed); jerr != nil {
-			return nil, &UpstreamError{Code: CodeServer, Message: truncate(full, 300)}
+			return nil, &UpstreamError{Code: CodeServer, Message: truncate(full, 300), UpstreamRID: upstreamRID}
 		}
 		if m, ok := parsed.(map[string]any); ok {
 			if _, has := m["error"]; has {
-				return nil, ClassifyFailure(resp.StatusCode, jsonString(m["error"]), retryAfter)
+				return nil, withRID(ClassifyFailure(resp.StatusCode, jsonString(m["error"]), retryAfter), upstreamRID)
 			}
 		}
 		if uerr := onData([]byte(full)); uerr != nil {
@@ -209,14 +210,32 @@ func PostStreamed(ctx context.Context, path string, body map[string]any, session
 	usage, err := readSSE(pump, onData)
 	if err != nil {
 		if ctx.Err() != nil {
-			return usage, &UpstreamError{Code: CodeAborted, Message: "cancelled"}
+			return usage, &UpstreamError{Code: CodeAborted, Message: "cancelled", UpstreamRID: upstreamRID}
 		}
 		if ue, ok := err.(*UpstreamError); ok {
-			return usage, ue
+			return usage, withRID(ue, upstreamRID)
 		}
-		return usage, &UpstreamError{Code: CodeTransport, Message: err.Error()}
+		return usage, &UpstreamError{Code: CodeTransport, Message: err.Error(), UpstreamRID: upstreamRID}
 	}
 	return usage, nil
+}
+
+// headerRID reads the provider's trace id under either spelling it uses.
+func headerRID(h http.Header) string {
+	for _, key := range []string{"X-Request-Id", "Request-Id"} {
+		if v := strings.TrimSpace(h.Get(key)); v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
+// withRID stamps the provider trace id onto an error unless it already has one.
+func withRID(e *UpstreamError, rid string) *UpstreamError {
+	if e != nil && e.UpstreamRID == "" {
+		e.UpstreamRID = rid
+	}
+	return e
 }
 
 // GetJSON performs a fingerprinted GET (model listing).

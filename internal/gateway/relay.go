@@ -1,11 +1,13 @@
 package gateway
 
 import (
+	"context"
 	"net/http"
 	"strings"
 	"time"
 
 	"zen-gate/internal/lane"
+	"zen-gate/internal/logx"
 	"zen-gate/internal/relay"
 	"zen-gate/internal/store"
 )
@@ -46,12 +48,17 @@ func (s *Server) relayError(w http.ResponseWriter, anthropic bool, uerr *lane.Up
 }
 
 // recordRelay folds one relayed turn into the usage stats under its
-// namespaced model id, so the heatmap and per-model tables cover providers too.
-func (s *Server) recordRelay(p *store.Provider, upstream, agent string, ok bool, usage lane.Usage, ttftMs int64, finish string, err *lane.UpstreamError) {
+// namespaced model id, so the heatmap and per-model tables cover providers too,
+// and reports it as one upstream attempt of the request it served.
+func (s *Server) recordRelay(ctx context.Context, p *store.Provider, upstream, agent string, ok bool, usage lane.Usage, ttftMs int64, finish string, err *lane.UpstreamError) {
 	rec := lane.CallRecord{
 		Model: p.ID + "/" + upstream, Agent: agent, Ok: ok && err == nil,
 		Input: usage.Input, Output: usage.Output, Reasoning: usage.Reasoning,
 		CacheRead: usage.CacheRead, TTFTMs: ttftMs, At: time.Now().UnixMilli(),
+		Trace: lane.TraceFrom(ctx),
+	}
+	if err != nil {
+		rec.ErrCode, rec.UpstreamRID = err.Code, err.UpstreamRID
 	}
 	if err == nil && usage.TotalTokens == 0 && ok {
 		rec.NoUsage = true
@@ -60,6 +67,7 @@ func (s *Server) recordRelay(p *store.Provider, upstream, agent string, ok bool,
 		rec.Truncated = true
 	}
 	s.Store.Record(rec)
+	s.NoteCall(rec)
 }
 
 // relayChatCompletions serves an OpenAI chat turn from a provider.
@@ -93,7 +101,7 @@ func (s *Server) relayChatCompletions(w http.ResponseWriter, r *http.Request, re
 		var text, reasoning strings.Builder
 		var toolCalls []map[string]any
 		usage, finish, uerr, ttft := doRelay(func(c lane.Chunk) { emit.consume(c, &text, &reasoning, &toolCalls) })
-		s.recordRelay(p, upstream, agent, finish != "", usage, ttft, finish, uerr)
+		s.recordRelay(ctx, p, upstream, agent, finish != "", usage, ttft, finish, uerr)
 		if uerr != nil && text.Len() == 0 && len(toolCalls) == 0 {
 			s.relayError(w, false, uerr)
 			return
@@ -137,7 +145,7 @@ func (s *Server) relayChatCompletions(w http.ResponseWriter, r *http.Request, re
 			sendChunk(d.delta, nil)
 		}
 	})
-	s.recordRelay(p, upstream, agent, finish != "", usage, ttft, finish, uerr)
+	s.recordRelay(ctx, p, upstream, agent, finish != "", usage, ttft, finish, uerr)
 	if uerr != nil && !emit.hasAny() {
 		s.relayError(w, false, uerr)
 		return
@@ -182,7 +190,7 @@ func (s *Server) relayResponses(w http.ResponseWriter, r *http.Request, req resp
 		}
 		collector.consume(c)
 	})
-	s.recordRelay(p, upstream, agent, finish != "", usage, firstAt, finish, uerr)
+	s.recordRelay(ctx, p, upstream, agent, finish != "", usage, firstAt, finish, uerr)
 	outcome := lane.Outcome{Usage: usage, Finish: finish, ServedModel: served}
 	if uerr != nil && !collector.hasAnything() {
 		s.relayError(w, false, uerr)
@@ -225,7 +233,7 @@ func (s *Server) relayAnthropicMessages(w http.ResponseWriter, r *http.Request, 
 	if !req.Stream {
 		collector := newResponsesCollector()
 		usage, finish, uerr, ttft := doRelay(collector.consume)
-		s.recordRelay(p, upstream, agent, finish != "", usage, ttft, finish, uerr)
+		s.recordRelay(ctx, p, upstream, agent, finish != "", usage, ttft, finish, uerr)
 		outcome := lane.Outcome{Usage: usage, Finish: finish, ServedModel: served}
 		if uerr != nil && !collector.hasAnything() {
 			s.relayError(w, true, uerr)
@@ -248,7 +256,7 @@ func (s *Server) relayAnthropicMessages(w http.ResponseWriter, r *http.Request, 
 		"content": []any{}, "stop_sequence": nil, "stop_reason": nil,
 		"usage": map[string]any{"input_tokens": 0, "output_tokens": 0}}})
 	usage, finish, uerr, ttft := doRelay(st.consume)
-	s.recordRelay(p, upstream, agent, finish != "", usage, ttft, finish, uerr)
+	s.recordRelay(ctx, p, upstream, agent, finish != "", usage, ttft, finish, uerr)
 	stop := "end_turn"
 	switch {
 	case finish == lane.FinishToolCalls:
@@ -437,7 +445,7 @@ func (s *Server) adminProviderSave(w http.ResponseWriter, r *http.Request) {
 			if s.tagger != nil && len(p.Models) > 0 {
 				s.tagger.Enqueue(p.Models...)
 			}
-			s.logInfof("自定义供应商已更新: %s (%s)", p.Name, p.ID)
+			s.logCat(logx.CatAdmin, "info", "自定义供应商已更新: %s (%s)", p.Name, p.ID)
 			writeJSON(w, 200, map[string]any{"ok": true, "id": p.ID})
 			return
 		}
@@ -457,7 +465,7 @@ func (s *Server) adminProviderSave(w http.ResponseWriter, r *http.Request) {
 	if s.tagger != nil && len(p.Models) > 0 {
 		s.tagger.Enqueue(p.Models...)
 	}
-	s.logInfof("自定义供应商已添加: %s (%s, %d 模型)", p.Name, p.ID, len(p.Models))
+	s.logCat(logx.CatAdmin, "info", "自定义供应商已添加: %s (%s, %d 模型)", p.Name, p.ID, len(p.Models))
 	writeJSON(w, 200, map[string]any{"ok": true, "id": p.ID})
 }
 
@@ -479,7 +487,7 @@ func (s *Server) adminProviderDelete(w http.ResponseWriter, r *http.Request) {
 				writeJSON(w, 500, map[string]any{"ok": false, "error": err.Error()})
 				return
 			}
-			s.logInfof("自定义供应商已删除: %s (%s)", name, in.ID)
+			s.logCat(logx.CatAdmin, "info", "自定义供应商已删除: %s (%s)", name, in.ID)
 			writeJSON(w, 200, map[string]any{"ok": true})
 			return
 		}
@@ -532,7 +540,7 @@ func (s *Server) adminProviderModels(w http.ResponseWriter, r *http.Request) {
 				if s.tagger != nil && len(p.Models) > 0 {
 					s.tagger.Enqueue(p.Models...)
 				}
-				s.logInfof("自定义供应商模型已刷新: %s (保留 %d 个勾选)", p.Name, len(p.Models))
+				s.logCat(logx.CatAdmin, "info", "自定义供应商模型已刷新: %s (保留 %d 个勾选)", p.Name, len(p.Models))
 			}
 			writeJSON(w, 200, map[string]any{"ok": true, "models": models, "saved": shouldSave,
 				"recommended": relay.RecommendedModels("", p.BaseURL, models)})
@@ -554,10 +562,10 @@ func (s *Server) adminProviderModels(w http.ResponseWriter, r *http.Request) {
 		"recommended": relay.RecommendedModels("", in.BaseURL, models)})
 }
 
-// logInfof logs through the injected logger when present.
-func (s *Server) logInfof(format string, args ...any) {
+// logCat writes one classified line through the injected logger when present.
+func (s *Server) logCat(cat, level, format string, args ...any) {
 	if s.logger != nil {
-		s.logger.Infof(format, args...)
+		s.logger.Logf(cat, level, format, args...)
 	}
 }
 

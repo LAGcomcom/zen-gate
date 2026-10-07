@@ -47,12 +47,12 @@ type Server struct {
 	srv      *http.Server
 	addr     atomic.Value // string
 	// logger is injected by main; nil-safe helpers fall back to empty.
-	logger interface {
-		Tail(minLevel string, limit int) []logx.Entry
-		Infof(format string, args ...interface{})
-		Warnf(format string, args ...interface{})
-		Errorf(format string, args ...interface{})
-	}
+	logger logSink
+	// audits maps a live request's correlation id to its attempt tally so the
+	// per-attempt reporters (the lane callback and the relay recorder) can feed
+	// the one access line written when the response completes.
+	auditMu         sync.Mutex
+	audits          map[string]*turnAudit
 	autostart       func() bool
 	updateAvailable bool
 	updateVersion   string
@@ -115,14 +115,95 @@ func (s *Server) SetAnnouncementPull(fn func()) { s.announcementPull = fn }
 // SetUpdateCheck wires the on-demand release check.
 func (s *Server) SetUpdateCheck(fn func() (bool, string)) { s.updateCheck = fn }
 
-// SetLogger wires the logx logger (as a structural interface, no import cycle).
-func (s *Server) SetLogger(l interface {
-	Tail(minLevel string, limit int) []logx.Entry
-	Infof(format string, args ...interface{})
-	Warnf(format string, args ...interface{})
-	Errorf(format string, args ...interface{})
-}) {
-	s.logger = l
+// logSink is the logging surface the gateway needs, injected by main as a
+// structural interface so logx stays free of an import cycle.
+type logSink interface {
+	Query(q logx.Query) []logx.Entry
+	Days() []string
+	Logf(cat, level, format string, args ...any)
+	Enabled(cat string) bool
+	SetCategories(on map[string]bool)
+	SetFileLevel(level string)
+	SetKeepDays(days int)
+	Debugf(format string, args ...any)
+	Infof(format string, args ...any)
+	Warnf(format string, args ...any)
+	Errorf(format string, args ...any)
+}
+
+// SetLogger wires the logx logger.
+func (s *Server) SetLogger(l logSink) { s.logger = l }
+
+// ApplyLogSettings installs the persisted logging switches onto the live
+// logger and records what is now kept — the boot line and every settings
+// change need one audit trail, because a silenced class is invisible.
+func (s *Server) ApplyLogSettings(cfg *store.Config) {
+	if s.logger == nil {
+		return
+	}
+	cats := logx.EffectiveCategories(cfg.LogCategories)
+	s.logger.SetCategories(cats)
+	s.logger.SetFileLevel(cfg.LogLevel)
+	s.logger.SetKeepDays(cfg.LogKeepDays)
+	s.logCat(logx.CatLifecycle, "info", "日志：记录 %s，文件级别 %s，保留 %d 天",
+		strings.Join(enabledCats(cats), ","), effectiveLogLevel(cfg.LogLevel), effectiveKeepDays(cfg.LogKeepDays))
+}
+
+// enabledCats lists the classes that record, sorted so the line is stable.
+func enabledCats(cats map[string]bool) []string {
+	out := make([]string, 0, len(cats))
+	for k, v := range cats {
+		if v {
+			out = append(out, k)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// logSettingsView is the effective logging state, for the dashboard chips.
+func logSettingsView(cfg *store.Config) map[string]any {
+	return map[string]any{
+		"logCategories": logx.EffectiveCategories(cfg.LogCategories),
+		"logLevel":      effectiveLogLevel(cfg.LogLevel),
+		"logKeepDays":   effectiveKeepDays(cfg.LogKeepDays),
+	}
+}
+
+func effectiveLogLevel(level string) string {
+	if strings.TrimSpace(level) == "" {
+		return logx.DefaultFileLevel
+	}
+	return strings.ToLower(strings.TrimSpace(level))
+}
+
+func effectiveKeepDays(days int) int {
+	if days <= 0 {
+		return logx.DefaultKeepDays
+	}
+	return days
+}
+
+// trackAudit registers a live request's tally under its correlation id.
+func (s *Server) trackAudit(rid string, a *turnAudit) {
+	s.auditMu.Lock()
+	if s.audits == nil {
+		s.audits = map[string]*turnAudit{}
+	}
+	s.audits[rid] = a
+	s.auditMu.Unlock()
+}
+
+func (s *Server) forgetAudit(rid string) {
+	s.auditMu.Lock()
+	delete(s.audits, rid)
+	s.auditMu.Unlock()
+}
+
+func (s *Server) auditFor(rid string) *turnAudit {
+	s.auditMu.Lock()
+	defer s.auditMu.Unlock()
+	return s.audits[rid]
 }
 
 // SetAutostartState wires the registry-backed autostart state reader.
@@ -144,6 +225,14 @@ func (s *Server) autostartState() bool {
 // New builds a server; Handler is immediately usable (for tests).
 func New(l *lane.Lane, st *store.Store) *Server {
 	s := &Server{Lane: l, Store: st}
+	// The lane reports every physical attempt here — including the failovers a
+	// client never sees — so both the usage stats and the per-request log lines
+	// are fed from the server itself.
+	l.OnCall = func(rec lane.CallRecord) {
+		st.Record(rec)
+		_ = st.FlushStats()
+		s.NoteCall(rec)
+	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", s.safeRoute)
 	s.mux = mux
@@ -212,20 +301,11 @@ func (s *Server) route(w http.ResponseWriter, r *http.Request) {
 	case path == "/v1/codex-catalog" && r.Method == http.MethodGet:
 		s.handleCodexCatalog(w, r)
 	case path == "/v1/chat/completions" && r.Method == http.MethodPost:
-		if !s.authorized(w, r) {
-			return
-		}
-		s.handleChatCompletions(w, r)
+		s.serveTurn(w, r, "chat", s.handleChatCompletions)
 	case path == "/v1/responses" && r.Method == http.MethodPost:
-		if !s.authorized(w, r) {
-			return
-		}
-		s.handleResponses(w, r)
+		s.serveTurn(w, r, "responses", s.handleResponses)
 	case path == "/v1/messages" && r.Method == http.MethodPost:
-		if !s.authorized(w, r) {
-			return
-		}
-		s.handleAnthropicMessages(w, r)
+		s.serveTurn(w, r, "messages", s.handleAnthropicMessages)
 	case path == "/favicon.png":
 		w.Header().Set("content-type", "image/png")
 		_, _ = w.Write(faviconPNG)
@@ -625,4 +705,33 @@ func randomID(prefix string) string {
 	b := make([]byte, 12)
 	_, _ = rand.Read(b)
 	return prefix + hex.EncodeToString(b)
+}
+
+// stampRequestID ties one logical client request to the log lines and the
+// upstream calls made for it. A client-supplied trace id wins (that is the only
+// way its logs and ours line up), and the id is echoed on the response before
+// any handler can write, so even a rejected request is greppable by id.
+// Returns r carrying the id, which the lane and relay reporters read back.
+func stampRequestID(w http.ResponseWriter, r *http.Request) *http.Request {
+	rid := ""
+	for _, h := range []string{"X-Request-Id", "X-Client-Request-Id"} {
+		if v := strings.TrimSpace(r.Header.Get(h)); v != "" {
+			rid = v
+			break
+		}
+	}
+	if rid == "" {
+		rid = randomID("zreq-")
+	}
+	w.Header().Set("x-zen-gate-request-id", rid)
+	return r.WithContext(lane.WithTrace(r.Context(), rid))
+}
+
+// requestID reads the correlation id stamped at the route; it mints one if a
+// handler is reached without stamping (direct calls from tests).
+func requestID(r *http.Request) string {
+	if rid := lane.TraceFrom(r.Context()); rid != "" {
+		return rid
+	}
+	return randomID("zreq-")
 }

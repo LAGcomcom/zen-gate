@@ -31,21 +31,28 @@ const recoveryInstruction = "The previous response was interrupted before its fi
 
 // CallRecord is emitted after every upstream request (physical, not logical).
 type CallRecord struct {
-	Model      string `json:"model"`
-	Agent      string `json:"agent,omitempty"`
-	Ok         bool   `json:"ok"`
-	Truncated  bool   `json:"truncated,omitempty"`
-	NoUsage    bool   `json:"noUsage,omitempty"`
-	Recovered  bool   `json:"recovered,omitempty"`
-	Input      int    `json:"input"`
-	Output     int    `json:"output"`
-	Reasoning  int    `json:"reasoning,omitempty"`
-	CacheRead  int    `json:"cacheRead,omitempty"`
-	TTFTMs     int64  `json:"ttftMs,omitempty"`
-	DecodeMs   int64  `json:"decodeMs,omitempty"`
-	DecodeTok  int    `json:"decodeTokens,omitempty"`
-	Effort     string `json:"effort,omitempty"`
-	At         int64  `json:"at"`
+	Model     string `json:"model"`
+	Agent     string `json:"agent,omitempty"`
+	Ok        bool   `json:"ok"`
+	Truncated bool   `json:"truncated,omitempty"`
+	NoUsage   bool   `json:"noUsage,omitempty"`
+	Recovered bool   `json:"recovered,omitempty"`
+	Input     int    `json:"input"`
+	Output    int    `json:"output"`
+	Reasoning int    `json:"reasoning,omitempty"`
+	CacheRead int    `json:"cacheRead,omitempty"`
+	TTFTMs    int64  `json:"ttftMs,omitempty"`
+	DecodeMs  int64  `json:"decodeMs,omitempty"`
+	DecodeTok int    `json:"decodeTokens,omitempty"`
+	Effort    string `json:"effort,omitempty"`
+	At        int64  `json:"at"`
+	// Trace is the gateway correlation id of the client request this attempt
+	// served; empty for calls made outside a request.
+	Trace string `json:"trace,omitempty"`
+	// ErrCode/UpstreamRID carry the failure class and the provider's own trace
+	// id, which is the only handle their support has on a failed turn.
+	ErrCode     string `json:"errCode,omitempty"`
+	UpstreamRID string `json:"upstreamRequestId,omitempty"`
 }
 
 // Lane orchestrates the free lane: catalog, availability, and completion calls.
@@ -63,10 +70,10 @@ type Lane struct {
 	ttft             TTFTSource
 	throttle         *ThrottleBook
 
-	probing        atomicFlag
-	lastProbeAt    time.Time
-	backoffRounds  int
-	nextProbeAfter time.Time
+	probing         atomicFlag
+	lastProbeAt     time.Time
+	backoffRounds   int
+	nextProbeAfter  time.Time
 	quotaWallActive bool
 	probingModel    string
 
@@ -650,9 +657,9 @@ func (l *Lane) attemptModel(ctx context.Context, req Request, model, effort stri
 		result.Usage = *usage
 	}
 	sawAny := result.SawText || result.SawToolCall || result.SawReasoning
-	l.record(CallRecord{Model: base, Ok: false, Effort: effort, Agent: req.Agent, At: time.Now().UnixMilli()}, result, err, firstAt)
 
 	if err != nil {
+		l.record(ctx, CallRecord{Model: base, Ok: false, Effort: effort, Agent: req.Agent, At: time.Now().UnixMilli()}, result, err, firstAt)
 		uerr := asUpstream(err)
 		if uerr.Code == CodeQuota {
 			l.MarkThrottled(base, uerr.RetryAfter)
@@ -661,7 +668,7 @@ func (l *Lane) attemptModel(ctx context.Context, req Request, model, effort stri
 	}
 	if result.SawFinish {
 		l.MarkOK(base)
-		l.record(CallRecord{Model: base, Ok: true, Effort: effort, Agent: req.Agent, At: time.Now().UnixMilli()}, result, nil, firstAt)
+		l.record(ctx, CallRecord{Model: base, Ok: true, Effort: effort, Agent: req.Agent, At: time.Now().UnixMilli()}, result, nil, firstAt)
 		return Outcome{Usage: result.Usage, Finish: result.Finish}, nil, true
 	}
 
@@ -670,13 +677,13 @@ func (l *Lane) attemptModel(ctx context.Context, req Request, model, effort stri
 	// would pay the same five minutes again.
 	elapsed := time.Since(start).Milliseconds()
 	if !canRecover(result, elapsed) {
-		l.record(CallRecord{Model: base, Ok: false, Truncated: true, Effort: effort, Agent: req.Agent, At: time.Now().UnixMilli()}, result, nil, firstAt)
+		l.record(ctx, CallRecord{Model: base, Ok: false, Truncated: true, Effort: effort, Agent: req.Agent, At: time.Now().UnixMilli()}, result, nil, firstAt)
 		return Outcome{Usage: result.Usage}, &UpstreamError{Code: CodeTransport, Message: "upstream closed the stream without a finish token"}, sawAny
 	}
 
 	recovBudget := min2(RecoveryMaxOutputTokens, budget-result.Usage.Output)
 	if recovBudget < 512 || !checkpointFits(messages, *entry, result.ReasoningText, recovBudget) {
-		l.record(CallRecord{Model: base, Ok: false, Truncated: true, Effort: effort, Agent: req.Agent, At: time.Now().UnixMilli()}, result, nil, firstAt)
+		l.record(ctx, CallRecord{Model: base, Ok: false, Truncated: true, Effort: effort, Agent: req.Agent, At: time.Now().UnixMilli()}, result, nil, firstAt)
 		return Outcome{Usage: result.Usage}, &UpstreamError{Code: CodeTransport, Message: "upstream cut a pure-reasoning turn; recovery does not fit the context"}, sawAny
 	}
 	recMsgs := append(append([]Message{}, messages...), Message{Role: RoleUser, Parts: []Part{
@@ -703,11 +710,11 @@ func (l *Lane) attemptModel(ctx context.Context, req Request, model, effort stri
 	if rerr == nil && recResult.SawFinish && recResult.Finish == FinishStop && recResult.SawText {
 		recResult.Usage.Merge(&result.Usage)
 		l.MarkOK(base)
-		l.record(CallRecord{Model: base, Ok: true, Recovered: true, Effort: effort, Agent: req.Agent, At: time.Now().UnixMilli()}, recResult, nil, firstAt)
+		l.record(ctx, CallRecord{Model: base, Ok: true, Recovered: true, Effort: effort, Agent: req.Agent, At: time.Now().UnixMilli()}, recResult, nil, firstAt)
 		return Outcome{Usage: recResult.Usage, Finish: recResult.Finish, Recovered: true}, nil, true
 	}
 	recResult.Usage.Merge(&result.Usage)
-	l.record(CallRecord{Model: base, Ok: false, Truncated: true, Effort: effort, Agent: req.Agent, At: time.Now().UnixMilli()}, recResult, rerr, firstAt)
+	l.record(ctx, CallRecord{Model: base, Ok: false, Truncated: true, Effort: effort, Agent: req.Agent, At: time.Now().UnixMilli()}, recResult, rerr, firstAt)
 	if rerr != nil {
 		uerr := asUpstream(rerr)
 		if uerr.Code == CodeQuota {
@@ -718,9 +725,14 @@ func (l *Lane) attemptModel(ctx context.Context, req Request, model, effort stri
 	return Outcome{Usage: recResult.Usage}, &UpstreamError{Code: CodeTransport, Message: "upstream cut the stream; recovery did not complete"}, true
 }
 
-func (l *Lane) record(rec CallRecord, result StreamResult, err error, firstAt int64) {
+func (l *Lane) record(ctx context.Context, rec CallRecord, result StreamResult, err error, firstAt int64) {
 	if l.OnCall == nil {
 		return
+	}
+	rec.Trace = TraceFrom(ctx)
+	if ue := asUpstream(err); ue != nil {
+		rec.ErrCode = ue.Code
+		rec.UpstreamRID = ue.UpstreamRID
 	}
 	if err != nil {
 		rec.Ok = false
@@ -799,4 +811,3 @@ func asUpstream(err error) *UpstreamError {
 	}
 	return &UpstreamError{Code: CodeTransport, Message: err.Error()}
 }
-

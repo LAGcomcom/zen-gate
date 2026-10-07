@@ -58,6 +58,7 @@ func main() {
 	}
 	logger := logx.New(st.Home)
 	defer logger.Close()
+	logger.SetStdout(*noTray)
 
 	window.SetAppUserModelID("zen-gate.gateway")
 
@@ -130,10 +131,6 @@ func main() {
 		}()
 	}
 	notify.SetEnabled(cfg.Notifications)
-	ln.OnCall = func(rec lane.CallRecord) {
-		st.Record(rec)
-		_ = st.FlushStats()
-	}
 	// Probe first-token samples feed the persisted per-model average.
 	ln.OnProbeResult = func(r lane.ProbeResult) {
 		st.AddTTFTSample(r.Model, r.TTFTMs)
@@ -143,6 +140,7 @@ func main() {
 	gw.SetAgents(reg)
 	gw.SetSubs(mgr)
 	gw.SetLogger(logger)
+	gw.ApplyLogSettings(cfg)
 	// AI capability tagger: classifies provider model ids (and fills the lane
 	// catalog's unverified audio/file fields) using the free lane itself.
 	tagger := autotag.New(ln, st, logger.Infof)
