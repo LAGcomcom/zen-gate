@@ -13,21 +13,21 @@ import (
 
 // Availability states for one model.
 const (
-	StateAvailable    = "available"
-	StateRegionBlock  = "region-blocked"
-	StateUnavailable  = "unavailable"
-	StateThrottled    = "throttled"
-	StateUnknown      = "unknown"
+	StateAvailable   = "available"
+	StateRegionBlock = "region-blocked"
+	StateUnavailable = "unavailable"
+	StateThrottled   = "throttled"
+	StateUnknown     = "unknown"
 )
 
 // ProbeResult is one model's verdict.
 type ProbeResult struct {
-	Model    string `json:"model"`
-	State    string `json:"state"`
-	Detail   string `json:"detail,omitempty"`
-	TTFTMs   int64  `json:"ttftMs,omitempty"`
-	LatencyMs int64 `json:"latencyMs"`
-	At       int64  `json:"at"`
+	Model     string `json:"model"`
+	State     string `json:"state"`
+	Detail    string `json:"detail,omitempty"`
+	TTFTMs    int64  `json:"ttftMs,omitempty"`
+	LatencyMs int64  `json:"latencyMs"`
+	At        int64  `json:"at"`
 }
 
 // ProbeModel sends the smallest streaming request per wire and classifies the

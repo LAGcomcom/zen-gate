@@ -69,7 +69,7 @@ type zcodeProviderConfig struct {
 			ProviderRules []map[string]any `json:"providerRules"`
 		} `json:"providerConfigRules"`
 		ModelConfigRules struct {
-			ProviderModelRules     []map[string]any `json:"providerModelRules"`
+			ProviderModelRules       []map[string]any `json:"providerModelRules"`
 			ManualProviderModelRules []map[string]any `json:"manualProviderModelRules,omitempty"`
 		} `json:"modelConfigRules"`
 	} `json:"config"`

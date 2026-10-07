@@ -42,6 +42,7 @@ type Decoder struct {
 // left. A user quoting the token verbatim loses those characters — the trade
 // is deliberate: leaking control tokens routinely is worse.
 const dsmlOpening = "<｜DSML｜"
+
 var dsmlTag = regexp.MustCompile("<｜DSML｜[^>]*>")
 
 type dsmlScrubber struct{ held string }

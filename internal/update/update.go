@@ -130,7 +130,9 @@ func LatestAssetURL(data []byte) (string, int64, error) {
 	return "", 0, fmt.Errorf("release %s has no %s asset", rel.TagName, want)
 }
 
-type getJSONer interface{ Get(url string) ([]byte, error) }
+type getJSONer interface {
+	Get(url string) ([]byte, error)
+}
 
 // Newer compares dotted versions; "1.2.10" > "1.2.9".
 func Newer(remote, current string) bool {

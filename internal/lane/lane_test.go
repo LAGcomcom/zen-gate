@@ -150,12 +150,12 @@ func TestRepairToolPairingKeepsPaired(t *testing.T) {
 
 func TestSniffBodyByShapeNotHeader(t *testing.T) {
 	cases := map[string]string{
-		"data: {\"a\":1}\n\n":            "sse",
-		"event: message\ndata: {}\n\n":   "sse",
-		"{\"choices\": []}":              "json",
-		"":                               "empty",
-		"   \r\n":                        "empty",
-		"<html>hello</html>":             "unknown",
+		"data: {\"a\":1}\n\n":          "sse",
+		"event: message\ndata: {}\n\n": "sse",
+		"{\"choices\": []}":            "json",
+		"":                             "empty",
+		"   \r\n":                      "empty",
+		"<html>hello</html>":           "unknown",
 	}
 	for body, want := range cases {
 		if got := sniffBody([]byte(body)); got != want {

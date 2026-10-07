@@ -46,8 +46,8 @@ func BuildConfig(nodes []Node) ([]byte, error) {
 		})
 		outbounds = append(outbounds, ob)
 		rules = append(rules, map[string]any{
-			"inbound":   []string{inboundTag(i)},
-			"outbound":  tag,
+			"inbound":  []string{inboundTag(i)},
+			"outbound": tag,
 		})
 	}
 	cfg := map[string]any{

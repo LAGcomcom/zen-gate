@@ -129,9 +129,9 @@ func TestSummarizeNeeds(t *testing.T) {
 	msgs := []Message{
 		{Role: RoleSystem, Parts: []Part{TextPart{Text: "sys"}}},
 		{Role: RoleUser, Parts: []Part{
-			TextPart{Text: "hello world"},                        // 11 chars → 2 tok
-			ImagePart{DataURL: "data:image/png;base64,AAAA"},     // +1024
-			AudioPart{Data: "BBBB", Format: "wav"},               // +1
+			TextPart{Text: "hello world"},                                       // 11 chars → 2 tok
+			ImagePart{DataURL: "data:image/png;base64,AAAA"},                    // +1024
+			AudioPart{Data: "BBBB", Format: "wav"},                              // +1
 			FilePart{Name: "a.pdf", MediaType: "application/pdf", Data: "CCCC"}, // +1
 		}},
 	}

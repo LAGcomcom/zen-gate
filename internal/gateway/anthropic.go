@@ -12,20 +12,20 @@ import (
 // Anthropic /v1/messages, for Claude-protocol clients (Claude Code and kin).
 
 type anthropicContentBlock struct {
-	Type string `json:"type"`
-	Text string `json:"text"`
-	Title string `json:"title"`
+	Type   string `json:"type"`
+	Text   string `json:"text"`
+	Title  string `json:"title"`
 	Source *struct {
 		Type      string `json:"type"`
 		MediaType string `json:"media_type"`
 		Data      string `json:"data"`
 	} `json:"source"`
-	ID      string          `json:"id"`
-	Name    string          `json:"name"`
-	Input   json.RawMessage `json:"input"`
-	ToolUseID string        `json:"tool_use_id"`
-	Content json.RawMessage `json:"content"`
-	IsError bool            `json:"is_error"`
+	ID        string          `json:"id"`
+	Name      string          `json:"name"`
+	Input     json.RawMessage `json:"input"`
+	ToolUseID string          `json:"tool_use_id"`
+	Content   json.RawMessage `json:"content"`
+	IsError   bool            `json:"is_error"`
 }
 
 type anthropicMessage struct {
@@ -40,17 +40,17 @@ type anthropicToolDef struct {
 }
 
 type anthropicRequest struct {
-	Model     string               `json:"model"`
-	MaxTokens int                  `json:"max_tokens"`
-	System    json.RawMessage      `json:"system"`
-	Messages  []anthropicMessage   `json:"messages"`
-	Tools     []anthropicToolDef   `json:"tools"`
-	Stream    bool                 `json:"stream"`
+	Model     string             `json:"model"`
+	MaxTokens int                `json:"max_tokens"`
+	System    json.RawMessage    `json:"system"`
+	Messages  []anthropicMessage `json:"messages"`
+	Tools     []anthropicToolDef `json:"tools"`
+	Stream    bool               `json:"stream"`
 	Thinking  *struct {
 		Type         string `json:"type"`
 		BudgetTokens int    `json:"budget_tokens"`
 	} `json:"thinking"`
-	Metadata  *struct {
+	Metadata *struct {
 		UserID string `json:"user_id"`
 	} `json:"metadata"`
 }
@@ -245,7 +245,7 @@ func (s *Server) handleAnthropicMessages(w http.ResponseWriter, r *http.Request)
 	outcome, uerr := s.Lane.Complete(ctx, lane.Request{
 		Model: model, Effort: effort, Messages: unified, Tools: tools,
 		MaxTokens: req.MaxTokens, SessionSeed: seed, TurnSeed: turn,
-			Agent: agent, Needs: needs,
+		Agent: agent, Needs: needs,
 	}, st.consume)
 	stop := "end_turn"
 	switch {
@@ -345,7 +345,7 @@ func anthropicResponse(id, model string, c *responsesCollector, outcome lane.Out
 	}
 	return map[string]any{
 		"id": id, "type": "message", "role": "assistant", "model": model,
-		"content":    content,
+		"content":     content,
 		"stop_reason": stop, "stop_sequence": nil,
 		"usage": map[string]any{
 			"input_tokens":  outcome.Usage.Input + outcome.Usage.CacheRead,
