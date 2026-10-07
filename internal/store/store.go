@@ -514,6 +514,9 @@ func (s *Store) Record(rec lane.CallRecord) {
 	d.Input += rec.Input
 	d.Output += rec.Output
 	if rec.Model != "" {
+		if d.Models == nil {
+			d.Models = map[string]int{}
+		}
 		d.Models[rec.Model] += rec.Output
 		if d.ModelReqs == nil {
 			d.ModelReqs = map[string]int{}
@@ -521,6 +524,12 @@ func (s *Store) Record(rec lane.CallRecord) {
 		d.ModelReqs[rec.Model]++
 	}
 	if rec.Agent != "" {
+		// Day buckets written before the agents map existed unmarshal with
+		// Agents == nil (the field is omitempty), and assigning into a nil map
+		// panics the whole process — autotag calls always carry an agent label.
+		if d.Agents == nil {
+			d.Agents = map[string]int{}
+		}
 		d.Agents[rec.Agent] += rec.Output
 	}
 	s.stats.Recent = append(s.stats.Recent, rec)
