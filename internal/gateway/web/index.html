@@ -444,6 +444,15 @@ function toast(m){ const t=$("#toast"); t.textContent=m; t.style.display="block"
 function esc(s){ return (s||"").replace(/[<>&]/g,c=>({"<":"&lt;",">":"&gt;","&":"&amp;"}[c])); }
 function fmtN(n){ return n>=1e6?(n/1e6).toFixed(1)+"M":n>=1e3?(n/1e3).toFixed(0)+"K":String(n||0); }
 function fmtK(n){ return n>=1e6?(n/1e6).toFixed(1)+"M":n>=1e3?(n/1e3).toFixed(0)+"K":String(n||0); }
+/* Providers publish capacities both ways: 128000 (decimal, "128K") and 131072
+   (binary, also "128K"). Read the number the way the vendor wrote it. */
+function fmtCap(n){
+  if(!n) return "—";
+  const dec = n % 1000 === 0;
+  const k = dec ? n/1000 : n/1024;
+  if(k < 1000) return Math.round(k)+"K";
+  return Math.round((dec ? n/1e6 : n/1048576)*100)/100+"M";
+}
 async function api(path,body){
   const r = await fetch("/admin/api"+path, body?{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify(body)}:{});
   const j = await r.json().catch(()=>({}));
@@ -561,7 +570,10 @@ function render(){ if(!STATE) return; const s=STATE;
   $("#svcstat").textContent = "运行中";
   const todayKey0 = Object.keys(s.stats.days||{}).sort().pop();
   $("#side-today").textContent = fmtN(todayKey0 ? (s.stats.days[todayKey0].output||0) : 0);
-  $("#side-models").textContent = s.models.filter(m=>m.state==="available").length + "/" + s.models.length;
+  // Only the free lane is probed on a timer; a custom provider's models are
+  // tested on demand, so counting them here would cap the ratio below 100%.
+  const lane = s.models.filter(m=>!m.custom);
+  $("#side-models").textContent = lane.filter(m=>m.state==="available").length + "/" + lane.length;
   $("#side-ver").textContent = s.version || "";
   $("#egress-foot").textContent = s.egress&&s.egress.ip ? `${s.egress.ip} (${s.egress.country||"?"})` : "出口未知";
   renderDash(s); renderAgents(s); renderModels(s); renderProviders(s); renderAccess(s); renderUsage(s); renderSettings(s);
@@ -571,7 +583,8 @@ function render(){ if(!STATE) return; const s=STATE;
 
 /* ---- 总览 ---- */
 function renderDash(s){
-  const avail = s.models.filter(m=>m.state==="available" && !m.hidden).length;
+  const laneModels = s.models.filter(m=>!m.custom);
+  const avail = laneModels.filter(m=>m.state==="available" && !m.hidden).length;
   const on = s.agents.filter(a=>a.enabled).length;
   const todayKey = Object.keys(s.stats.days||{}).sort().pop();
   const day = todayKey ? s.stats.days[todayKey] : null;
@@ -623,7 +636,7 @@ function renderDash(s){
     <h2 class="pt">总览 <span class="sub">本地免费模型网关 v${esc(s.version)}</span></h2>${banner}${annHtml}
 
     <div class="sumstrip">
-      <div class="cell"><div class="v">${avail}/${s.models.length}</div><div class="l">模型可用</div></div>
+      <div class="cell" title="免费车道实测可用 / 免费车道总数；自定义供应商的模型只在点「测试」时实测，不计入这里"><div class="v">${avail}/${laneModels.length}</div><div class="l">模型可用</div></div>
       <div class="cell"><div class="v">${on}/${s.agents.filter(a=>a.installed).length}</div><div class="l">Agent 已开启</div></div>
       <div class="cell"><div class="v">${fmtN(day?day.output:0)}</div><div class="l">今日输出 tokens</div></div>
       <div class="cell"><div class="v">${fmtN(day?day.requests:0)}</div><div class="l">今日请求${failPill}</div></div>
@@ -819,9 +832,12 @@ function renderModels(s){
     if(b.id===s.probingModel) return 1;
     return (STATE_ORDER[a.state]??1)-(STATE_ORDER[b.state]??1);
   });
-  const avail = s.models.filter(m=>m.state==="available" && !m.hidden).length;
+  const laneModels = s.models.filter(m=>!m.custom);
+  const customModels = s.models.filter(m=>m.custom);
+  const customProbed = customModels.filter(m=>m.state!=="custom").length;
+  const avail = laneModels.filter(m=>m.state==="available" && !m.hidden).length;
   const hiddenCount = s.models.filter(m=>m.hidden).length;
-  el.innerHTML = `<h2 class="pt">模型 <span class="sub">可用性由本机网络出口实测（每 ${s.settings.probeIntervalMinutes} 分钟）· ${avail} 个可用 · 勾选「选用」才会出现在 Agent 的模型选择器里${hiddenCount?` · 已隐藏 ${hiddenCount} 个`:""}</span></h2>
+  el.innerHTML = `<h2 class="pt">模型 <span class="sub">可用性由本机网络出口实测（每 ${s.settings.probeIntervalMinutes} 分钟）· ${avail}/${laneModels.length} 个免费车道可用${customModels.length?` · 自定义 ${customProbed}/${customModels.length} 已实测`:""} · 勾选「选用」才会出现在 Agent 的模型选择器里${hiddenCount?` · 已隐藏 ${hiddenCount} 个`:""}</span></h2>
     <div class="card"><div class="row">
       <button class="ghost" id="reprobe">重新探测可用性</button>
       <button class="ghost" id="hide-dead" title="把探测为不可用 / 地区受限的模型全部从 Agent 选择器隐藏（随时可单卡恢复）">隐藏全部不可用</button>
@@ -907,17 +923,17 @@ function renderModels(s){
       + (m.vision?'<span class="tag">视觉</span>':"")
       + (m.audioInput?'<span class="tag">音频</span>':"")
       + (m.fileInput?'<span class="tag">文件</span>':"")
-      + (m.reasoning?'<span class="tag">思考</span>':(m.custom?"":'<span class="tag">纯文本</span>'))
+      + (m.reasoning?'<span class="tag">思考</span>':(m.custom||m.tagSource==="未标注"?"":'<span class="tag">纯文本</span>'))
       + (m.tagSource?`<span class="tag" title="能力标签来源：${esc(m.tagSource)}" style="opacity:.65">${esc(m.tagSource)}</span>`:"");
     card.innerHTML = `
       <div class="mhead"><span class="mname" title="${esc(m.name)}">${esc(m.name)}</span>${pill}</div>
       <div class="mid">${esc(m.id)}</div>
       ${m.blurb?`<div class="mblurb" title="${esc(m.blurb)}">${esc(m.blurb)}</div>`:""}
       <div class="mmeta">
-        <span>首字 <b>${m.ttftMs?(m.ttftMs/1000).toFixed(1)+"s":"—"}</b></span>
-        <span title="${m.ttftCount?("近 "+m.ttftCount+" 次探测平均"):"暂无探测样本"}">平均首字 <b>${m.ttftAvgMs?(m.ttftAvgMs/1000).toFixed(1)+"s":"—"}</b></span>
-        ${m.contextWindow?`<span title="${m.custom?"供应商 /v1/models 声明或 AI 标注给出":"本地能力表"}">上下文 <b>${(m.contextWindow/1024|0)}K</b></span>`:""}
-        ${m.maxOutput?`<span title="${m.custom?"供应商 /v1/models 声明或 AI 标注给出":"本地能力表"}">输出 <b>${(m.maxOutput/1024|0)}K</b></span>`:""}
+        <span title="最近一次探测的首字；排队中的请求会把这一个值拉高">首字 <b>${m.ttftMs?(m.ttftMs/1000).toFixed(1)+"s":"—"}</b></span>
+        <span title="${m.ttftCount?("近 "+m.ttftCount+" 次样本的中位数，路由按它排序"):"暂无探测样本"}">典型首字 <b>${m.ttftMedMs?(m.ttftMedMs/1000).toFixed(1)+"s":"—"}</b></span>
+        ${m.contextWindow?`<span title="${m.custom?"供应商 /v1/models 声明或 AI 标注给出":"本地能力表"}">上下文 <b>${fmtCap(m.contextWindow)}</b></span>`:""}
+        ${m.maxOutput?`<span title="${m.custom?"供应商声明的完成上限（只写回显上下文窗口的供应商不显示）":"本地能力表"}">输出 <b>${fmtCap(m.maxOutput)}</b></span>`:""}
       </div>
       ${(tags||eff)?`<div class="mtags">${tags}${eff?`<span class="meff">${eff}</span>`:""}</div>`:""}
       ${quotaRow}

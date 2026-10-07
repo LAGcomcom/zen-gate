@@ -203,6 +203,9 @@ const (
 	TagSourceListing = "上游声明"
 	TagSourceAI      = "AI标注"
 	TagSourceHeuris  = "规则"
+	// TagSourceUnknown is not a source: it marks a model no rule and no
+	// measurement has a verdict for, so the UI shows a claim-free badge.
+	TagSourceUnknown = "未标注"
 )
 
 // ModelTag is one model's capability verdict from an external source (AI
@@ -233,10 +236,13 @@ type Store struct {
 
 const perfMaxSamples = 30
 
-// AddTTFTSample records one probe first-token latency (ms). Samples are a
-// per-model ring; the mean over them is the "平均首字" shown in the picker.
+// AddTTFTSample records one first-token latency (ms). The ring is deliberately
+// generous: a two-minute queue is a real measurement of what the lane did, and
+// TTFTStats absorbs it with a median instead of the record being thrown away
+// here — which used to make 首字 and the ring statistic two different
+// populations. Only non-samples and multi-hour nonsense are refused.
 func (s *Store) AddTTFTSample(model string, ms int64) {
-	if ms <= 0 || ms > 120000 { // ignore absurd outliers
+	if ms <= 0 || ms > 10*60*1000 {
 		return
 	}
 	s.mu.Lock()
@@ -248,19 +254,25 @@ func (s *Store) AddTTFTSample(model string, ms int64) {
 	s.perfDirty = true
 }
 
-// TTFTStats returns the sample mean and count for one model.
-func (s *Store) TTFTStats(model string) (avg int64, count int) {
+// TTFTStats returns the median first-token latency over the model's sample ring
+// and how many samples stand behind it. The median is what the picker shows and
+// what the latency strategy ranks on: the mean over a free lane's queue spikes
+// put a 1.3s model at 19.7s.
+func (s *Store) TTFTStats(model string) (med int64, count int) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	samples := s.perf[model]
 	if len(samples) == 0 {
 		return 0, 0
 	}
-	var sum int64
-	for _, v := range samples {
-		sum += v
+	sorted := make([]int64, len(samples))
+	copy(sorted, samples)
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i] < sorted[j] })
+	n := len(sorted)
+	if n%2 == 1 {
+		return sorted[n/2], n
 	}
-	return sum / int64(len(samples)), len(samples)
+	return (sorted[n/2-1] + sorted[n/2]) / 2, n
 }
 
 // SnapshotPerf copies every model's sample ring.
@@ -464,7 +476,14 @@ func (s *Store) DeclaredMeta(model string) (ModelMeta, bool) {
 			continue
 		}
 		if m, ok := p.ModelMeta[model]; ok && m.Declared() {
-			return m, true
+			// A completion cap the size of the whole window is the provider
+			// echoing its context length (intern-ai publishes max_length =
+			// max_context_length for every model), not a real output limit.
+			got := m
+			if got.ContextWindow > 0 && got.MaxOutput >= got.ContextWindow {
+				got.MaxOutput = 0
+			}
+			return got, true
 		}
 	}
 	return ModelMeta{}, false

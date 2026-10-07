@@ -73,3 +73,30 @@ func TestDeclaredMetaServesListingNumbers(t *testing.T) {
 		t.Errorf("after reopen: %+v ok=%v", got, ok)
 	}
 }
+
+// intern-ai publishes output_modalities.max_length equal to max_context_length
+// for all ten of its models. A completion cap the size of the whole window is
+// the provider echoing its context length, and showing it as 输出 told the user
+// nothing but that the model can produce a million tokens.
+func TestDeclaredMetaDropsTheEchoedOutputCap(t *testing.T) {
+	t.Setenv("ZEN_GATE_HOME", t.TempDir())
+	st, err := Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	st.Config().Providers = []Provider{{ID: "tp", Name: "T", Enabled: true,
+		Models: []string{"echo", "stated"},
+		ModelMeta: map[string]ModelMeta{
+			"echo":   {ContextWindow: 1048576, MaxOutput: 1048576, InputDeclared: true, OutputDeclared: true},
+			"stated": {ContextWindow: 1048576, MaxOutput: 65536, InputDeclared: true, OutputDeclared: true},
+		}}}
+
+	if got, ok := st.DeclaredMeta("echo"); !ok || got.MaxOutput != 0 {
+		t.Errorf("echoed window survived: %+v ok=%v", got, ok)
+	} else if got.ContextWindow != 1048576 {
+		t.Errorf("context window lost with it: %+v", got)
+	}
+	if got, _ := st.DeclaredMeta("stated"); got.MaxOutput != 65536 {
+		t.Errorf("a real completion cap was dropped: %+v", got)
+	}
+}

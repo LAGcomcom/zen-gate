@@ -161,3 +161,25 @@ func TestCandidatesHonorsNeeds(t *testing.T) {
 		}
 	}
 }
+
+// One queued probe must not demote a fast model for the rest of the probe
+// interval: the persisted sample ring is the honest estimate of what the model
+// does, and it is what routing should rank on.
+func TestLatencyStrategyPrefersTheSampleRingOverTheLastProbe(t *testing.T) {
+	l := NewLane()
+	throttleAll(l, "ling-3.0-flash-fin-free", "nemotron-3-ultra-free")
+	l.SetStrategy(StrategyLatency)
+	l.availability["ling-3.0-flash-fin-free"] = ProbeResult{
+		Model: "ling-3.0-flash-fin-free", State: StateAvailable, TTFTMs: 1500}
+	l.availability["nemotron-3-ultra-free"] = ProbeResult{
+		Model: "nemotron-3-ultra-free", State: StateAvailable, TTFTMs: 169766}
+	l.SetTTFTSource(func(model string) int64 {
+		if model == "nemotron-3-ultra-free" {
+			return 1305 // the median of its samples; the probe caught a queue
+		}
+		return 0
+	})
+	if got := l.nextCandidate(Needs{}, map[string]bool{}); got != "nemotron-3-ultra-free" {
+		t.Fatalf("next = %q, want the model the ring measured fast", got)
+	}
+}

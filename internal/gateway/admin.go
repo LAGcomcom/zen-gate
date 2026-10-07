@@ -205,8 +205,8 @@ func (s *Server) adminState(w http.ResponseWriter) {
 		QuotaEstimate int   `json:"quotaEstimate,omitempty"`
 		ThrottledAt   int64 `json:"throttledAt,omitempty"`
 		RecoverEta    int64 `json:"recoverEta,omitempty"`
-		// Probe first-token history (persisted, survives restarts).
-		TTFTAvgMs int64 `json:"ttftAvgMs,omitempty"`
+		// Median of the persisted first-token ring (survives restarts).
+		TTFTMedMs int64 `json:"ttftMedMs,omitempty"`
 		TTFTCount int   `json:"ttftCount,omitempty"`
 		// Custom marks a user-added provider's model (no lane probe, no quota).
 		Custom     bool   `json:"custom,omitempty"`
@@ -234,12 +234,16 @@ func (s *Server) adminState(w http.ResponseWriter) {
 		}
 		if tag, ok := s.Store.ModelTagOf(m.ID); ok {
 			row.TagSource = tag.Source
+		} else if lane.CapabilityMatched(m.ID) {
+			row.TagSource = store.TagSourceHeuris
+		} else {
+			row.TagSource = store.TagSourceUnknown
 		}
-		row.TTFTAvgMs, row.TTFTCount = s.Store.TTFTStats(m.ID)
+		row.TTFTMedMs, row.TTFTCount = s.Store.TTFTStats(m.ID)
 		// Right after a boot the fresh probe has not run yet — fall back to
-		// the persisted average so the picker shows yesterday's latency.
-		if row.TTFTMs == 0 && row.TTFTAvgMs > 0 {
-			row.TTFTMs = row.TTFTAvgMs
+		// the persisted median so the picker shows yesterday's latency.
+		if row.TTFTMs == 0 && row.TTFTMedMs > 0 {
+			row.TTFTMs = row.TTFTMedMs
 		}
 		if !m.SystemOne {
 			row.QuotaUsed = todayTokens(days, m.ID)
@@ -282,9 +286,9 @@ func (s *Server) adminState(w http.ResponseWriter) {
 				row.Detail = pr.Detail
 				row.TTFTMs = pr.TTFTMs
 			}
-			row.TTFTAvgMs, row.TTFTCount = s.Store.TTFTStats(id)
-			if row.TTFTMs == 0 && row.TTFTAvgMs > 0 {
-				row.TTFTMs = row.TTFTAvgMs
+			row.TTFTMedMs, row.TTFTCount = s.Store.TTFTStats(id)
+			if row.TTFTMs == 0 && row.TTFTMedMs > 0 {
+				row.TTFTMs = row.TTFTMedMs
 			}
 			models = append(models, row)
 		}

@@ -134,9 +134,15 @@ func (l *Lane) candidateKey(m ModelInfo, idx int, av ProbeResult, strategy strin
 		key.avail = 0
 	}
 	if strategy == StrategyLatency {
-		ms := av.TTFTMs
-		if ms <= 0 && ttftFn != nil {
+		// The persisted ring is the estimate of what the model does; a single
+		// probe is one draw from it, and one queued probe would otherwise rank
+		// a fast model last until the next round.
+		var ms int64
+		if ttftFn != nil {
 			ms = ttftFn(m.ID)
+		}
+		if ms <= 0 {
+			ms = av.TTFTMs
 		}
 		if ms > 0 {
 			key.known = 0

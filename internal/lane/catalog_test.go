@@ -134,3 +134,27 @@ func TestParseListingMetaDistinguishesUndeclaredFromDenied(t *testing.T) {
 		t.Errorf("audio/file input modalities dropped: %+v", audio)
 	}
 }
+
+// exo-free matches no row in the capability table. The fallback used to claim
+// reasoning:true, so the model page showed a guessed 思考 badge exactly like a
+// curated one.
+func TestUnknownModelDoesNotClaimReasoning(t *testing.T) {
+	cat := BuildCatalog([]string{"exo-free", "mimo-v2.6-flash-free"})
+	if len(cat) != 2 {
+		t.Fatalf("got %d entries, want 2", len(cat))
+	}
+	for _, m := range cat {
+		if m.ID == "exo-free" && m.Reasoning {
+			t.Errorf("unmatched model reported as a reasoning model")
+		}
+		if m.ID == "mimo-v2.6-flash-free" && !m.Reasoning {
+			t.Errorf("curated mimo lost its reasoning verdict")
+		}
+	}
+	if CapabilityMatched("exo-free") {
+		t.Error("CapabilityMatched(exo-free) = true, want false")
+	}
+	if !CapabilityMatched("mimo-v2.6-flash-free") {
+		t.Error("CapabilityMatched(mimo-v2.6-flash-free) = false, want true")
+	}
+}

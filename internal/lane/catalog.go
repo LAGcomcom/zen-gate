@@ -128,7 +128,20 @@ func capabilitiesFor(base string) capability {
 			return c
 		}
 	}
-	return capability{vision: false, audio: false, file: false, reasoning: true, contextWindow: 131072, maxOutput: 32768, canDisableThinking: true}
+	// Nothing is known about this model, so nothing is claimed: a guessed
+	// reasoning:true showed up on the model page as a verified 思考 badge.
+	return capability{vision: false, audio: false, file: false, reasoning: false, contextWindow: 131072, maxOutput: 32768, canDisableThinking: true}
+}
+
+// CapabilityMatched reports whether the local table states anything about a
+// model — false means capabilitiesFor() answered with its defaults.
+func CapabilityMatched(base string) bool {
+	for _, c := range capabilities {
+		if c.match.MatchString(base) {
+			return true
+		}
+	}
+	return false
 }
 
 // BuildCatalog merges the upstream listing with the local capability table,

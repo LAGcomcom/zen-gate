@@ -491,7 +491,7 @@ func TestCustomModelProbeFlow(t *testing.T) {
 			ID        string `json:"id"`
 			State     string `json:"state"`
 			TTFTMs    int64  `json:"ttftMs"`
-			TTFTAvgMs int64  `json:"ttftAvgMs"`
+			TTFTMedMs int64  `json:"ttftMedMs"`
 			Custom    bool   `json:"custom"`
 		} `json:"models"`
 	}
@@ -502,7 +502,7 @@ func TestCustomModelProbeFlow(t *testing.T) {
 		if m.ID != "prov/m1" {
 			continue
 		}
-		if !m.Custom || m.State != "available" || m.TTFTMs <= 0 || m.TTFTAvgMs <= 0 {
+		if !m.Custom || m.State != "available" || m.TTFTMs <= 0 || m.TTFTMedMs <= 0 {
 			t.Fatalf("state row = %+v", m)
 		}
 		return
