@@ -534,6 +534,11 @@ func (u *Usage) Merge(o *Usage) {
 
 func jsonString(v any) string {
 	switch t := v.(type) {
+	case nil:
+		// An absent or JSON-null field must stay empty. Marshaling nil would
+		// return the four-character string "null", which downstream code then
+		// ships to clients as a literal id/name (issue #7).
+		return ""
 	case string:
 		return t
 	default:
