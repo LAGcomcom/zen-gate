@@ -316,12 +316,14 @@ func (s *Server) adminState(w http.ResponseWriter) {
 		"routingStrategy":         cfg.RoutingStrategy,
 		"laneFallbackToProviders": cfg.LaneFallbackToProviders,
 		"autoTagEnabled":          cfg.AutoTagEnabled,
+		"allowLan":                cfg.AllowLan,
 	}
 	for k, v := range logSettingsView(cfg) {
 		settings[k] = v
 	}
 	writeJSON(w, 200, map[string]any{
 		"baseURL":             s.BaseURL(),
+		"lanBaseURL":          s.LANBaseURL(),
 		"port":                cfg.Port,
 		"mainKey":             cfg.MainKey,
 		"agentKeys":           cfg.AgentKeys,
@@ -406,6 +408,7 @@ func (s *Server) adminSettings(w http.ResponseWriter, r *http.Request) {
 		RoutingStrategy         *string          `json:"routingStrategy"`
 		LaneFallbackToProviders *bool            `json:"laneFallbackToProviders"`
 		AutoTagEnabled          *bool            `json:"autoTagEnabled"`
+		AllowLan                *bool            `json:"allowLan"`
 		LogCategories           *map[string]bool `json:"logCategories"`
 		LogLevel                *string          `json:"logLevel"`
 		LogKeepDays             *int             `json:"logKeepDays"`
@@ -416,6 +419,7 @@ func (s *Server) adminSettings(w http.ResponseWriter, r *http.Request) {
 	}
 	cfg := s.Store.Config()
 	changed := false
+	lanChanged := false
 	if in.Port != nil && *in.Port > 0 && *in.Port < 65536 && *in.Port != cfg.Port {
 		cfg.Port = *in.Port
 		changed = true
@@ -515,6 +519,11 @@ func (s *Server) adminSettings(w http.ResponseWriter, r *http.Request) {
 		}
 		changed = true
 	}
+	if in.AllowLan != nil && *in.AllowLan != cfg.AllowLan {
+		cfg.AllowLan = *in.AllowLan
+		changed = true
+		lanChanged = true
+	}
 	logChanged := false
 	if in.LogCategories != nil {
 		next := make(map[string]bool, len(*in.LogCategories))
@@ -543,6 +552,20 @@ func (s *Server) adminSettings(w http.ResponseWriter, r *http.Request) {
 	}
 	if changed {
 		_ = s.Store.Save()
+	}
+	if lanChanged {
+		// The reply must leave before the switchover: Rebind closes the very
+		// listener serving this request, which would truncate the response.
+		writeJSON(w, 200, map[string]any{"ok": true, "changed": changed})
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+		if err := s.Rebind(); err != nil {
+			s.logCat(logx.CatLifecycle, "warn", "局域网监听切换失败，已回到仅本机: %v", err)
+			return
+		}
+		s.logCat(logx.CatLifecycle, "info", "监听地址切换为 %s:%d", s.bindHost(), cfg.Port)
+		return
 	}
 	writeJSON(w, 200, map[string]any{"ok": true, "changed": changed})
 }

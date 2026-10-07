@@ -1,6 +1,7 @@
-// Package gateway serves the local OpenAI/Anthropic-compatible API and the
-// admin dashboard. Loopback-only by construction: the listener binds the
-// resolved loopback address and nothing else.
+// Package gateway serves the OpenAI/Anthropic-compatible API and the admin
+// dashboard. The dashboard and its key-free /admin/api surface are
+// loopback-only by construction; the API may additionally be reached from the
+// LAN when store.Config.AllowLan is on, always behind an API key.
 package gateway
 
 import (
@@ -45,7 +46,8 @@ type Server struct {
 	registry AgentRegistry
 	mux      *http.ServeMux
 	srv      *http.Server
-	addr     atomic.Value // string
+	// listen opens the TCP listener; tests swap it to force a bind refusal.
+	listen func(network, addr string) (net.Listener, error)
 	// logger is injected by main; nil-safe helpers fall back to empty.
 	logger logSink
 	// audits maps a live request's correlation id to its attempt tally so the
@@ -224,7 +226,7 @@ func (s *Server) autostartState() bool {
 
 // New builds a server; Handler is immediately usable (for tests).
 func New(l *lane.Lane, st *store.Store) *Server {
-	s := &Server{Lane: l, Store: st}
+	s := &Server{Lane: l, Store: st, listen: net.Listen}
 	// The lane reports every physical attempt here — including the failovers a
 	// client never sees — so both the usage stats and the per-request log lines
 	// are fed from the server itself.
@@ -253,24 +255,50 @@ func (s *Server) safeRoute(w http.ResponseWriter, r *http.Request) {
 	s.route(w, r)
 }
 
-// Start binds loopback and serves in the background.
+// Start binds the listener and serves in the background: loopback, or every
+// interface when the user turned on 局域网访问.
 func (s *Server) Start() error {
-	port := s.Store.Config().Port
-	// Bind the resolved loopback IP, never a routable interface.
-	ip := net.ParseIP("127.0.0.1")
-	addr := fmt.Sprintf("%s:%d", ip, port)
+	addr := fmt.Sprintf("%s:%d", s.bindHost(), s.Store.Config().Port)
 	s.srv = &http.Server{Addr: addr, Handler: s.mux}
-	ln, err := net.Listen("tcp", addr)
+	ln, err := s.listen("tcp", addr)
 	if err != nil {
 		return err
 	}
-	s.addr.Store(ln.Addr().String())
 	go func() {
 		if err := s.srv.Serve(ln); err != nil && err != http.ErrServerClosed {
 			log.Printf("[zen-gate] http serve: %v", err)
 		}
 	}()
 	return nil
+}
+
+// bindHost is the interface the listener claims.
+func (s *Server) bindHost() string {
+	if s.Store.Config().AllowLan {
+		return "0.0.0.0"
+	}
+	return "127.0.0.1"
+}
+
+// Rebind re-opens the listener on whatever the config now asks for. In-flight
+// requests are cut, so callers only use it for a deliberate change. A refused
+// routable bind falls back to loopback — turning the setting off to match —
+// instead of leaving the gateway with no listener at all.
+func (s *Server) Rebind() error {
+	allowLan := s.Store.Config().AllowLan
+	if s.srv != nil {
+		_ = s.srv.Close()
+	}
+	err := s.Start()
+	if err == nil || !allowLan {
+		return err
+	}
+	s.Store.Config().AllowLan = false
+	if err2 := s.Start(); err2 != nil {
+		return err2
+	}
+	_ = s.Store.Save()
+	return err
 }
 
 // Stop shuts the listener down.
@@ -280,12 +308,59 @@ func (s *Server) Stop() {
 	}
 }
 
-// BaseURL is the externally advertised endpoint.
+// BaseURL is the locally advertised endpoint. It stays on loopback even while
+// the LAN is served: the agent adapters recognise zen-gate's own entries by
+// the literal 127.0.0.1 in the URL they are handed.
 func (s *Server) BaseURL() string {
-	if a, ok := s.addr.Load().(string); ok {
-		return "http://" + a + "/v1"
-	}
 	return fmt.Sprintf("http://127.0.0.1:%d/v1", s.Store.Config().Port)
+}
+
+// LANBaseURL is the endpoint other machines on the network reach, empty while
+// the LAN toggle is off or the box has no usable address.
+func (s *Server) LANBaseURL() string {
+	if !s.Store.Config().AllowLan {
+		return ""
+	}
+	addrs, err := net.InterfaceAddrs()
+	if err != nil {
+		return ""
+	}
+	ip := lanIPv4(addrs)
+	if ip == "" {
+		return ""
+	}
+	return fmt.Sprintf("http://%s:%d/v1", ip, s.Store.Config().Port)
+}
+
+// lanIPv4 picks the address a neighbouring machine uses. Private ranges beat
+// overlay/VPN (Tailscale hands out 100/64, useless on a LAN), and within
+// private, 192.168 wins because 172.16-31 tends to be VM/WSL NAT and 10/8
+// corporate or container networking.
+func lanIPv4(addrs []net.Addr) string {
+	best, bestRank := "", 9
+	for _, a := range addrs {
+		ipnet, ok := a.(*net.IPNet)
+		if !ok {
+			continue
+		}
+		ip4 := ipnet.IP.To4()
+		if ip4 == nil || ip4.IsLoopback() || ip4.IsLinkLocalUnicast() {
+			continue
+		}
+		rank := 3
+		switch {
+		case ip4[0] == 192 && ip4[1] == 168:
+			rank = 0
+		case ip4[0] == 10:
+			rank = 1
+		case ip4.IsPrivate():
+			rank = 2
+		}
+		if rank < bestRank {
+			best, bestRank = ip4.String(), rank
+		}
+	}
+	return best
 }
 
 func (s *Server) route(w http.ResponseWriter, r *http.Request) {

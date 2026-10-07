@@ -67,8 +67,11 @@ type Subscription struct {
 }
 
 type Config struct {
-	SchemaVersion        int               `json:"schemaVersion"`
-	Port                 int               `json:"port"`
+	SchemaVersion int `json:"schemaVersion"`
+	Port          int `json:"port"`
+	// AllowLan widens the listener from loopback to every interface: the API
+	// keeps requiring an API key, the dashboard stays loopback-only.
+	AllowLan             bool              `json:"allowLan,omitempty"`
 	MainKey              string            `json:"mainKey"`
 	AgentKeys            map[string]string `json:"agentKeys"`
 	DefaultMaxTokens     int               `json:"defaultMaxTokens"`

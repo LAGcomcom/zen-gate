@@ -195,12 +195,15 @@ func main() {
 	syncEndpoints()
 
 	if err := gw.Start(); err != nil {
-		logger.Errorf("listen on 127.0.0.1:%d: %v", cfg.Port, err)
+		logger.Errorf("listen on port %d: %v", cfg.Port, err)
 		fmt.Println("listen error:", err)
 		os.Exit(1)
 	}
 	dashURL := strings.TrimSuffix(gw.BaseURL(), "/v1")
 	logger.Infof("dashboard ready at %s", dashURL)
+	if lan := gw.LANBaseURL(); lan != "" {
+		logger.Infof("局域网 API 可用: %s", lan)
+	}
 
 	// periodic stats flush
 	go func() {

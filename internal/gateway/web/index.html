@@ -640,7 +640,9 @@ function renderDash(s){
             <button class="ghost" data-copy="${s.mainKey}">复制</button></div>
           <div class="row" style="margin-top:10px"><span class="muted" style="font-size:12px">
             OpenAI 兼容 <code class="k">/v1/chat/completions</code> <code class="k">/v1/responses</code> ·
-            Anthropic 兼容 <code class="k">/v1/messages</code> · 只监听 127.0.0.1</span></div>
+            Anthropic 兼容 <code class="k">/v1/messages</code> · ${s.lanBaseURL ? "本机 + 局域网（需 API Key）" : "只监听 127.0.0.1"}</span></div>
+          ${s.lanBaseURL ? `<div class="row" style="margin-top:8px"><span class="dim">局域网 Base URL</span><code class="k">${s.lanBaseURL}</code>
+            <button class="ghost" data-copy="${s.lanBaseURL}">复制</button></div>` : ""}
           <div class="row" style="margin-top:10px">
             <button class="ghost" id="dash-copy-full">复制完整接入配置</button>
             <button class="ghost" id="dash-reprobe">重新探测</button>
@@ -1199,6 +1201,8 @@ function renderAccess(s){
     <h2 class="pt">接入 <span class="sub">任何支持 OpenAI / Anthropic 兼容端点的客户端</span></h2>
     <div class="card"><h3>通用参数</h3>
       <div class="row"><span class="dim">Base URL</span><code class="k">${s.baseURL}</code><button class="ghost" data-copy="${s.baseURL}">复制</button></div>
+      ${s.lanBaseURL ? `<div class="row" style="margin-top:8px"><span class="dim">局域网 Base URL</span><code class="k">${s.lanBaseURL}</code><button class="ghost" data-copy="${s.lanBaseURL}">复制</button>
+        <span class="muted" style="font-size:11.5px;margin-left:8px">给同网段的其它设备用，把上面 curl 里的地址换成它</span></div>` : ""}
       <div class="row" style="margin-top:8px"><span class="dim">主 Key</span><code class="k">${s.mainKey}</code><button class="ghost" data-copy="${s.mainKey}">复制</button></div>
       <div class="muted" style="font-size:12px;margin-top:8px">每个已开启的 Agent 有独立子 Key（见「Agent 适配」页），便于分开统计用量。</div></div>
     <div class="cgrid">
@@ -1699,6 +1703,10 @@ function renderSettings(s){
           <span class="muted" style="font-size:12px" id="proxy-test-result"></span>
         </div>
         <div class="muted" style="font-size:12px;margin-top:8px">代理保存即热生效（影响上游推理/清单/探测请求）。</div>
+        <div class="switch" style="margin-top:12px"><div><span class="nm">允许局域网访问 API</span><div class="ds">同网段的其它机器即可用 <code class="k">http://&lt;本机 IP&gt;:${s.port}/v1</code> 调用接口，仍然必须携带 API Key；管理面板与 /admin 接口不受影响，永远只接受本机。切换会重新监听，正在流式输出的请求会被打断</div></div>
+          <button class="act off" id="tg-lan">关闭</button></div>
+        ${s.lanBaseURL ? `<div class="row" style="margin-top:6px"><span class="dim">局域网 Base URL</span><code class="k">${s.lanBaseURL}</code><button class="ghost" data-copy="${s.lanBaseURL}">复制</button></div>` : ""}
+        ${s.lanBaseURL ? `<div class="muted" style="font-size:11.5px">局域网连不上时，先在 Windows 防火墙放行 ${s.port} 端口入站。</div>` : ""}
       </div>
 
       <div class="card">
@@ -1909,6 +1917,7 @@ function renderSettings(s){
   setToggle("#tg-smart", s.settings.smartRouting);
   setToggle("#tg-fallback", s.settings.laneFallbackToProviders);
   setToggle("#tg-autotag", s.settings.autoTagEnabled);
+  setToggle("#tg-lan", s.settings.allowLan);
   const sseg = el.querySelector("#strategy-seg");
   if (sseg){
     const cur = s.settings.routingStrategy || "catalog";
@@ -1937,6 +1946,21 @@ function renderSettings(s){
   bindSettingToggle("#tg-smart", "smartRouting", "智能路由已开启：切换会避开不支持本次模态的模型", "智能路由已关闭：恢复目录顺序、不带能力过滤");
   bindSettingToggle("#tg-fallback", "laneFallbackToProviders", "耗尽后回落自定义 API 已开启（消耗你的 Key 额度）", "耗尽后回落自定义 API 已关闭");
   bindSettingToggle("#tg-autotag", "autoTagEnabled", "AI 能力标注已开启", "AI 能力标注已暂停");
+  const lanBtn = el.querySelector("#tg-lan");
+  if(lanBtn && !lanBtn.dataset.bound){
+    lanBtn.dataset.bound = "1";
+    lanBtn.onclick = async ()=>{
+      const on = lanBtn.dataset.on !== "1";
+      const j = await api("/settings", { allowLan: on });
+      if(!j) return;
+      setToggle("#tg-lan", on);
+      toast(on ? "局域网 API 已开放（同网段可连，记得保管主 Key）" : "局域网 API 已关闭，仅本机可用");
+      // 服务端回完响应才换监听，端口有几十毫秒的空窗，等它回来再刷新
+      const back = async () => { try { return (await fetch("/health")).ok; } catch(e){ return false; } };
+      for(let i=0;i<20 && !(await back());i++){ await new Promise(r=>setTimeout(r,200)); }
+      refresh();
+    };
+  }
   const retagBtn = el.querySelector("#btn-retag");
   if(retagBtn && !retagBtn.dataset.bound){
     retagBtn.dataset.bound = "1";
