@@ -913,17 +913,12 @@ function renderModels(s){
       <div class="mhead"><span class="mname" title="${esc(m.name)}">${esc(m.name)}</span>${pill}</div>
       <div class="mid">${esc(m.id)}</div>
       ${m.blurb?`<div class="mblurb" title="${esc(m.blurb)}">${esc(m.blurb)}</div>`:""}
-      ${m.custom?`
       <div class="mmeta">
         <span>首字 <b>${m.ttftMs?(m.ttftMs/1000).toFixed(1)+"s":"—"}</b></span>
         <span title="${m.ttftCount?("近 "+m.ttftCount+" 次探测平均"):"暂无探测样本"}">平均首字 <b>${m.ttftAvgMs?(m.ttftAvgMs/1000).toFixed(1)+"s":"—"}</b></span>
-      </div>`:`
-      <div class="mmeta">
-        <span>首字 <b>${m.ttftMs?(m.ttftMs/1000).toFixed(1)+"s":"—"}</b></span>
-        <span title="${m.ttftCount?("近 "+m.ttftCount+" 次探测平均"):"暂无探测样本"}">平均首字 <b>${m.ttftAvgMs?(m.ttftAvgMs/1000).toFixed(1)+"s":"—"}</b></span>
-        <span>上下文 <b>${(m.contextWindow/1024|0)}K</b></span>
-        <span>输出 <b>${(m.maxOutput/1024|0)}K</b></span>
-      </div>`}
+        ${m.contextWindow?`<span title="${m.custom?"供应商 /v1/models 声明或 AI 标注给出":"本地能力表"}">上下文 <b>${(m.contextWindow/1024|0)}K</b></span>`:""}
+        ${m.maxOutput?`<span title="${m.custom?"供应商 /v1/models 声明或 AI 标注给出":"本地能力表"}">输出 <b>${(m.maxOutput/1024|0)}K</b></span>`:""}
+      </div>
       ${(tags||eff)?`<div class="mtags">${tags}${eff?`<span class="meff">${eff}</span>`:""}</div>`:""}
       ${quotaRow}
       ${m.detail?`<div class="mdetail">${esc(m.detail).slice(0,120)}</div>`:""}
@@ -940,6 +935,7 @@ function renderModels(s){
 /* ---- 自定义 API ---- */
 let pvEditing = "";          // 正在编辑的供应商 id（"" = 新增）
 let pvFetched = [];          // 本次表单里拉到的模型全集
+let pvCatalog = [];          // 拉到的行（含供应商声明的上下文/输出）
 let pvSelected = new Set();  // 勾选要入库的模型
 let pvEditSaved = [];        // 编辑前的已保存模型（用于预勾选）
 
@@ -1012,6 +1008,7 @@ function renderProviders(s){
       if(!j.ok){ toast(j.error || "拉取失败"); return; }
       if(j.saved){ pvResetForm(); toast("模型列表已刷新"); refresh(); return; }
       pvFetched = j.models || [];
+      pvCatalog = j.catalog || [];
       // 默认只勾后端推荐的"好用"子集（策展名单 + 启发式过滤），不全部勾上
       const rec = j.recommended || [];
       pvSelected = new Set(rec.filter(m => pvFetched.includes(m)));
@@ -1026,7 +1023,10 @@ function renderProviders(s){
         protocol: pvProto(), enabled: true };
       if(pvEditing){
         body.id = pvEditing;
-        if(pvFetched.length) body.models = [...pvSelected];
+        if(pvFetched.length){
+          body.models = [...pvSelected];
+          if(pvCatalog.length) body.catalog = pvCatalog;
+        }
       } else {
         // 新增时没拉过模型就先拉一次：顺带验证连通性
         if(!pvFetched.length){
@@ -1036,13 +1036,17 @@ function renderProviders(s){
           const fj = await fr.json().catch(()=>({}));
           if(fj.ok){
             pvFetched = fj.models || [];
+            pvCatalog = fj.catalog || [];
             pvSelected = new Set((fj.recommended || []).filter(m => pvFetched.includes(m)));
             pvRenderPicker();
           }
           else if(!confirm("拉取模型失败：" + (fj.error||"") + "\n仍要保存吗？（可稍后手动拉取挑选）")) return;
         }
         if(!pvSelected.size && pvFetched.length && !confirm("还没有勾选任何模型，保存后模型列表为空。继续？")) return;
-        if(pvFetched.length) body.models = [...pvSelected];
+        if(pvFetched.length){
+          body.models = [...pvSelected];
+          if(pvCatalog.length) body.catalog = pvCatalog;
+        }
       }
       const j = await api("/providers", body);
       if(j){ const wasEditing = !!pvEditing; pvResetForm(); toast(wasEditing ? "已保存，模型列表已更新" : "已接入，勾选的模型已出现在 /v1/models"); refresh(); }
@@ -1060,7 +1064,7 @@ function renderProviders(s){
     pbox.querySelectorAll(".pchip").forEach(c=>{
       c.onclick = ()=>{
         const p = presets.find(x=>x.id===c.dataset.pid); if(!p) return;
-        pvEditing = ""; pvFetched = []; pvSelected = new Set(); pvEditSaved = [];
+        pvEditing = ""; pvFetched = []; pvCatalog = []; pvSelected = new Set(); pvEditSaved = [];
         el.querySelector("#pv-form-title").textContent = "添加供应商";
         el.querySelector("#pv-name").value = p.name;
         el.querySelector("#pv-url").value = p.baseUrl;
@@ -1103,7 +1107,7 @@ function pvPickCount(){
 }
 
 function pvResetForm(){
-  pvEditing = ""; pvFetched = []; pvSelected = new Set(); pvEditSaved = [];
+  pvEditing = ""; pvFetched = []; pvCatalog = []; pvSelected = new Set(); pvEditSaved = [];
   const el = $("#page-providers"); if(!el) return;
   el.querySelector("#pv-form-title").textContent = "添加供应商";
   ["#pv-name","#pv-url","#pv-key","#pv-pick-filter"].forEach(sel=>{ const n = el.querySelector(sel); if(n) n.value = ""; });

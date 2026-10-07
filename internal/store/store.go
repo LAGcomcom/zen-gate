@@ -44,15 +44,37 @@ const (
 // OpenAI- or Anthropic-compatible endpoint plus its key and the model ids
 // discovered from its /models listing. Gateway model ids are namespaced as
 // "<ID>/<upstream model id>" so they can never collide with the free lane.
+// ModelMeta is what one provider's own /v1/models listing declared about a
+// model. It is the provider's claim, not a measurement: a live capability
+// probe outranks it, and an empty value means the provider published nothing.
+type ModelMeta struct {
+	Name           string `json:"name,omitempty"` // the provider's display name
+	ContextWindow  int    `json:"contextWindow,omitempty"`
+	MaxOutput      int    `json:"maxOutput,omitempty"`
+	Vision         bool   `json:"vision,omitempty"`
+	Audio          bool   `json:"audio,omitempty"`
+	File           bool   `json:"file,omitempty"`
+	Reasoning      bool   `json:"reasoning,omitempty"`
+	InputDeclared  bool   `json:"inputDeclared,omitempty"`
+	OutputDeclared bool   `json:"outputDeclared,omitempty"`
+}
+
+// Declared reports whether the listing stated anything about the model at all.
+func (m ModelMeta) Declared() bool {
+	return m.ContextWindow > 0 || m.MaxOutput > 0 || m.Name != "" ||
+		m.InputDeclared || m.OutputDeclared
+}
+
 type Provider struct {
-	ID       string   `json:"id"`
-	Name     string   `json:"name"`
-	BaseURL  string   `json:"baseUrl"`
-	APIKey   string   `json:"apiKey,omitempty"`
-	Protocol string   `json:"protocol"`
-	Enabled  bool     `json:"enabled"`
-	Models   []string `json:"models,omitempty"`
-	Note     string   `json:"note,omitempty"` // preset provenance / key-application hint
+	ID        string               `json:"id"`
+	Name      string               `json:"name"`
+	BaseURL   string               `json:"baseUrl"`
+	APIKey    string               `json:"apiKey,omitempty"`
+	Protocol  string               `json:"protocol"`
+	Enabled   bool                 `json:"enabled"`
+	Models    []string             `json:"models,omitempty"`
+	ModelMeta map[string]ModelMeta `json:"modelMeta,omitempty"` // by upstream model id
+	Note      string               `json:"note,omitempty"`      // preset provenance / key-application hint
 }
 
 // Subscription is one user-added proxy subscription URL: the fetched body is
@@ -173,12 +195,14 @@ type QuotaNote struct {
 
 const quotaEpisodeTTL = 14 * 24 * time.Hour
 
-// Tag sources, ordered by trust: a live capability probe beats the AI tagger,
-// which beats the name heuristics baked into the binary.
+// Tag sources, ordered by trust: a live capability probe beats the provider's
+// own published listing, which beats the AI tagger, which beats the name
+// heuristics baked into the binary.
 const (
-	TagSourceProbe  = "实测"
-	TagSourceAI     = "AI标注"
-	TagSourceHeuris = "规则"
+	TagSourceProbe   = "实测"
+	TagSourceListing = "上游声明"
+	TagSourceAI      = "AI标注"
+	TagSourceHeuris  = "规则"
 )
 
 // ModelTag is one model's capability verdict from an external source (AI
@@ -188,6 +212,7 @@ type ModelTag struct {
 	Vision        bool   `json:"vision"`
 	Audio         bool   `json:"audio"`
 	File          bool   `json:"file"`
+	Reasoning     bool   `json:"reasoning,omitempty"`
 	ContextWindow int    `json:"contextWindow,omitempty"`
 	MaxOutput     int    `json:"maxOutput,omitempty"`
 	Source        string `json:"source"`
@@ -424,6 +449,25 @@ func (s *Store) ModelTagOf(model string) (ModelTag, bool) {
 	defer s.mu.Unlock()
 	t, ok := s.tags[model]
 	return t, ok
+}
+
+// DeclaredMeta returns the token capacities an enabled provider's listing
+// declared for one upstream model id. ok is false when no enabled provider
+// stated a number for it — an id the provider listed without capacities reads
+// as "not declared", never as a zero-size model.
+func (s *Store) DeclaredMeta(model string) (ModelMeta, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i := range s.cfg.Providers {
+		p := &s.cfg.Providers[i]
+		if !p.Enabled {
+			continue
+		}
+		if m, ok := p.ModelMeta[model]; ok && m.Declared() {
+			return m, true
+		}
+	}
+	return ModelMeta{}, false
 }
 
 // SnapshotTags copies every stored capability verdict.

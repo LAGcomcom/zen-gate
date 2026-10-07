@@ -267,13 +267,16 @@ func (s *Server) adminState(w http.ResponseWriter) {
 				Blurb:      "自定义供应商「" + p.Name + "」",
 				Hidden:     hidden[id],
 			}
-			if caps := s.modalityCapsOf(mid); caps.Known {
+			caps := s.modalityCapsOf(mid)
+			row.Reasoning, row.ContextWindow, row.MaxOutput = caps.Reasoning, caps.ContextWindow, caps.MaxOutput
+			if caps.Known {
 				row.Vision, row.AudioInput, row.FileInput = caps.Vision, caps.Audio, caps.File
 				row.TagSource = caps.Source
-				if caps.ContextWindow > 0 {
-					row.ContextWindow = caps.ContextWindow
-				}
 			}
+			if d, ok := s.Store.DeclaredMeta(mid); ok && d.Name != "" {
+				row.Name = d.Name
+			}
+
 			if pr, ok := s.customProbeOf(id); ok {
 				row.State = pr.State
 				row.Detail = pr.Detail

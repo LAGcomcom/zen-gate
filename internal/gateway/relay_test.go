@@ -254,6 +254,139 @@ func TestProviderModelsRefreshPrunesToSelection(t *testing.T) {
 	}
 }
 
+// declaredListing offers m1 with published token capacities, m2 without any.
+func declaredListing() *httptest.Server {
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("content-type", "application/json")
+		fmt.Fprint(w, `{"data":[{"id":"m1","max_input_tokens":131072,"max_output_tokens":4096},{"id":"m2"}]}`)
+	}))
+}
+
+func postAdmin(t *testing.T, baseURL, body string) map[string]any {
+	t.Helper()
+	req, _ := http.NewRequest("POST", baseURL, strings.NewReader(body))
+	req.Header.Set("content-type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var out map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		t.Fatalf("decode admin response: %v", err)
+	}
+	return out
+}
+
+func TestProviderModelsRefreshPersistsDeclaredCapacities(t *testing.T) {
+	up := declaredListing()
+	defer up.Close()
+	s := newTestServer(t, up)
+	addProvider(t, s, up, store.ProtocolOpenAI, "sk", true, "m1")
+	ts := httptest.NewServer(s.mux)
+	defer ts.Close()
+
+	j := postAdmin(t, ts.URL+"/admin/api/providers/models", `{"id":"prov"}`)
+	if !j["ok"].(bool) {
+		t.Fatalf("response = %v", j)
+	}
+	meta := s.Store.Config().Providers[0].ModelMeta
+	if meta["m1"].ContextWindow != 131072 || meta["m1"].MaxOutput != 4096 {
+		t.Errorf("provider kept no capacities for m1: %+v", meta)
+	}
+	if _, ok := meta["m2"]; ok {
+		t.Errorf("an unchecked model must not enter the provider's catalog: %+v", meta)
+	}
+	// The picker needs the whole listing, numbers included, so a model the
+	// user has not ticked yet can be saved with its capacities in one step.
+	cat, _ := j["catalog"].([]any)
+	if len(cat) != 2 {
+		t.Fatalf("catalog = %v, want both listed models", j["catalog"])
+	}
+	first := cat[0].(map[string]any)
+	if first["id"] != "m1" || first["contextWindow"].(float64) != 131072 {
+		t.Errorf("catalog row lost its numbers: %v", first)
+	}
+}
+
+func TestProviderSaveStoresCatalogOfSelectedModels(t *testing.T) {
+	up := declaredListing()
+	defer up.Close()
+	s := newTestServer(t, up)
+	ts := httptest.NewServer(s.mux)
+	defer ts.Close()
+
+	j := postAdmin(t, ts.URL+"/admin/api/providers", `{"name":"NIM","baseUrl":"`+up.URL+`/v1",
+		"apiKey":"sk","protocol":"openai","enabled":true,"models":["m1"],
+		"catalog":[{"id":"m1","contextWindow":131072,"maxOutput":4096},
+			{"id":"m2","contextWindow":8192}]}`)
+	if !j["ok"].(bool) {
+		t.Fatalf("response = %v", j)
+	}
+	if len(s.Store.Config().Providers) != 1 {
+		t.Fatalf("provider not created: %v", s.Store.Config().Providers)
+	}
+	meta := s.Store.Config().Providers[0].ModelMeta
+	if meta["m1"].ContextWindow != 131072 || meta["m1"].MaxOutput != 4096 {
+		t.Errorf("saved provider lost m1's capacities: %+v", meta)
+	}
+	if _, ok := meta["m2"]; ok {
+		t.Errorf("m2 was not selected, so its numbers must not be kept: %+v", meta)
+	}
+}
+
+func TestAdminStateShowsCustomModelCapacities(t *testing.T) {
+	type cardRow struct {
+		ID            string `json:"id"`
+		Name          string `json:"name"`
+		Reasoning     bool   `json:"reasoning"`
+		ContextWindow int    `json:"contextWindow"`
+		MaxOutput     int    `json:"maxOutput"`
+		Custom        bool   `json:"custom"`
+	}
+	laneUp := laneUpstream429(t)
+	defer laneUp.Close()
+	s := newTestServer(t, laneUp)
+	s.Store.SetModelTag("deepseek-r1", store.ModelTag{Reasoning: true, Source: store.TagSourceAI})
+	cfg := s.Store.Config()
+	cfg.Providers = append(cfg.Providers, store.Provider{
+		ID: "nim", Name: "N", BaseURL: "http://n", Protocol: store.ProtocolOpenAI,
+		Enabled: true, Models: []string{"deepseek-r1", "nvidia/m1"},
+		ModelMeta: map[string]store.ModelMeta{"nvidia/m1": {Name: "Nemotron M1", ContextWindow: 131072, MaxOutput: 4096}},
+	})
+	ts := httptest.NewServer(s.mux)
+	defer ts.Close()
+
+	resp, err := http.Get(ts.URL + "/admin/api/state")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var st struct {
+		Models []cardRow `json:"models"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&st); err != nil {
+		t.Fatal(err)
+	}
+	rows := map[string]cardRow{}
+	for _, r := range st.Models {
+		rows[r.ID] = r
+	}
+	nim := rows["nim/nvidia/m1"]
+	if !nim.Custom {
+		t.Fatalf("nim/nvidia/m1 missing: %v", st.Models)
+	}
+	if nim.ContextWindow != 131072 || nim.MaxOutput != 4096 {
+		t.Errorf("card lost the provider's declared capacities: %+v", nim)
+	}
+	if nim.Name != "Nemotron M1" {
+		t.Errorf("card title = %q, want the provider's own display name", nim.Name)
+	}
+	if r := rows["nim/deepseek-r1"]; !r.Reasoning {
+		t.Errorf("card lost the AI reasoning verdict: %+v", r)
+	}
+}
+
 func TestModelVisibilityFiltering(t *testing.T) {
 	up := fakeUpstream(t, []string{`{"choices":[{"delta":{"content":"x"}}]}`, `data: [DONE]`})
 	defer up.Close()

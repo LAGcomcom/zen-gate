@@ -357,14 +357,59 @@ func (s *Server) providerViews() []map[string]any {
 
 // decodeProviderIn is the shared save/fetch request body.
 type providerIn struct {
-	ID       string   `json:"id"`
-	Name     string   `json:"name"`
-	BaseURL  string   `json:"baseUrl"`
-	APIKey   string   `json:"apiKey"`
-	Protocol string   `json:"protocol"`
-	Enabled  *bool    `json:"enabled"`
-	Models   []string `json:"models"`
-	Save     *bool    `json:"save"` // models fetch: false = probe only, don't persist
+	ID       string             `json:"id"`
+	Name     string             `json:"name"`
+	BaseURL  string             `json:"baseUrl"`
+	APIKey   string             `json:"apiKey"`
+	Protocol string             `json:"protocol"`
+	Enabled  *bool              `json:"enabled"`
+	Models   []string           `json:"models"`
+	Catalog  []lane.ListingMeta `json:"catalog"` // listing rows, numbers included
+	Save     *bool              `json:"save"`    // models fetch: false = probe only, don't persist
+}
+
+func catalogIDs(catalog []lane.ListingMeta) []string {
+	ids := make([]string, 0, len(catalog))
+	for _, row := range catalog {
+		ids = append(ids, row.ID)
+	}
+	return ids
+}
+
+// mergeCatalog records the token capacities a listing declared for the
+// provider's selected models and drops entries for deselected ones. A model
+// the listing did not number keeps whatever was known: a provider that stops
+// publishing capacities must not erase them.
+func mergeCatalog(p *store.Provider, catalog []lane.ListingMeta) {
+	selected := make(map[string]bool, len(p.Models))
+	for _, m := range p.Models {
+		selected[m] = true
+	}
+	for id := range p.ModelMeta {
+		if !selected[id] {
+			delete(p.ModelMeta, id)
+		}
+	}
+	for _, row := range catalog {
+		if !selected[row.ID] {
+			continue
+		}
+		meta := store.ModelMeta{
+			Name: row.Name, ContextWindow: row.ContextWindow, MaxOutput: row.MaxOutput,
+			Vision: row.Vision, Audio: row.Audio, File: row.File, Reasoning: row.Reasoning,
+			InputDeclared: row.InputDeclared, OutputDeclared: row.OutputDeclared,
+		}
+		if !meta.Declared() {
+			continue
+		}
+		if p.ModelMeta == nil {
+			p.ModelMeta = map[string]store.ModelMeta{}
+		}
+		p.ModelMeta[row.ID] = meta
+	}
+	if len(p.ModelMeta) == 0 {
+		p.ModelMeta = nil
+	}
 }
 
 func (in *providerIn) normalize() error {
@@ -438,6 +483,7 @@ func (s *Server) adminProviderSave(w http.ResponseWriter, r *http.Request) {
 			if in.Models != nil {
 				p.Models = cleanModels(in.Models)
 			}
+			mergeCatalog(p, in.Catalog)
 			if err := s.Store.Save(); err != nil {
 				writeJSON(w, 500, map[string]any{"ok": false, "error": err.Error()})
 				return
@@ -457,6 +503,7 @@ func (s *Server) adminProviderSave(w http.ResponseWriter, r *http.Request) {
 		APIKey: strings.TrimSpace(in.APIKey), Protocol: in.Protocol,
 		Enabled: enabled, Models: cleanModels(in.Models),
 	}
+	mergeCatalog(&p, in.Catalog)
 	cfg.Providers = append(cfg.Providers, p)
 	if err := s.Store.Save(); err != nil {
 		writeJSON(w, 500, map[string]any{"ok": false, "error": err.Error()})
@@ -514,11 +561,12 @@ func (s *Server) adminProviderModels(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 			p := &cfg.Providers[k]
-			models, err := relay.FetchModels(ctx, p.BaseURL, p.APIKey, p.Protocol)
+			catalog, err := relay.FetchModelCatalog(ctx, p.BaseURL, p.APIKey, p.Protocol)
 			if err != nil {
 				writeJSON(w, 200, map[string]any{"ok": false, "error": err.Error()})
 				return
 			}
+			models := catalogIDs(catalog)
 			if shouldSave {
 				// 刷新只修剪选择，不重新展开目录：已勾选的模型若仍在上游就保留，
 				// 上游已下架的移除，新模型不自动加入（要用「挑选模型」勾）。
@@ -533,6 +581,7 @@ func (s *Server) adminProviderModels(w http.ResponseWriter, r *http.Request) {
 					}
 				}
 				p.Models = merged
+				mergeCatalog(p, catalog)
 				if err := s.Store.Save(); err != nil {
 					writeJSON(w, 500, map[string]any{"ok": false, "error": err.Error()})
 					return
@@ -542,7 +591,8 @@ func (s *Server) adminProviderModels(w http.ResponseWriter, r *http.Request) {
 				}
 				s.logCat(logx.CatAdmin, "info", "自定义供应商模型已刷新: %s (保留 %d 个勾选)", p.Name, len(p.Models))
 			}
-			writeJSON(w, 200, map[string]any{"ok": true, "models": models, "saved": shouldSave,
+			writeJSON(w, 200, map[string]any{"ok": true, "models": models, "catalog": catalog,
+				"saved":       shouldSave,
 				"recommended": relay.RecommendedModels("", p.BaseURL, models)})
 			return
 		}
@@ -553,12 +603,13 @@ func (s *Server) adminProviderModels(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 400, map[string]any{"ok": false, "error": err.Error()})
 		return
 	}
-	models, err := relay.FetchModels(ctx, in.BaseURL, strings.TrimSpace(in.APIKey), in.Protocol)
+	catalog, err := relay.FetchModelCatalog(ctx, in.BaseURL, strings.TrimSpace(in.APIKey), in.Protocol)
 	if err != nil {
 		writeJSON(w, 200, map[string]any{"ok": false, "error": err.Error()})
 		return
 	}
-	writeJSON(w, 200, map[string]any{"ok": true, "models": models, "saved": false,
+	models := catalogIDs(catalog)
+	writeJSON(w, 200, map[string]any{"ok": true, "models": models, "catalog": catalog, "saved": false,
 		"recommended": relay.RecommendedModels("", in.BaseURL, models)})
 }
 
