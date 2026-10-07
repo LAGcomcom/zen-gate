@@ -82,6 +82,8 @@ func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request, rest string
 		s.adminLogsDownload(w, r)
 	case rest == "usage.csv" && r.Method == http.MethodGet:
 		s.adminUsageCSV(w, r)
+	case rest == "tasks" && r.Method == http.MethodGet:
+		s.adminTasks(w, r)
 	case strings.HasPrefix(rest, "probe/") && r.Method == http.MethodPost:
 		s.adminProbeOne(w, strings.TrimPrefix(rest, "probe/"))
 	case rest == "autostart" && r.Method == http.MethodPost:
@@ -214,6 +216,9 @@ func (s *Server) adminState(w http.ResponseWriter) {
 		// Hidden marks a model the user unchecked: servable but not advertised
 		// to agent pickers.
 		Hidden bool `json:"hidden,omitempty"`
+		// Task is the run the card shows progress for: the in-flight 测试 /
+		// 能力实测, or the most recent one.
+		Task *ProbeTask `json:"task,omitempty"`
 	}
 	days, recent := s.Store.SnapshotStats()
 	notes := s.Lane.ThrottleNotes()
@@ -253,6 +258,7 @@ func (s *Server) adminState(w http.ResponseWriter) {
 				row.RecoverEta = s.Lane.RecoveryETA(m.ID)
 			}
 		}
+		row.Task = s.probeTasks.latest(m.ID)
 		models = append(models, row)
 	}
 	// Custom-provider models follow the free-lane ones so the 模型 page shows
@@ -290,6 +296,7 @@ func (s *Server) adminState(w http.ResponseWriter) {
 			if row.TTFTMs == 0 && row.TTFTMedMs > 0 {
 				row.TTFTMs = row.TTFTMedMs
 			}
+			row.Task = s.probeTasks.latest(id)
 			models = append(models, row)
 		}
 	}
@@ -1110,7 +1117,8 @@ func (s *Server) adminRetag(w http.ResponseWriter) {
 
 // adminCapabilityProbe runs the live 实测 probe (image/audio/PDF) for one
 // custom-provider model in the background; verdicts land in tags.json and
-// surface on the next state refresh.
+// surface on the next state refresh. The run is recorded in the task registry
+// so the card can follow it modality by modality.
 func (s *Server) adminCapabilityProbe(w http.ResponseWriter, r *http.Request) {
 	var in struct {
 		ID string `json:"id"`
@@ -1128,45 +1136,80 @@ func (s *Server) adminCapabilityProbe(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 400, map[string]any{"ok": false, "error": "供应商已停用，先到「自定义 API」开启"})
 		return
 	}
+	t, fresh := s.probeTasks.begin("caps", in.ID)
+	if !fresh {
+		writeJSON(w, 200, map[string]any{"ok": true, "running": true, "task": s.probeTasks.latest(in.ID)})
+		return
+	}
 	go func() {
-		verdicts := s.probeCapabilities(context.Background(), p, upstream)
+		ctx := lane.WithProbeSink(context.Background(), s.probeTasks.sink(t))
+		verdicts := s.probeCapabilities(ctx, p, upstream)
+		s.probeTasks.conclude(t, taskDone, nil, verdicts)
 		s.logCat(logx.CatProbe, "info", "能力实测 %s: 视觉=%s 音频=%s 文件=%s", in.ID,
 			verdicts["vision"], verdicts["audio"], verdicts["file"])
 	}()
-	writeJSON(w, 200, map[string]any{"ok": true, "started": true})
+	writeJSON(w, 200, map[string]any{"ok": true, "started": true, "task": s.probeTasks.latest(in.ID)})
+}
+
+// adminTasks answers the drawer: the last runs recorded for one model, newest
+// first, phases and all.
+func (s *Server) adminTasks(w http.ResponseWriter, r *http.Request) {
+	model := strings.TrimSpace(r.URL.Query().Get("model"))
+	if model == "" {
+		writeJSON(w, 400, map[string]any{"ok": false, "error": "missing model"})
+		return
+	}
+	writeJSON(w, 200, map[string]any{"model": model, "runs": s.probeTasks.history(model)})
 }
 
 // adminProbeOne re-tests a single model on demand and returns its fresh
 // verdict — the backend of the per-card 测试 button. Synchronous: the fetch
 // resolves when the probe verdict is in. Namespaced model ids probe their
-// custom provider instead of the free lane.
+// custom provider instead of the free lane. The run's phases go to the task
+// registry, and a second click while it is still in flight reuses that run
+// rather than spending a second upstream call on the same question.
 func (s *Server) adminProbeOne(w http.ResponseWriter, model string) {
 	model = strings.TrimSpace(model)
 	if model == "" {
 		writeJSON(w, 400, map[string]any{"ok": false, "error": "missing model"})
 		return
 	}
-	if p, upstream, ok := s.providerRoute(model); ok {
+	var prov *store.Provider
+	var upstream string
+	if p, up, ok := s.providerRoute(model); ok {
 		if !p.Enabled {
 			writeJSON(w, 400, map[string]any{"ok": false, "error": "供应商已停用，先到「自定义 API」开启"})
 			return
 		}
+		prov, upstream = p, up
+	}
+	t, fresh := s.probeTasks.begin("probe", model)
+	if !fresh {
+		writeJSON(w, 200, map[string]any{"ok": true, "running": true, "task": s.probeTasks.latest(model)})
+		return
+	}
+	// Detached from the request: a dashboard reload must not abort a probe that
+	// can take a minute on a queued lane, and its verdict is still worth the card.
+	ctx := lane.WithProbeSink(context.Background(), s.probeTasks.sink(t))
+	if prov != nil {
 		s.customProbing.Store(model)
 		defer s.customProbing.Store("")
-		r := relay.ProbeModel(context.Background(), p, upstream)
+		r := relay.ProbeModel(ctx, prov, upstream)
 		r.Model = model
 		s.setCustomProbe(model, r)
 		if r.TTFTMs > 0 {
 			s.Store.AddTTFTSample(model, r.TTFTMs)
 		}
 		s.logCat(logx.CatProbe, "info", "探测自定义模型 %s → %s (首字 %dms)", model, r.State, r.TTFTMs)
+		s.probeTasks.conclude(t, taskDone, &r, nil)
 		writeJSON(w, 200, map[string]any{"ok": true, "result": r})
 		return
 	}
-	r := s.Lane.ProbeOne(model)
+	r := s.Lane.ProbeOneCtx(ctx, model)
 	if s.logger != nil {
 		s.logger.Infof("手动探测 %s → %s (首字 %dms)", model, r.State, r.TTFTMs)
 	}
+	s.probeTasks.conclude(t, taskDone, &r, nil)
 	writeJSON(w, 200, map[string]any{"ok": true, "result": r})
 }
 

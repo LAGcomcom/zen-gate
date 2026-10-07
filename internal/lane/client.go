@@ -344,6 +344,13 @@ func (l *Lane) ProbeRound(ctx context.Context, manual bool) {
 // applies the same bookkeeping as a round: availability, throttle ledger,
 // first-token sample, change notifications.
 func (l *Lane) ProbeOne(model string) ProbeResult {
+	return l.ProbeOneCtx(context.Background(), model)
+}
+
+// ProbeOneCtx is ProbeOne through a context that may carry a probe phase sink,
+// so a caller watching one card sees the request go out and the answer start
+// instead of waiting blind for a queued free lane.
+func (l *Lane) ProbeOneCtx(ctx context.Context, model string) ProbeResult {
 	var entry ModelInfo
 	l.mu.RLock()
 	for i := range l.catalog {
@@ -357,7 +364,7 @@ func (l *Lane) ProbeOne(model string) ProbeResult {
 		return ProbeResult{Model: model, State: StateUnknown, At: time.Now().UnixMilli()}
 	}
 
-	r := ProbeModel(context.Background(), entry)
+	r := ProbeModel(ctx, entry)
 
 	l.mu.Lock()
 	if prev, ok := l.availability[model]; ok && l.OnProbeEdge != nil && prev.State != r.State && prev.State != "" && r.State != "" {

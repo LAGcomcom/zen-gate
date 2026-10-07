@@ -81,6 +81,10 @@ type Server struct {
 	// tagger is the AI capability tagger, injected by main; nil-safe admin
 	// handlers degrade to a no-op.
 	tagger *autotag.Tagger
+	// probeTasks is the in-memory log of what the 模型 page's 测试 / 能力实测
+	// buttons are doing right now — kept server-side because the dashboard
+	// rebuilds its card grid every 10s.
+	probeTasks *taskRegistry
 }
 
 // SetTagger wires the AI capability tagger.
@@ -226,7 +230,7 @@ func (s *Server) autostartState() bool {
 
 // New builds a server; Handler is immediately usable (for tests).
 func New(l *lane.Lane, st *store.Store) *Server {
-	s := &Server{Lane: l, Store: st, listen: net.Listen}
+	s := &Server{Lane: l, Store: st, listen: net.Listen, probeTasks: newTaskRegistry()}
 	// The lane reports every physical attempt here — including the failovers a
 	// client never sees — so both the usage stats and the per-request log lines
 	// are fed from the server itself.

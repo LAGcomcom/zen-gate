@@ -229,6 +229,45 @@
   .mcard .qtext.warn2 { color:var(--warn, #fbbf24); }
   .mcard .mdetail { font-size:11.5px; color:var(--ink-mute); border-top:1px dashed var(--hairline-soft); padding-top:6px; word-break:break-all; }
 
+  /* ---- 探测进度（测试 / 能力实测）---- */
+  .mcard .mtask { margin-top:8px; border-top:1px dashed var(--hairline-soft); padding-top:7px;
+    display:flex; flex-direction:column; gap:5px; }
+  .mcard .mtask .th { display:flex; align-items:center; gap:7px; font-size:11.5px; color:var(--ink-dim); }
+  .mcard .mtask .th .grow { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .mcard .mtask .th b { font-family:var(--mono); font-variant-numeric:tabular-nums; color:var(--ink); }
+  .mcard .mtask .tdet { font-size:11px; padding:1px 8px; flex:none; }
+  .mcard .mtask .tps { display:flex; gap:5px; flex-wrap:wrap; }
+  .mcard .tp { font-size:11px; border-radius:5px; padding:1px 7px; background:var(--panel-2);
+    color:var(--ink-mute); display:inline-flex; gap:4px; align-items:center; }
+  .mcard .tp b { font-family:var(--mono); font-variant-numeric:tabular-nums; font-weight:600; }
+  .mcard .tp.run { color:var(--accent); background:var(--accent-soft); animation:tpb 1.4s ease-in-out infinite; }
+  .mcard .tp.ok { color:var(--ok, #34d399); }
+  .mcard .tp.fail { color:var(--bad, #f87171); }
+  .mcard .tp.unknown { color:var(--warn, #fbbf24); }
+  @keyframes tpb { 0%,100% { opacity:1; } 50% { opacity:.5; } }
+
+  /* ---- 探测详情抽屉 ---- */
+  #tdrawer { position:fixed; top:0; right:0; bottom:0; width:min(470px,92vw); z-index:80;
+    background:var(--panel); border-left:1px solid var(--hairline); box-shadow:-12px 0 32px rgba(0,0,0,.3);
+    display:flex; flex-direction:column; }
+  #tdrawer .hd { display:flex; align-items:center; gap:10px; padding:13px 16px; border-bottom:1px solid var(--hairline); }
+  #tdrawer .hd .t { font-weight:600; font-size:12.5px; flex:1; min-width:0; word-break:break-all; }
+  #tdrawer .bd { overflow:auto; padding:12px 16px 20px; }
+  #tdrawer .run { border:1px solid var(--hairline); border-radius:var(--r-md); padding:8px 10px;
+    margin-bottom:9px; background:var(--panel-2); }
+  #tdrawer .rh { font-size:11.5px; color:var(--ink-dim); margin-bottom:6px; display:flex; gap:9px; }
+  #tdrawer .row { display:grid; grid-template-columns:62px 1fr auto; gap:8px; font-size:11.5px;
+    padding:2px 0; align-items:start; }
+  #tdrawer .row .tm { color:var(--ink-mute); font-family:var(--mono); }
+  #tdrawer .row .nm { color:var(--ink); min-width:0; word-break:break-all; }
+  #tdrawer .row .ms { color:var(--ink-mute); font-family:var(--mono); text-align:right; white-space:nowrap; }
+  #tdrawer .row .err, #tdrawer .row .out { grid-column:1/-1; border-radius:5px; padding:5px 7px;
+    font-family:var(--mono); font-size:11px; white-space:pre-wrap; word-break:break-all; user-select:all;
+    background:var(--panel); border:1px solid var(--hairline); }
+  #tdrawer .row .err { color:var(--bad, #f87171); }
+  #tdrawer .row .out { color:var(--ink-dim); }
+  #tdrawer .empty { color:var(--ink-mute); font-size:12px; }
+
   /* ---- agent cards ---- */
   .agrid { display:grid; grid-template-columns:repeat(auto-fill,minmax(240px,1fr)); gap:10px; }
   .acard { background:var(--panel); box-shadow:var(--card-shadow); border:1px solid var(--hairline);
@@ -825,6 +864,107 @@ function renderAgents(s){
 
 /* ---- 模型 ---- */
 const STATE_ORDER = { available:0, custom:1, unknown:2, throttled:3, "region-blocked":4, unavailable:5 };
+
+/* 探测进度：状态存在服务端的任务登记处，所以 10s 网格重建不会把进度擦掉。 */
+let fastPollTimer = 0, tickTimer = 0, drawerFor = "", drawerTimer = 0;
+
+function fmtMs(ms){
+  if(ms >= 60000) return Math.floor(ms/60000) + "分" + String(Math.round(ms%60000/1000)).padStart(2,"0") + "秒";
+  return ms >= 1000 ? (ms/1000).toFixed(1) + "s" : Math.round(ms) + "ms";
+}
+function fmtClock(ms){ return ms ? new Date(ms).toTimeString().slice(0,8) : ""; }
+const TP_MARK = { running:"…", ok:"✓", fail:"✕", unknown:"·" };
+const TP_CLASS = { running:"run", ok:"ok", fail:"fail", unknown:"unknown" };
+function taskKindLabel(kind){ return kind === "caps" ? "能力实测" : "可用性测试"; }
+// 一个模态会先报「开始」再报「结论」，卡片上只显示最新的那一步。
+function lastPhases(steps){
+  const by = new Map();
+  for(const st of (steps||[])) by.set(st.name, st);
+  return [...by.values()];
+}
+function taskBand(m){
+  const t = m.task;
+  if(!t) return "";
+  const running = t.status === "running";
+  const when = running
+    ? `已用时 <b class="elapsed" data-start="${t.started}">…</b>`
+    : (t.status === "failed" ? "已中止 · " : "完成 · ") + fmtClock(t.updated);
+  const phases = lastPhases(t.steps).map(st=>{
+    const cls = TP_CLASS[st.status] || "unknown";
+    return `<span class="tp ${cls}" title="${esc(st.detail||"")}">${esc(st.name)} ${TP_MARK[st.status]||"·"}`
+      + (st.ms?` <b>${fmtMs(st.ms)}</b>`:"") + `</span>`;
+  }).join("");
+  return `<div class="mtask"><div class="th"><span>${taskKindLabel(t.kind)}</span>`
+    + `<span class="grow">${when}</span>`
+    + `<button class="ghost tdet" data-m="${esc(m.id)}" title="展开这次探测的阶段明细">详情</button></div>`
+    + `<div class="tps">${phases}</div></div>`;
+}
+function startTaskTicker(){
+  if(!document.querySelector("#page-models .elapsed")){
+    if(tickTimer){ clearInterval(tickTimer); tickTimer = 0; }
+    return;
+  }
+  const paint = ()=>{
+    const now = Date.now();
+    document.querySelectorAll("#page-models .elapsed").forEach(e=>{
+      e.textContent = fmtMs(Math.max(0, now - Number(e.dataset.start)));
+    });
+  };
+  paint();
+  if(!tickTimer) tickTimer = setInterval(paint, 250);
+}
+
+function drawerRows(runs){
+  if(!runs.length) return `<div class="empty">这个模型还没有测试记录。点卡片上的「测试」或「能力实测」就会出现进度。</div>`;
+  return runs.map(t=>{
+    const st = t.status === "running" ? "进行中" : (t.status === "failed" ? "已中止" : "已完成");
+    // 同一阶段会有「开始」和「结果」两行，抽屉里只留最后一条状态，否则每个模态重复一次。
+    const rows = lastPhases(t.steps).map(s=>{
+      const detail = s.detail
+        ? `<span class="${s.status==="fail"||s.status==="unknown" ? "err" : "out"}">${esc(s.detail)}</span>` : "";
+      return `<div class="row"><span class="tm">${fmtClock(s.at)}</span>`
+        + `<span class="nm">${esc(s.name)} ${TP_MARK[s.status]||"·"}</span>`
+        + `<span class="ms">${s.ms?fmtMs(s.ms):""}</span>${detail}</div>`;
+    }).join("");
+    return `<div class="run"><div class="rh"><b>${taskKindLabel(t.kind)}</b><span>${st}</span>`
+      + `<span>开始 ${fmtClock(t.started)}</span></div>${rows}</div>`;
+  }).join("");
+}
+async function paintDrawer(){
+  if(!drawerFor) return;
+  const box = document.getElementById("tdrawer");
+  if(!box) return;
+  const j = await fetch("/admin/api/tasks?model=" + encodeURIComponent(drawerFor)).then(r=>r.json()).catch(()=>null);
+  if(!drawerFor || !document.getElementById("tdrawer")) return;
+  const runs = (j && j.runs) || [];
+  box.querySelector(".bd").innerHTML = drawerRows(runs);
+  clearTimeout(drawerTimer);
+  if(runs.some(t=>t.status === "running")) drawerTimer = setTimeout(paintDrawer, 1000);
+}
+function closeTaskDrawer(){
+  drawerFor = "";
+  clearTimeout(drawerTimer);
+  document.getElementById("tdrawer")?.remove();
+  document.getElementById("tdmask")?.remove();
+}
+async function openTaskDrawer(model){
+  closeTaskDrawer();
+  drawerFor = model;
+  const mask = document.createElement("div");
+  mask.id = "tdmask";
+  mask.style.cssText = "position:fixed; inset:0; z-index:79; background:rgba(0,0,0,.45)";
+  mask.onclick = closeTaskDrawer;
+  const box = document.createElement("div");
+  box.id = "tdrawer";
+  box.innerHTML = `<div class="hd"><span class="t">${esc(model)}</span>`
+    + `<button class="ghost" id="tdclose">关闭 ✕</button></div><div class="bd"></div>`;
+  document.body.appendChild(mask);
+  document.body.appendChild(box);
+  box.querySelector("#tdclose").onclick = closeTaskDrawer;
+  await paintDrawer();
+}
+document.addEventListener("keydown", e=>{ if(e.key === "Escape" && drawerFor) closeTaskDrawer(); });
+
 function renderModels(s){
   const el = $("#page-models");
   const sorted = [...s.models].sort((a,b)=>{
@@ -861,41 +1001,12 @@ function renderModels(s){
     if(j){ toast("已全部恢复显示"); refresh(); }
   };
   const grid = el.querySelector("#mgrid");
-  grid.querySelectorAll(".mtest").forEach(b=>{
-    b.onclick = async ()=>{
-      b.disabled = true; b.textContent = "测试中…";
-      const j = await api("/probe/"+encodeURIComponent(b.dataset.m), {});
-      if(j && j.result){
-        const r = j.result;
-        const sec = r.ttftMs ? "首字 " + (r.ttftMs/1000).toFixed(1) + "s" : "";
-        if(r.state==="available") toast("✓ 可用" + (sec?" · "+sec:""));
-        else if(r.state==="throttled") toast("已限额 —— 请求在生成前就被拒绝，没有首字数据" + (r.detail?" · "+String(r.detail).slice(0,80):""));
-        else if(r.state==="unavailable") toast("不可用 · " + (r.detail||""));
-        else toast("探测未成功 · " + (r.detail||"上游无响应，稍后再试"));
-      }
-      refresh();
-    };
-  });
-  grid.querySelectorAll(".capstest").forEach(b=>{
-    b.onclick = async ()=>{
-      b.disabled = true; b.textContent = "实测中…";
-      const j = await api("/tags/probe", { id: b.dataset.m });
-      if(j && j.ok) toast("能力实测已开始（图像/音频/PDF 各一发），结果稍后显示在标签上");
-      else if(j && j.error) toast("实测失败 · " + j.error);
-      setTimeout(refresh, 2500);
-    };
-  });
-  grid.querySelectorAll("[data-vis]").forEach(cb=>{
-    cb.onchange = async ()=>{
-      const j = await api("/models/visibility", { id: cb.dataset.vis, hidden: !cb.checked });
-      if(j) toast(cb.checked ? "已选用，正在重新注入已开启的 Agent" : "已隐藏，正在重新注入已开启的 Agent");
-      refresh();
-    };
-  });
   for(const m of sorted){
     const card = document.createElement("div");
     card.className = "mcard st-" + (m.hidden ? "hidden" : (m.state||"unknown")) + (m.hidden ? " dimmed" : "");
     const eff = (m.efforts||[]).map(e=>`<span class="eff">${e.name} <b>${(e.tokens/1024|0)}K</b>${e.isDefault?" ★":""}</span>`).join("");
+    const probeBusy = !!(m.task && m.task.kind === "probe" && m.task.status === "running");
+    const capsBusy = !!(m.task && m.task.kind === "caps" && m.task.status === "running");
     const pill = m.id === s.probingModel
       ? `<span class="pill warn">探测中…</span>`
       : (m.hidden ? `<span class="pill hidsync">已隐藏</span>` : statePill(m.state));
@@ -938,14 +1049,56 @@ function renderModels(s){
       ${(tags||eff)?`<div class="mtags">${tags}${eff?`<span class="meff">${eff}</span>`:""}</div>`:""}
       ${quotaRow}
       ${m.detail?`<div class="mdetail">${esc(m.detail).slice(0,120)}</div>`:""}
+      ${taskBand(m)}
       <div class="mfoot">
         <label class="vispick" title="勾选 = 出现在 Agent 的模型选择器里；取消勾选只是不对外展示，直接点名调用仍可用">
           <input type="checkbox" data-vis="${esc(m.id)}" ${m.hidden?"":"checked"}><span>选用</span></label>
-        <button class="ghost mtest" data-m="${esc(m.id)}" title="${m.custom?"向该供应商发一个最小请求，实测可用性与首字延迟":"单独探测这个模型的可用性"}">测试</button>
-        ${m.custom?`<button class="ghost capstest" data-m="${esc(m.id)}" title="用你的 Key 发最小图像 / 音频 / PDF 请求，实测该模型真正支持的输入模态（结果最优先）">能力实测</button>`:""}
+        <button class="ghost mtest" data-m="${esc(m.id)}" ${probeBusy?"disabled":""} title="${m.custom?"向该供应商发一个最小请求，实测可用性与首字延迟":"单独探测这个模型的可用性"}">${probeBusy?"测试中…":"测试"}</button>
+        ${m.custom?`<button class="ghost capstest" data-m="${esc(m.id)}" ${capsBusy?"disabled":""} title="用你的 Key 发最小图像 / 音频 / PDF 请求，实测该模型真正支持的输入模态（结果最优先）">${capsBusy?"实测中…":"能力实测"}</button>`:""}
       </div>`;
     grid.appendChild(card);
   }
+  // 处理器必须在卡片入 DOM 之后再绑定：#mgrid 在渲染前是空的，绑早了等于没绑。
+  grid.querySelectorAll(".mtest").forEach(b=>{
+    b.onclick = async ()=>{
+      b.disabled = true; b.textContent = "测试中…";
+      const j = await api("/probe/"+encodeURIComponent(b.dataset.m), {});
+      if(j && j.running){ toast("这个模型正在测试中，进度看卡片"); refresh(); return; }
+      if(j && j.result){
+        const r = j.result;
+        const sec = r.ttftMs ? "首字 " + (r.ttftMs/1000).toFixed(1) + "s" : "";
+        if(r.state==="available") toast("✓ 可用" + (sec?" · "+sec:""));
+        else if(r.state==="throttled") toast("已限额 —— 请求在生成前就被拒绝，没有首字数据" + (r.detail?" · "+String(r.detail).slice(0,80):""));
+        else if(r.state==="unavailable") toast("不可用 · " + (r.detail||""));
+        else toast("探测未成功 · " + (r.detail||"上游无响应，稍后再试"));
+      }
+      refresh();
+    };
+  });
+  grid.querySelectorAll(".capstest").forEach(b=>{
+    b.onclick = async ()=>{
+      b.disabled = true; b.textContent = "实测中…";
+      const j = await api("/tags/probe", { id: b.dataset.m });
+      if(j && j.running){ toast("能力实测进行中，进度看卡片"); refresh(); return; }
+      if(j && j.ok) toast("能力实测已开始（图像/音频/PDF 各一发），进度看卡片");
+      else if(j && j.error) toast("实测失败 · " + j.error);
+      refresh();
+    };
+  });
+  grid.querySelectorAll(".tdet").forEach(b=>{
+    b.onclick = ()=>openTaskDrawer(b.dataset.m);
+  });
+  grid.querySelectorAll("[data-vis]").forEach(cb=>{
+    cb.onchange = async ()=>{
+      const j = await api("/models/visibility", { id: cb.dataset.vis, hidden: !cb.checked });
+      if(j) toast(cb.checked ? "已选用，正在重新注入已开启的 Agent" : "已隐藏，正在重新注入已开启的 Agent");
+      refresh();
+    };
+  });
+  // 有探测在跑：卡片自己按 250ms 走动计时，并用 1s 的节奏跟服务端要新阶段。
+  startTaskTicker();
+  clearTimeout(fastPollTimer);
+  if(sorted.some(m=>m.task && m.task.status === "running")) fastPollTimer = setTimeout(refresh, 1000);
 }
 
 /* ---- 自定义 API ---- */

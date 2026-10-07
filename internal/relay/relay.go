@@ -279,9 +279,15 @@ func elapsedMS(t time.Time) int64 {
 // ProbeModel pings one provider model with the smallest streaming completion
 // and classifies the verdict like the free-lane prober does. It returns as
 // soon as the first `data:` frame arrives — availability and first-token
-// latency are the only things a probe needs.
-func ProbeModel(ctx context.Context, p *store.Provider, model string) lane.ProbeResult {
-	res := lane.ProbeResult{Model: model, State: lane.StateUnknown, At: time.Now().UnixMilli()}
+// latency are the only things a probe needs. The three phases (request out,
+// answer started, verdict) also go to the context sink, because a queued
+// private endpoint can take tens of seconds and the dashboard has to say so.
+func ProbeModel(ctx context.Context, p *store.Provider, model string) (res lane.ProbeResult) {
+	res = lane.ProbeResult{Model: model, State: lane.StateUnknown, At: time.Now().UnixMilli()}
+	lane.EmitProbeStep(ctx, lane.PhaseRequest, lane.StepRunning, 0, lane.SafeEndpoint(endpointOf(p))+" · "+model)
+	defer func() {
+		lane.EmitProbeStep(ctx, lane.PhaseVerdict, lane.StatusForProbeState(res.State), res.LatencyMs, res.Detail)
+	}()
 	// max_tokens + messages is the minimal shape both protocol families accept.
 	body := map[string]any{"model": model, "stream": true, "max_tokens": 16,
 		"messages": []map[string]any{{"role": "user", "content": "ping"}}}
@@ -334,6 +340,7 @@ func ProbeModel(ctx context.Context, p *store.Provider, model string) lane.Probe
 		}
 		if res.TTFTMs == 0 {
 			res.TTFTMs = elapsedMS(start)
+			lane.EmitProbeStep(ctx, lane.PhaseFirstByte, lane.StepOK, res.TTFTMs, "")
 		}
 		frameText := strings.TrimSpace(strings.TrimPrefix(trimmed, "data:"))
 		if frameText == "" || frameText == "[DONE]" {

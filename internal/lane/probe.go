@@ -33,8 +33,16 @@ type ProbeResult struct {
 // ProbeModel sends the smallest streaming request per wire and classifies the
 // answer. Only a gateway refusal that names the model counts against it:
 // 5xx, quota and transport faults stay "unknown" and never remove a model
-// from a picker.
+// from a picker. Each phase is reported through the context sink so a watcher
+// sees the request go out and the answer start before the verdict lands.
 func ProbeModel(ctx context.Context, m ModelInfo) ProbeResult {
+	EmitProbeStep(ctx, PhaseRequest, StepRunning, 0, EndpointFor(m.ID)+" · "+m.ID)
+	res := probeModelInner(ctx, m)
+	EmitProbeStep(ctx, PhaseVerdict, StatusForProbeState(res.State), res.LatencyMs, res.Detail)
+	return res
+}
+
+func probeModelInner(ctx context.Context, m ModelInfo) ProbeResult {
 	res := ProbeResult{Model: m.ID, State: StateUnknown, At: time.Now().UnixMilli()}
 	if m.Wire == "systemone" || IsSystemOneModel(m.ID) {
 		return probeSystemOne(ctx, m, res)
@@ -63,13 +71,16 @@ func ProbeModel(ctx context.Context, m ModelInfo) ProbeResult {
 	var lastPayload atomic.Value
 	_, err := PostStreamed(ctx, EndpointFor(m.ID), body, session, MintRequestId(0), func(p []byte) error {
 		if firstAt == 0 {
-			firstAt = time.Since(start).Milliseconds()
+			// Round up to 1 ms: a loopback answer is faster than a millisecond,
+			// and a 0 TTFT both drops the sample and hides the phase.
+			firstAt = atLeastMS(start)
 			res.TTFTMs = firstAt
+			EmitProbeStep(ctx, PhaseFirstByte, StepOK, firstAt, "")
 		}
 		lastPayload.Store(string(p))
 		return nil
 	})
-	res.LatencyMs = time.Since(start).Milliseconds()
+	res.LatencyMs = atLeastMS(start)
 	if err != nil {
 		ue, _ := err.(*UpstreamError)
 		if ue == nil {
@@ -141,7 +152,14 @@ func probeSystemOne(ctx context.Context, m ModelInfo, res ProbeResult) ProbeResu
 	start := time.Now()
 	session := SessionForConversation("probe:" + m.ID)
 	sawAnswers := false
+	firstSeen := false
 	_, err := PostStreamed(ctx, EndpointFor(m.ID), body, session, MintRequestId(0), func(p []byte) error {
+		if !firstSeen {
+			firstSeen = true
+			ms := atLeastMS(start)
+			res.TTFTMs = ms
+			EmitProbeStep(ctx, PhaseFirstByte, StepOK, ms, "")
+		}
 		var frame map[string]any
 		if json.Unmarshal(p, &frame) == nil {
 			if _, has := frame["answers"]; has {
@@ -150,8 +168,8 @@ func probeSystemOne(ctx context.Context, m ModelInfo, res ProbeResult) ProbeResu
 		}
 		return nil
 	})
-	res.LatencyMs = time.Since(start).Milliseconds()
-	if res.LatencyMs > 0 && res.TTFTMs == 0 {
+	res.LatencyMs = atLeastMS(start)
+	if res.TTFTMs == 0 {
 		res.TTFTMs = res.LatencyMs
 	}
 	if err != nil {
