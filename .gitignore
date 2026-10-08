@@ -1,5 +1,6 @@
 # build output
 dist/
+build/
 *.exe
 *.exe.new
 *.exe.bak
