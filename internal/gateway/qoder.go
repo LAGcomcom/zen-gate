@@ -97,9 +97,14 @@ func probeQoder() qoderStatus {
 	}
 	st.Running = true
 
-	code, body, err = qoderGet("/quota")
+	// The sidecar has two auth planes: model calls sign with Cosy credentials
+	// (the IDE login, long-lived), while /quota uses a short-lived access
+	// token that expires independently. Liveness is therefore judged by the
+	// thing that matters — can it still list and serve models — never by
+	// /quota, whose expiry is cosmetic.
+	code, body, err = qoderGet("/v1/models")
 	if err != nil {
-		st.Detail = "网关在线但 quota 查询失败: " + err.Error()
+		st.Detail = "网关在线但模型列表查询失败: " + err.Error()
 		return st
 	}
 	if code == 401 || strings.Contains(string(body), "TOKEN_EXPIRE") {
@@ -107,16 +112,10 @@ func probeQoder() qoderStatus {
 		return st
 	}
 	if code != 200 {
-		st.Detail = fmt.Sprintf("quota 查询返回 HTTP %d", code)
+		st.Detail = fmt.Sprintf("模型列表查询返回 HTTP %d", code)
 		return st
 	}
 	st.LoggedIn = true
-
-	code, body, err = qoderGet("/v1/models")
-	if err != nil || code != 200 {
-		st.Detail = "已登录但模型列表拉取失败"
-		return st
-	}
 	var listing struct {
 		Data []struct {
 			ID string `json:"id"`
