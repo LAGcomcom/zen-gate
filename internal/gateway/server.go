@@ -242,7 +242,31 @@ func New(l *lane.Lane, st *store.Store) *Server {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", s.safeRoute)
 	s.mux = mux
+	// tags.json is the durable half of a verdict; the catalog is rebuilt from
+	// the curated table on every boot, so without this a measured 音频/文件
+	// capability would disappear at restart and routing would fall back to a
+	// name guess until the tagger ran again.
+	s.applyStoredTags()
 	return s
+}
+
+// applyStoredTags patches every persisted capability verdict into the live
+// catalog. Ids that are not on the free lane (custom providers) are skipped by
+// the lane itself; an effort-suffixed tag id retries on the bare id.
+func (s *Server) applyStoredTags() {
+	for id, tag := range s.Store.SnapshotTags() {
+		audio, file, vision := tag.Audio, tag.File, tag.Vision
+		caps := lane.CapabilityTags{
+			Audio: &audio, File: &file, Vision: &vision,
+			ContextWindow: tag.ContextWindow, MaxOutput: tag.MaxOutput,
+		}
+		if s.Lane.ApplyCapabilityTags(id, caps) {
+			continue
+		}
+		if base := lane.BaseModelId(id); base != id {
+			s.Lane.ApplyCapabilityTags(base, caps)
+		}
+	}
 }
 
 // safeRoute keeps a handler panic from killing the connection silently.
@@ -297,7 +321,7 @@ func (s *Server) Rebind() error {
 	if err == nil || !allowLan {
 		return err
 	}
-	s.Store.Config().AllowLan = false
+	s.Store.Mutate(func(cfg *store.Config) { cfg.AllowLan = false })
 	if err2 := s.Start(); err2 != nil {
 		return err2
 	}
@@ -448,48 +472,108 @@ func bearerOf(r *http.Request) string {
 	return strings.TrimSpace(r.Header.Get("x-api-key"))
 }
 
-// handleListModels advertises the servable models in OpenAI shape. Reasoning
-// models additionally expose (light)/(deep) variants so a client's model
-// picker can select the effort directly. User-added providers ("自定义 API")
-// append their discovered models under "<providerID>/<model>" ids. Models the
-// user unchecked on the 模型 page are not advertised.
+// handleListModels advertises the servable models in OpenAI shape, plus the
+// capability metadata the gateway actually believes about each one: the same
+// merged verdict the router filters on. Without it an agent can only learn
+// what 测试 / 能力实测 measured by scraping the dashboard.
+//
+// Reasoning models additionally expose (light)/(deep) variants so a client's
+// model picker can select the effort directly. User-added providers ("自定义
+// API") append their discovered models under "<providerID>/<model>" ids. Models
+// the user unchecked on the 模型 page are not advertised.
 func (s *Server) handleListModels(w http.ResponseWriter, r *http.Request) {
+	cfg := s.Store.Config()
 	data := []map[string]any{}
 	for _, m := range s.VisibleModels() {
-		data = append(data, map[string]any{
-			"id":       m.ID,
-			"object":   "model",
-			"owned_by": "zen-gate",
-		})
+		data = append(data, s.modelCard(m, m.ID, "zen-gate", cfg, true))
 		if m.Reasoning {
 			for _, suffix := range []string{"(light)", "(deep)"} {
-				data = append(data, map[string]any{
-					"id":       m.ID + " " + suffix,
-					"object":   "model",
-					"owned_by": "zen-gate",
-				})
+				data = append(data, s.modelCard(m, m.ID+" "+suffix, "zen-gate", cfg, true))
 			}
 		}
 	}
 	hidden := s.hiddenSet()
-	cfg := s.Store.Config()
 	for i := range cfg.Providers {
 		p := &cfg.Providers[i]
 		if !p.Enabled {
 			continue
 		}
 		for _, m := range p.Models {
-			if hidden[p.ID+"/"+m] {
+			id := p.ID + "/" + m
+			if hidden[id] {
 				continue
 			}
-			data = append(data, map[string]any{
-				"id":       p.ID + "/" + m,
-				"object":   "model",
-				"owned_by": p.Name,
-			})
+			data = append(data, s.modelCard(lane.ModelInfo{ID: m}, id, p.Name, cfg, false))
 		}
 	}
 	writeJSON(w, 200, map[string]any{"object": "list", "data": data})
+}
+
+// modelCard is one /v1/models entry: the OpenAI fields plus the capability
+// half. A capacity nothing states is omitted — an absent number is honest
+// where a default would be a claim the gateway cannot support.
+//
+// floor carries what the free lane's curated table states; the merged verdict
+// (实测 > 上游声明 > AI标注 > 规则) overrides it wherever it reached a verdict,
+// so a probe result is what a client reads instead of the name guess.
+func (s *Server) modelCard(floor lane.ModelInfo, id, ownedBy string, cfg *store.Config, freeLane bool) map[string]any {
+	upstream := lane.BaseModelId(floor.ID)
+	caps := s.modalityCapsOf(upstream)
+	vision, audio, file, reasoning := floor.Vision, floor.AudioInput, floor.FileInput, floor.Reasoning
+	contextWindow, maxOutput := floor.ContextWindow, floor.MaxOutput
+	source := store.TagSourceUnknown
+	if freeLane && lane.CapabilityMatched(upstream) {
+		source = store.TagSourceHeuris
+	}
+	// For a free-lane model the curated table is the baseline, so only a real
+	// verdict (实测 / 上游声明 / AI标注) may override it — the name regexes are
+	// weaker evidence than the table, and they used to demote a probe-verified
+	// 思考 model to plain text.
+	if caps.Known && (!freeLane || caps.Source != store.TagSourceHeuris) {
+		vision, audio, file, reasoning = caps.Vision, caps.Audio, caps.File, caps.Reasoning
+		source = caps.Source
+	}
+	if caps.ContextWindow > 0 {
+		contextWindow = caps.ContextWindow
+	}
+	if caps.MaxOutput > 0 {
+		maxOutput = caps.MaxOutput
+	}
+	mods := []string{"text"}
+	if vision {
+		mods = append(mods, "image")
+	}
+	if audio {
+		mods = append(mods, "audio")
+	}
+	if file {
+		mods = append(mods, "file")
+	}
+	entry := map[string]any{
+		"id":                id,
+		"object":            "model",
+		"owned_by":          ownedBy,
+		"input_modalities":  mods,
+		"output_modalities": []string{"text"},
+		"reasoning":         reasoning,
+		"capability_source": source,
+	}
+	if contextWindow > 0 {
+		entry["context_window"] = contextWindow
+	}
+	if maxOutput > 0 {
+		entry["max_output_tokens"] = maxOutput
+	}
+	if reasoning && freeLane {
+		if levels := lane.EffortsFor(floor, 0, cfg.DefaultMaxTokens); len(levels) > 0 {
+			ids := make([]string, 0, len(levels))
+			for _, l := range levels {
+				ids = append(ids, l.ID)
+			}
+			entry["supported_reasoning_levels"] = ids
+		}
+	}
+	return entry
 }
 
 // hiddenSet snapshots the user-hidden model ids.
@@ -577,8 +661,9 @@ func (s *Server) handleCodexCatalog(w http.ResponseWriter, r *http.Request) {
 	models := s.InjectableModels()
 	_, av, _ := s.Lane.Snapshot()
 	customName := map[string]string{}
-	for i := range s.Store.Config().Providers {
-		p := &s.Store.Config().Providers[i]
+	providers := s.Store.Config().Providers
+	for i := range providers {
+		p := &providers[i]
 		if !p.Enabled {
 			continue
 		}
@@ -593,7 +678,7 @@ func (s *Server) handleCodexCatalog(w http.ResponseWriter, r *http.Request) {
 	}
 	stateOf := func(id string) string {
 		if p, ok := av[id]; ok {
-			return p.State
+			return lane.FreshState(p)
 		}
 		return lane.StateUnknown
 	}
@@ -642,6 +727,12 @@ func (s *Server) handleCodexCatalog(w http.ResponseWriter, r *http.Request) {
 		mods := []string{"text"}
 		if m.Vision {
 			mods = append(mods, "image")
+		}
+		if m.AudioInput {
+			mods = append(mods, "audio")
+		}
+		if m.FileInput {
+			mods = append(mods, "file")
 		}
 		// Provider entries rank at priority 5: below every free model in the
 		// picker's ordering, above nothing that the product owns.

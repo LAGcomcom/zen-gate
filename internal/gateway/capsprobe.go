@@ -144,11 +144,16 @@ func (s *Server) probeCapabilities(ctx context.Context, p *store.Provider, model
 			return verdicts
 		}
 	}
+	// The probe answers the modality questions only: whatever the previous
+	// source said about 思考 has to survive, or a 能力实测 run would silently
+	// downgrade the model to plain text.
+	prev, _ := s.Store.ModelTagOf(model)
 	s.Store.SetModelTag(model, store.ModelTag{
-		Vision: verdicts["vision"] == verdictYes,
-		Audio:  verdicts["audio"] == verdictYes,
-		File:   verdicts["file"] == verdictYes,
-		Source: store.TagSourceProbe, At: time.Now().UnixMilli(),
+		Vision:    verdicts["vision"] == verdictYes,
+		Audio:     verdicts["audio"] == verdictYes,
+		File:      verdicts["file"] == verdictYes,
+		Reasoning: prev.Reasoning,
+		Source:    store.TagSourceProbe, At: time.Now().UnixMilli(),
 	})
 	return verdicts
 }
