@@ -1,7 +1,6 @@
 package agents
 
 import (
-	"crypto/rand"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -31,20 +30,6 @@ func (z *zcode) Detect() (bool, string, string) {
 	return false, "", "未检测到 ZCode"
 }
 
-func (z *zcode) IsEnabled() (bool, string, error) {
-	cfg, err := z.read()
-	if err != nil {
-		return false, "", nil
-	}
-	for _, rule := range cfg.Config.ProviderConfigRules.ProviderRules {
-		if nameOf(rule) == providerName {
-			enabled, _ := rule["enabled"].(bool)
-			return enabled, "", nil
-		}
-	}
-	return false, "", nil
-}
-
 const providerName = "Zen Gate"
 
 // stableProviderID is a fixed identity for our provider rule so the matching
@@ -62,49 +47,70 @@ func reasoningLevelSpec() map[string]any {
 	}
 }
 
-type zcodeProviderConfig struct {
-	SchemaVersion int `json:"schemaVersion"`
-	Config        struct {
-		ProviderConfigRules struct {
-			ProviderRules []map[string]any `json:"providerRules"`
-		} `json:"providerConfigRules"`
-		ModelConfigRules struct {
-			ProviderModelRules       []map[string]any `json:"providerModelRules"`
-			ManualProviderModelRules []map[string]any `json:"manualProviderModelRules,omitempty"`
-		} `json:"modelConfigRules"`
-	} `json:"config"`
-}
+// The document is walked as generic JSON, never decoded into a struct that
+// lists the fields zen-gate cares about. Re-marshalling such a struct deletes
+// every key zen-gate has not modelled — ZCode's feature flags, its updatedAt,
+// and any provider section a plugin added — and deleting
+// manualProviderModelRules outright is what made ZCode reject the file and boot
+// with an empty in-memory config, losing the user's whole provider list.
 
-func (z *zcode) read() (*zcodeProviderConfig, error) {
+func (z *zcode) read() (map[string]any, error) {
 	data, err := os.ReadFile(z.configPath())
 	if err != nil {
 		return nil, err
 	}
-	cfg := &zcodeProviderConfig{}
-	if err := json.Unmarshal(data, cfg); err != nil {
+	doc := map[string]any{}
+	if err := json.Unmarshal(data, &doc); err != nil {
 		return nil, fmt.Errorf("provider_config.json 无法解析（%w）；为避免破坏未知格式，zen-gate 拒绝写入", err)
 	}
-	return cfg, nil
+	return doc, nil
+}
+
+func (z *zcode) write(doc map[string]any) error {
+	data, err := json.MarshalIndent(doc, "", "  ")
+	if err != nil {
+		return err
+	}
+	path := z.configPath()
+	backupBeforeWrite("zcode", path)
+	return atomicWrite(path, data)
+}
+
+func (z *zcode) IsEnabled() (bool, string, error) {
+	doc, err := z.read()
+	if err != nil {
+		return false, "", nil
+	}
+	for _, raw := range ruleList(doc) {
+		if entryName(raw) == providerName {
+			m, _ := raw.(map[string]any)
+			enabled, _ := m["enabled"].(bool)
+			return enabled, "", nil
+		}
+	}
+	return false, "", nil
 }
 
 func (z *zcode) Enable(o Options) error {
-	path := z.configPath()
-	var cfg *zcodeProviderConfig
-	if data, err := os.ReadFile(path); err == nil {
-		cfg = &zcodeProviderConfig{}
-		if err := json.Unmarshal(data, cfg); err != nil {
-			return fmt.Errorf("provider_config.json 无法解析（%w）；为避免破坏未知格式，zen-gate 拒绝写入", err)
+	doc, err := z.read()
+	if err != nil {
+		if !os.IsNotExist(err) {
+			// Present but unreadable: starting from an empty document here would
+			// overwrite the very file read() just refused to interpret.
+			return err
 		}
-	} else {
-		cfg = &zcodeProviderConfig{SchemaVersion: 1}
+		doc = map[string]any{}
 	}
-	if cfg.SchemaVersion == 0 {
-		cfg.SchemaVersion = 1
+	if v, ok := doc["schemaVersion"].(float64); !ok || v == 0 {
+		doc["schemaVersion"] = 1
 	}
-	if cfg.Config.ProviderConfigRules.ProviderRules == nil {
-		cfg.Config.ProviderConfigRules.ProviderRules = []map[string]any{}
-	}
+	cfg := childMap(doc, "config")
 
+	pcr := childMap(cfg, "providerConfigRules")
+	providerRules, err := arrayField(pcr, "providerRules")
+	if err != nil {
+		return err
+	}
 	ids := make([]string, 0, len(o.Models))
 	for _, m := range o.Models {
 		ids = append(ids, m.ID)
@@ -127,25 +133,26 @@ func (z *zcode) Enable(o Options) error {
 			"modelOrder":       ids,
 		},
 	}
-	rules := []map[string]any{}
-	for _, existing := range cfg.Config.ProviderConfigRules.ProviderRules {
-		if nameOf(existing) == providerName {
+	kept := make([]any, 0, len(providerRules)+1)
+	for _, existing := range providerRules {
+		if entryName(existing) == providerName {
 			continue // replace our own stale entry, keep everything else
 		}
-		rules = append(rules, existing)
+		kept = append(kept, existing)
 	}
-	rules = append(rules, rule)
-	cfg.Config.ProviderConfigRules.ProviderRules = rules
+	kept = append(kept, rule)
+	pcr["providerRules"] = kept
 
 	// Model rules: capability metadata per model — context window plus the
 	// thought-level selector for reasoning models.
-	mc := cfg.Config.ModelConfigRules
-	if mc.ProviderModelRules == nil {
-		mc.ProviderModelRules = []map[string]any{}
+	mcr := childMap(cfg, "modelConfigRules")
+	modelRules, err := arrayField(mcr, "providerModelRules")
+	if err != nil {
+		return err
 	}
-	kept := []map[string]any{}
-	for _, existing := range mc.ProviderModelRules {
-		if pid, _ := existing["providerId"].(string); pid == stableProviderID {
+	kept = make([]any, 0, len(modelRules)+len(o.Models))
+	for _, existing := range modelRules {
+		if entryProviderID(existing) == stableProviderID {
 			continue // replace our own stale entries, keep everything else
 		}
 		kept = append(kept, existing)
@@ -165,59 +172,106 @@ func (z *zcode) Enable(o Options) error {
 		}
 		kept = append(kept, entry)
 	}
-	mc.ProviderModelRules = kept
-	cfg.Config.ModelConfigRules = mc
-
-	data, err := json.MarshalIndent(cfg, "", "  ")
-	if err != nil {
-		return err
+	mcr["providerModelRules"] = kept
+	// ZCode's zod schema demands this key be an array, and an empty one is
+	// valid — but it is a list zen-gate never writes, so it has to survive
+	// being absent from our side too.
+	if _, present := mcr["manualProviderModelRules"]; !present {
+		mcr["manualProviderModelRules"] = []any{}
 	}
-	return atomicWrite(path, data)
+	return z.write(doc)
 }
 
 func (z *zcode) Disable() error {
-	path := z.configPath()
-	cfg, err := z.read()
+	doc, err := z.read()
 	if err != nil {
 		return nil // nothing (or unreadable) — leave the file alone
 	}
-	rules := []map[string]any{}
-	for _, existing := range cfg.Config.ProviderConfigRules.ProviderRules {
-		if nameOf(existing) == providerName {
-			continue
-		}
-		rules = append(rules, existing)
+	cfg, _ := doc["config"].(map[string]any)
+	if cfg == nil {
+		return nil
 	}
-	cfg.Config.ProviderConfigRules.ProviderRules = rules
-	if mc := cfg.Config.ModelConfigRules; mc.ProviderModelRules != nil {
-		kept := []map[string]any{}
-		for _, existing := range mc.ProviderModelRules {
-			if pid, _ := existing["providerId"].(string); pid == stableProviderID {
+	if pcr, ok := cfg["providerConfigRules"].(map[string]any); ok {
+		rules, err := arrayField(pcr, "providerRules")
+		if err != nil {
+			return err
+		}
+		kept := make([]any, 0, len(rules))
+		for _, existing := range rules {
+			if entryName(existing) == providerName {
 				continue
 			}
 			kept = append(kept, existing)
 		}
-		mc.ProviderModelRules = kept
-		cfg.Config.ModelConfigRules = mc
+		pcr["providerRules"] = kept
 	}
-	data, err := json.MarshalIndent(cfg, "", "  ")
-	if err != nil {
-		return err
+	if mcr, ok := cfg["modelConfigRules"].(map[string]any); ok {
+		rules, err := arrayField(mcr, "providerModelRules")
+		if err != nil {
+			return err
+		}
+		if _, present := mcr["providerModelRules"]; present {
+			kept := make([]any, 0, len(rules))
+			for _, existing := range rules {
+				if entryProviderID(existing) == stableProviderID {
+					continue
+				}
+				kept = append(kept, existing)
+			}
+			mcr["providerModelRules"] = kept
+		}
 	}
-	return atomicWrite(path, data)
+	return z.write(doc)
 }
 
-func nameOf(rule map[string]any) string {
-	if s, ok := rule["providerName"].(string); ok {
+// ruleList reads the provider rules array out of a document that may not have
+// been written by zen-gate at all.
+func ruleList(doc map[string]any) []any {
+	cfg, _ := doc["config"].(map[string]any)
+	pcr, _ := cfg["providerConfigRules"].(map[string]any)
+	rules, _ := pcr["providerRules"].([]any)
+	return rules
+}
+
+// childMap returns m[key] as a writable object, creating it when the key is
+// absent. A value of another type is replaced: these three keys are the path
+// zen-gate owns, and a non-object there is not a shape it can add itself to.
+func childMap(m map[string]any, key string) map[string]any {
+	if sub, ok := m[key].(map[string]any); ok && sub != nil {
+		return sub
+	}
+	sub := map[string]any{}
+	m[key] = sub
+	return sub
+}
+
+// arrayField reads a key that must hold an array. Absent (or JSON null) reads
+// as empty; a value of any other type is somebody else's data in a shape
+// zen-gate will not guess about, so the write is refused instead of replacing it.
+func arrayField(m map[string]any, key string) ([]any, error) {
+	v, present := m[key]
+	if !present || v == nil {
+		return []any{}, nil
+	}
+	arr, ok := v.([]any)
+	if !ok {
+		return nil, fmt.Errorf("%s 不是数组，为避免破坏已有内容，zen-gate 不会改写它", key)
+	}
+	return arr, nil
+}
+
+func entryName(raw any) string {
+	m, _ := raw.(map[string]any)
+	if s, ok := m["providerName"].(string); ok {
 		return s
 	}
 	return ""
 }
 
-func newUUID() string {
-	b := make([]byte, 16)
-	_, _ = rand.Read(b)
-	b[6] = (b[6] & 0x0f) | 0x40
-	b[8] = (b[8] & 0x3f) | 0x80
-	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
+func entryProviderID(raw any) string {
+	m, _ := raw.(map[string]any)
+	if s, ok := m["providerId"].(string); ok {
+		return s
+	}
+	return ""
 }
