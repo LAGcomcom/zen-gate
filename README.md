@@ -6,13 +6,13 @@
 
 **把 OpenCode Zen 免费模型，装进你所有的 AI Agent。**
 
-一个桌面托盘程序（Windows 10/11 与 macOS 13+）：本地起一个 OpenAI / Anthropic
+一个桌面托盘程序（Windows 10/11、macOS 13+ 与 Linux）：本地起一个 OpenAI / Anthropic
 兼容网关，自动探测并接入你机器上已安装的 AI Agent——模型选择器里直接出现免费模型。
 
 [![release](https://img.shields.io/github/v/release/LAGcomcom/zen-gate?style=flat-square&label=%E7%89%88%E6%9C%AC)](https://github.com/LAGcomcom/zen-gate/releases/latest)
 [![downloads](https://img.shields.io/github/downloads/LAGcomcom/zen-gate/total?style=flat-square&label=%E4%B8%8B%E8%BD%BD)](https://github.com/LAGcomcom/zen-gate/releases)
 [![go](https://img.shields.io/badge/Go-1.23-00ADD8?style=flat-square&logo=go&logoColor=white)](https://go.dev)
-[![platform](https://img.shields.io/badge/Windows-10%2F11%20%7C%20macOS%2013%2B-0078D6?style=flat-square&logo=windows11&logoColor=white)](https://github.com/LAGcomcom/zen-gate/releases)
+[![platform](https://img.shields.io/badge/Windows-10%2F11%20%7C%20macOS%2013%2B%20%7C%20Linux-0078D6?style=flat-square&logo=windows11&logoColor=white)](https://github.com/LAGcomcom/zen-gate/releases)
 [![license](https://img.shields.io/github/license/LAGcomcom/zen-gate?style=flat-square)](LICENSE)
 
 [下载最新版](https://github.com/LAGcomcom/zen-gate/releases/latest) · [问题反馈](https://github.com/LAGcomcom/zen-gate/issues)
@@ -72,6 +72,27 @@ cp -R "dist/Zen Gate.app" /Applications/
 open "/Applications/Zen Gate.app"
 ```
 
+**Linux** — `tools/build-linux.sh` 产出 `dist/Zen_Gate-x86_64.AppImage`
+（自包含 GTK3 + appindicator，无需安装依赖），下载后 `chmod +x` 双击运行即可：
+
+```bash
+tools/build-linux.sh 1.2.1
+chmod +x dist/Zen_Gate-x86_64.AppImage
+./dist/Zen_Gate-x86_64.AppImage
+```
+
+Linux 版没有原生内嵌窗口：管理页在默认浏览器打开，托盘常驻（AppImage 内的
+`zen-gate.desktop` 也支持「开机自启」开关，写入 `~/.config/autostart`）。
+
+**Debian / Ubuntu / Deepin 等** — `tools/build-deb.sh` 产出 `dist/zen-gate_*.deb`
+（依赖系统 `libgtk-3-0` 与 `libayatana-appindicator3-1`，体积更小），安装：
+
+```bash
+tools/build-deb.sh 1.2.1
+sudo apt install ./dist/zen-gate_1.2.1-linux_amd64.deb
+zen-gate   # 或从应用菜单启动
+```
+
 两边都是：到「Agent 适配」页打开你装的 Agent 开关 → 重启该 Agent →
 模型选择器里出现免费模型。
 
@@ -93,6 +114,19 @@ macOS（需要 cgo 与 Xcode 命令行工具；脚本负责编出 arm64 + x86_64
 tools/build-macos.sh 1.2.1
 ```
 
+Linux（需要 cgo、gcc、`libgtk-3-dev` 与 `libayatana-appindicator3-dev`；
+脚本编译后自动用 linuxdeploy + appimagetool 打出自包含 AppImage）：
+
+```bash
+tools/build-linux.sh 1.2.1
+```
+
+Debian 系 .deb（同一二进制，依赖系统库，体积更小）：
+
+```bash
+tools/build-deb.sh 1.2.1
+```
+
 发版：推一个 `v*` 标签（GitHub Actions 自动构建发布），或本地
 `powershell -File tools\release.ps1 -Version 1.2.2`。macOS 包目前**不**随标签
 发布——只有 ad-hoc 签名，缺少 Developer ID 与公证，发出去只会被 Gatekeeper 拦。
@@ -109,18 +143,19 @@ macOS 的发行物是整个 `.app`，覆盖包内二进制会破坏签名，所�
 
 ## 平台差异
 
-两个平台的实现按文件后缀拆分（`*_windows.go` / `*_darwin.go`），共用代码不带后缀：
+三个平台的实现按文件后缀拆分（`*_windows.go` / `*_darwin.go` / `*_linux.go`），
+共用代码不带后缀：
 
-| | Windows | macOS |
-|---|---|---|
-| 窗口 | WebView2 + Win32 无边框窗口 | WKWebView + NSWindow（全尺寸内容视图，隐藏系统红绿灯） |
-| 托盘 | `getlantern/systray`，独占一个锁定的 goroutine | 同上，但与窗口共用主线程——AppKit 只允许主线程建窗口 |
-| 开机自启 | `HKCU\...\Run` | `~/Library/LaunchAgents/com.lagcomcom.zen-gate.plist` + `launchctl bootstrap` |
-| 系统代理 | `HKCU\...\Internet Settings`（WinINET） | `scutil --proxy` |
-| 通知 | PowerShell + WinRT toast | `osascript -e 'display notification'` |
-| 数据目录 | `%APPDATA%\zen-gate` | `~/Library/Application Support/zen-gate`（`ZEN_GATE_HOME` 可覆盖） |
-| 单实例 | 命名互斥体 | `zen-gate.lock` 上的 `flock`（进程退出即释放，不会留死锁） |
-| 一键更新 | 支持 | 不支持，只跳发布页 |
+| | Windows | macOS | Linux |
+|---|---|---|---|
+| 窗口 | WebView2 + Win32 无边框窗口 | WKWebView + NSWindow（全尺寸内容视图，隐藏系统红绿灯） | 无内嵌窗口：管理页在默认浏览器打开（`xdg-open`），托盘常驻 |
+| 托盘 | `getlantern/systray`，独占一个锁定的 goroutine | 同上，但与窗口共用主线程——AppKit 只允许主线程建窗口 | 同上，GTK 主循环跑在主 goroutine（libayatana-appindicator） |
+| 开机自启 | `HKCU\...\Run` | `~/Library/LaunchAgents/com.lagcomcom.zen-gate.plist` + `launchctl bootstrap` | `~/.config/autostart/zen-gate.desktop`（AppImage 运行时指向 `.AppImage` 本体） |
+| 系统代理 | `HKCU\...\Internet Settings`（WinINET） | `scutil --proxy` | `https_proxy` / `http_proxy` 环境变量 |
+| 通知 | PowerShell + WinRT toast | `osascript -e 'display notification'` | `notify-send`（libnotify） |
+| 数据目录 | `%APPDATA%\zen-gate` | `~/Library/Application Support/zen-gate`（`ZEN_GATE_HOME` 可覆盖） | `$XDG_CONFIG_HOME`（或 `~/.config`）`/zen-gate`（`ZEN_GATE_HOME` 可覆盖） |
+| 单实例 | 命名互斥体 | `zen-gate.lock` 上的 `flock`（进程退出即释放，不会留死锁） | 未做进程级互斥：靠网关端口绑定兜底（同一端口被占时第二个实例退出） |
+| 一键更新 | 支持 | 不支持，只跳发布页 | 不支持（AppImage 为只读挂载），只跳发布页 |
 
 窗口按钮（最小化 / 最大化 / 关闭 / 拖拽）在两边都通过页面注入的
-`window.zengate*` 绑定实现，所以 dashboard 一份代码两处跑。
+`window.zengate*` 绑定实现，所以 dashboard 一份代码三处跑。
