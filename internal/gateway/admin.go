@@ -109,6 +109,8 @@ func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request, rest string
 		s.adminImport(w, r)
 	case strings.HasPrefix(rest, "agent/"):
 		s.adminAgent(w, r, strings.TrimPrefix(rest, "agent/"))
+	case rest == "qoder/status" && r.Method == http.MethodGet:
+		s.adminQoderStatus(w, r)
 	case rest == "providers" && r.Method == http.MethodPost:
 		s.adminProviderSave(w, r)
 	case rest == "providers/delete" && r.Method == http.MethodPost:

@@ -1120,11 +1120,44 @@ let pvEditSaved = [];        // 编辑前的已保存模型（用于预勾选）
 
 function pvProto(){ return $("#pv-proto").dataset.value || "openai"; }
 
+async function renderQoderCard(){
+  const st = await fetch("/admin/api/qoder/status").then(r=>r.json()).catch(()=>null);
+  const stateEl = $("#qoder-state"), body = $("#qoder-body");
+  if(!stateEl || !body) return;
+  const repo = 'https://github.com/Morpheus799/qodercn-gateway';
+  if(!st || !st.running){
+    stateEl.textContent = "未运行";
+    body.innerHTML = '本地 qodercn-gateway 未在 127.0.0.1:8095 运行。接入步骤：' +
+      '① 从 <a href="'+repo+'" target="_blank">qodercn-gateway</a> 下载或构建，' +
+      '运行 <code>--host 127.0.0.1 --port 8095</code>；' +
+      '② 用 Qoder IDE 登录一次（网关会自动读取它的登录凭据）；' +
+      '③ 回到本页刷新——已登录后模型自动进入所有 Agent 选择器，未登录时自动隐藏。';
+    return;
+  }
+  if(!st.loggedIn){
+    stateEl.textContent = "未登录";
+    body.innerHTML = '网关在线但 Qoder 凭据未激活（'+ (st.detail||'token 已过期') +'）。' +
+      '打开 Qoder IDE 登录一次——网关每个请求都会重读凭据，刷新后模型自动恢复，无需重启网关。';
+    return;
+  }
+  stateEl.textContent = "已登录 · " + (st.models||[]).length + " 个模型";
+  body.innerHTML = '模型已进入所有 Agent 选择器（<code>qoder/模型名</code>）。token 跟随 Qoder IDE 的登录状态，' +
+    '过期时打开 IDE 刷新即可自动恢复。' +
+    '<div style="margin-top:6px;display:flex;flex-wrap:wrap;gap:4px">' +
+    (st.models||[]).map(m=>'<span class="badge">'+m.replace(/^qoder\//,'')+'</span>').join('') +
+    '</div>';
+}
+
 function renderProviders(s){
+  renderQoderCard();
   const el = $("#page-providers");
   if(!el.dataset.rendered){
     el.innerHTML = `
       <h2 class="pt">自定义 API <span class="sub">接入你自己的上游（OpenAI / Anthropic 兼容），模型以 供应商ID/模型名 出现在所有 Agent 选择器里</span></h2>
+      <div class="card" id="qoder-card">
+        <h3>Qoder 账号渠道 <span class="muted" style="font-size:11px" id="qoder-state"></span></h3>
+        <div class="muted" style="font-size:12px; line-height:1.7" id="qoder-body"></div>
+      </div>
       <div class="card">
         <h3>免费模型商预设 <span class="muted" style="font-size:11px">点击填充，Key 需要你自己去对应平台申请</span></h3>
         <div class="pchips" id="pv-presets"></div>
