@@ -28,7 +28,8 @@ import (
 const (
 	qoderGatewayURL = "http://127.0.0.1:8095" // the sidecar's default bind
 	qoderProviderID = "qoder"
-	qoderHTTPClient = 2500 * time.Millisecond
+	qoderProbeFast  = 2500 * time.Millisecond // /health is local, fast
+	qoderProbeSlow  = 8 * time.Second         // /quota and /v1/models ride the upstream
 )
 
 type qoderStatus struct {
@@ -40,7 +41,11 @@ type qoderStatus struct {
 }
 
 func qoderGet(path string) (int, []byte, error) {
-	client := &http.Client{Timeout: qoderHTTPClient}
+	timeout := qoderProbeFast
+	if strings.HasPrefix(path, "/quota") || strings.HasPrefix(path, "/v1/") {
+		timeout = qoderProbeSlow
+	}
+	client := &http.Client{Timeout: timeout}
 	resp, err := client.Get(qoderGatewayURL + path)
 	if err != nil {
 		return 0, nil, err
