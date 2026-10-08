@@ -1,9 +1,6 @@
 // zen-gate: a local tray gateway that exposes the OpenCode Zen free lane as
 // OpenAI/Anthropic-compatible APIs and auto-configures installed agents.
-//
-// Protocol behaviour is ported from the MIT-licensed dsh-our-free-model
-// plugin (github.com/zouyuxuan122/dsh-our-free-model); usage of the free lane
-// remains subject to the upstream provider's terms.
+// Usage of the free lane remains subject to the upstream provider's terms.
 package main
 
 import (
@@ -61,7 +58,10 @@ func main() {
 
 	window.SetAppUserModelID("zen-gate.gateway")
 
-	if !window.AcquireSingleInstance(`Local\zen-gate-instance`, "Zen Gate · 本地免费模型网关") {
+	// Headless second instances (dev/test against a separate ZEN_GATE_HOME)
+	// opt in via ZEN_GATE_ALLOW_MULTI; the tray app keeps the single-instance
+	// guarantee.
+	if os.Getenv("ZEN_GATE_ALLOW_MULTI") == "" && !window.AcquireSingleInstance(`Local\zen-gate-instance`, "Zen Gate · 本地免费模型网关") {
 		logger.Infof("second launch: focused the running instance instead")
 		return
 	}
