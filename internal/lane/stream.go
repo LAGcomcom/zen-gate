@@ -312,8 +312,13 @@ func (d *Decoder) chatToolCall(m map[string]any) {
 		name = jsonString(fn["name"])
 		args = jsonString(fn["arguments"])
 	}
+	// Mint an id only when this frame opens a new tool block. A continuation
+	// frame (same key, no id of its own) must stay id-less: minting a fresh id
+	// there would advertise a different call id than the first frame sent.
 	if id == "" {
-		id = "call_" + mintHex(12)
+		if _, open := d.blocks[key]; !open {
+			id = "call_" + mintHex(12)
+		}
 	}
 	idx := d.startBlock(key, "tool-call", id, RestoreToolName(name, d.rename))
 	d.result.SawToolCall = true
