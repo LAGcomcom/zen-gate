@@ -50,7 +50,7 @@ var lastStamp atomic.Int64
 var seqCounter atomic.Int64
 
 // MintSessionId mints a gateway-shaped canonical session id
-// (time-prefixed, monotonic counter), matching upstream.js byte for byte.
+// (time-prefixed, monotonic counter), byte for byte the shape a real client mints.
 func MintSessionId(nowMS int64) string {
 	if nowMS <= 0 {
 		nowMS = time.Now().UnixMilli()
@@ -97,7 +97,7 @@ func SessionForConversation(seed string) string {
 	if seed == "" {
 		seed = "global"
 	}
-	sum := sha256.Sum256([]byte("our-free-model\x00" + seed))
+	sum := sha256.Sum256([]byte("zen-gate\x00" + seed))
 	return "ses_" + hex.EncodeToString(sum[:6]) + base62From(sum[6:20])
 }
 
@@ -106,7 +106,7 @@ func RequestIdFor(session, turnSeed string) string {
 	if strings.TrimSpace(turnSeed) == "" {
 		return MintRequestId(0)
 	}
-	sum := sha256.Sum256([]byte("our-free-model-req\x00" + session + "\x00" + turnSeed))
+	sum := sha256.Sum256([]byte("zen-gate-req\x00" + session + "\x00" + turnSeed))
 	id := "msg_" + hex.EncodeToString(sum[:6]) + base62From(sum[6:20])
 	if !requestRe.MatchString(id) {
 		return MintRequestId(0)

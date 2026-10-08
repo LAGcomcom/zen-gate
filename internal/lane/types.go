@@ -1,9 +1,10 @@
-// Package lane speaks to the OpenCode Zen free lane (https://opencode.ai).
+// Package lane speaks to the OpenCode Zen free lane (https://opencode.ai) and
+// to the other keyless free sources the gateway aggregates.
 //
-// The wire behaviour ported here was reverse-engineered and documented by the
-// MIT-licensed dsh-our-free-model plugin (github.com/zouyuxuan122/dsh-our-free-model);
-// every constant and format matches that implementation so the two stay
-// interchangeable against the same gateway.
+// The wire behaviour here was settled against the live gateway: session
+// minting, the tool-name gate, the three wire protocols (chat / responses /
+// messages), and cut-stream recovery all reproduce what a genuine desktop
+// client sends, so models answer without a per-user key.
 package lane
 
 import (
@@ -117,8 +118,7 @@ const (
 	ChunkFinish        = "finish"
 )
 
-// Chunk is a normalized stream piece, mirroring the harness StreamChunk shape
-// used by dsh-our-free-model.
+// Chunk is a normalized stream piece.
 type Chunk struct {
 	Kind      string
 	Index     int
@@ -228,7 +228,10 @@ type UpstreamError struct {
 
 func (e *UpstreamError) Error() string { return fmt.Sprintf("%s: %s", e.Code, e.Message) }
 
-// Classification codes, matching dsh-our-free-model's CODE table.
+// Classification codes for lane failures. CodeClient marks a refusal that is
+// the request's own fault (a WAF page, a 4xx the caller cannot fix by
+// re-sending): replaying the identical body reproduces the identical refusal,
+// so it stays outside the failover set.
 const (
 	CodeRegion     = "REGION_BLOCKED"
 	CodeQuota      = "RATE_LIMIT"
@@ -236,6 +239,7 @@ const (
 	CodeTransport  = "TRANSPORT"
 	CodeTimeout    = "TIMEOUT"
 	CodeServer     = "SERVER"
+	CodeClient     = "CLIENT_ERROR"
 	CodeEmpty      = "EMPTY_RESPONSE"
 	CodeAborted    = "ABORTED"
 )

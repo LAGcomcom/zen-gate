@@ -16,8 +16,10 @@ import (
 // normalized back into whatever wire the caller speaks.
 
 // providerRoute resolves a namespaced model id onto its provider. Matching
-// never collides with the free lane: zen model ids contain no "/", so a first
-// segment that names a provider is unambiguous.
+// never collides with lane models: a zen model id contains no "/", and a
+// Kilo id that does (e.g. "nvidia/nemotron-3-ultra:free") names a model the
+// lane catalog already knows — catalog membership wins, so a user-added
+// provider sharing the first segment never hijacks a free-pool id.
 func (s *Server) providerRoute(model string) (*store.Provider, string, bool) {
 	base := lane.BaseModelId(model)
 	i := strings.Index(base, "/")
@@ -25,6 +27,9 @@ func (s *Server) providerRoute(model string) (*store.Provider, string, bool) {
 		return nil, "", false
 	}
 	id, upstream := base[:i], base[i+1:]
+	if cat, _, _ := s.Lane.Snapshot(); laneCatalogHas(cat, base) {
+		return nil, "", false
+	}
 	cfg := s.Store.Config()
 	for k := range cfg.Providers {
 		if cfg.Providers[k].ID == id {
@@ -32,6 +37,16 @@ func (s *Server) providerRoute(model string) (*store.Provider, string, bool) {
 		}
 	}
 	return nil, "", false
+}
+
+// laneCatalogHas reports whether an exact id is in the lane catalog.
+func laneCatalogHas(cat []lane.ModelInfo, id string) bool {
+	for _, m := range cat {
+		if m.ID == id {
+			return true
+		}
+	}
+	return false
 }
 
 // relayError writes a provider failure in the caller's error shape.

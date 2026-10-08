@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	io "io"
 	"net"
 	neturl "net/url"
@@ -22,12 +23,27 @@ var (
 	regionRe  = regexp.MustCompile(`(?i)RegionError|not available in your country|region.?block`)
 	quotaRe   = regexp.MustCompile(`(?i)FreeUsageLimitError|usage limit|rate limit`)
 	modelErrRe = regexp.MustCompile(`(?i)ModelError|model is unavailable|model is not supported|not supported|Endpoint is unavailable`)
+	htmlPageRe = regexp.MustCompile(`(?i)^\s*<(!doctype|html[\s>])`)
 )
 
+// isHTMLPage reports whether an upstream failure body is a front proxy's HTML
+// error page. The status alone misfiles it — a WAF's 403 is not a bad
+// credential, its 413 is not a request the caller can fix by re-sending — and
+// the markup buries the one useful fact. It names the hop instead of the
+// credential: if this hit a long conversation, the request size is the likely
+// trigger.
+func isHTMLPage(payload string) bool {
+	return htmlPageRe.MatchString(payload) ||
+		strings.Contains(payload, "with an HTML error page")
+}
+
+const htmlPageHint = "the gateway's front proxy answered with an HTML error page — usually a WAF or body-size limit in front of the gateway, not your credentials; if this hit a long conversation, its request size is the likely trigger"
+
 // ClassifyFailure maps an upstream status/error payload onto a code.
-// Payload patterns are checked before status codes, matching the reference
-// implementation: a reverse proxy's generic 503 "Service Unavailable" reason
-// phrase must not be read as a per-model verdict.
+// Payload patterns are checked before status codes: a reverse proxy's generic
+// 503 "Service Unavailable" reason phrase must not be read as a per-model
+// verdict, and an HTML page is the front proxy speaking, never the credential
+// store.
 func ClassifyFailure(status int, payload string, retryAfterSec int) *UpstreamError {
 	e := &UpstreamError{Message: truncate(payload, 300), RetryAfter: retryAfterSec}
 	switch {
@@ -38,6 +54,16 @@ func ClassifyFailure(status int, payload string, retryAfterSec int) *UpstreamErr
 		if e.RetryAfter == 0 {
 			e.RetryAfter = 60
 		}
+	case isHTMLPage(payload):
+		// The front proxy refused before any model was consulted; replaying
+		// the identical body draws the identical page, so this is outside the
+		// switchable set regardless of status. The markup itself is noise —
+		// the message names the hop and the status, never quotes the page.
+		e.Code = CodeClient
+		e.Message = htmlPageHint
+		if status > 0 {
+			e.Message += fmt.Sprintf(" (HTTP %d)", status)
+		}
 	case status == 401 || status == 403:
 		e.Code = CodeCredential
 	case status >= 500:
@@ -45,6 +71,12 @@ func ClassifyFailure(status int, payload string, retryAfterSec int) *UpstreamErr
 	case status == 404 || status == 400 || status == 422 || modelErrRe.MatchString(payload):
 		e.Code = CodeServer
 		e.Unavailable = true
+	case status >= 400 && status != 408 && status != 425:
+		// 4xx is the request's own fault: replaying the identical body
+		// reproduces the identical refusal. 408 and 425 are the carve-out —
+		// they name the gateway's own timing trouble, and a re-send can answer
+		// differently.
+		e.Code = CodeClient
 	default:
 		e.Code = CodeServer
 	}
@@ -536,6 +568,10 @@ func jsonString(v any) string {
 	switch t := v.(type) {
 	case string:
 		return t
+	case nil:
+		// An absent field is nothing, never the literal token a JSON
+		// marshaller would invent for it.
+		return ""
 	default:
 		b, _ := json.Marshal(t)
 		return string(b)

@@ -6,10 +6,19 @@ import (
 	"time"
 )
 
-// Recovery policy, ported from recovery.js.
+// Recovery policy: how a turn that ended without its answer gets one.
+//
+// The wall clock is the whole turn's backstop, not the only hang guard: the
+// transport layer holds its own no-byte idle cutoff (every chunk resets it),
+// so the wall clock only cuts turns that keep producing frames but slowly.
+// Pool-saturation spells (2026-10 实测: first token 34–220s, deep thinking
+// past six minutes) made the old 8-minute window cut healthy long turns, and
+// even 15 minutes lost "first segment + continuation" turns past seven —
+// hence 30. Continuations get the remainder of the window, not a fresh one.
+// Numbers may only ever move down from here; the bounded semantics stay.
 const (
-	RecoveryMaxContinuationMS = 180000
-	RecoveryTotalTimeoutMS    = 480000
+	RecoveryMaxContinuationMS = 1800000
+	RecoveryTotalTimeoutMS    = 1800000
 	RecoveryMaxOutputTokens   = 8192
 )
 
@@ -28,6 +37,12 @@ const recoveryInstruction = "The previous response was interrupted before its fi
 	"never claim an external action was executed. " +
 	"Do not merely summarize the interruption or promise to continue.\n\n" +
 	"Interrupted analysis checkpoint:\n"
+
+const continuationInstruction = "You reached the output token limit and your answer was cut off mid-way. " +
+	"Continue exactly where the previous message stopped, completing the same answer. " +
+	"Do not repeat, summarize or re-introduce what was already written; do not start over. " +
+	"Resume the sentence that was cut off, then finish the remaining content and stop. " +
+	"Do not call tools for this continuation."
 
 // CallRecord is emitted after every upstream request (physical, not logical).
 type CallRecord struct {
@@ -235,13 +250,19 @@ func (l *Lane) ServableModels() []ModelInfo {
 	return out
 }
 
-// RefreshCatalog re-pulls the listing; a failure keeps the cached catalog.
+// RefreshCatalog re-pulls both listings; a failure on either keeps that
+// source's cached slice.
 func (l *Lane) RefreshCatalog(ctx context.Context) {
-	ids, err := FetchListing(ctx)
-	if err != nil || len(ids) == 0 {
+	cat := []ModelInfo{}
+	if ids, err := FetchListing(ctx); err == nil && len(ids) > 0 {
+		cat = append(cat, BuildCatalog(ids)...)
+	}
+	if rows, err := FetchKiloListing(ctx); err == nil {
+		cat = append(cat, BuildKiloCatalog(rows)...)
+	}
+	if len(cat) == 0 {
 		return
 	}
-	cat := BuildCatalog(ids)
 	l.mu.Lock()
 	l.catalog = cat
 	l.mu.Unlock()
@@ -268,10 +289,23 @@ func (l *Lane) ProbeRound(ctx context.Context, manual bool) {
 
 	// 逐个探测：一次只测一个模型，测完一个立刻生效并广播——
 	// 用户看到的是模型一个接一个亮起来，而不是全轮结束后一起翻转。
+	// Kilo 池不探测：它的名单每轮随 listing 重建，在列即可用，
+	// 探测只会白白烧一次调度。
 	allThrottled := len(cat) > 0
 	for _, m := range cat {
 		if ctx.Err() != nil {
 			break
+		}
+		if m.Channel == ChannelKilo {
+			l.mu.Lock()
+			prev, had := l.availability[m.ID]
+			if !had || prev.State == "" {
+				l.availability[m.ID] = ProbeResult{Model: m.ID, State: StateAvailable,
+					At: time.Now().UnixMilli(), Detail: "在列（免费池名单即判定）"}
+			}
+			allThrottled = false
+			l.mu.Unlock()
+			continue
 		}
 		l.mu.Lock()
 		l.probingModel = m.ID
@@ -351,6 +385,12 @@ func (l *Lane) ProbeOne(model string) ProbeResult {
 	}
 
 	r := ProbeModel(context.Background(), entry)
+	if entry.Channel == ChannelKilo {
+		// Presence in the free-pool roster is the verdict; probing would only
+		// spend a scheduling slot.
+		r = ProbeResult{Model: entry.ID, State: StateAvailable, At: time.Now().UnixMilli(),
+			Detail: "在列（免费池名单即判定）"}
+	}
 
 	l.mu.Lock()
 	if prev, ok := l.availability[model]; ok && l.OnProbeEdge != nil && prev.State != r.State && prev.State != "" && r.State != "" {
@@ -439,9 +479,9 @@ func (l *Lane) notify() {
 // one bounded checkpoint recovery request.
 // Complete runs one logical turn. When the requested model is rate-limited or
 // otherwise refuses before anything was streamed, it switches to the next
-// available model — the dsh lesson is that a 429 must never be retried on the
-// same model (quota is accounted per session; a retry is a second burn), so
-// switching is the only honest lever.
+// available model — a 429 must never be retried on the same model (quota is
+// accounted per session; a retry is a second burn), so switching is the only
+// honest lever.
 func (l *Lane) Complete(ctx context.Context, req Request, emit func(Chunk)) (Outcome, *UpstreamError) {
 	effort := req.Effort
 	if effort == "" {
@@ -595,6 +635,10 @@ func (l *Lane) attemptModel(ctx context.Context, req Request, model, effort stri
 	wire := entry.Wire
 	style := mapWireStyle(wire)
 
+	// The Zen lane fingerprints tools and mints session/request ids; the Kilo
+	// pool has no tool-name gate and no session concept — its models see the
+	// caller's tools exactly as declared, and a plain POST per turn.
+	kilo := entry.Channel == ChannelKilo
 	buildBody := func(msgs []Message, tools []ToolDef, maxTokens int) map[string]any {
 		body := map[string]any{"model": base, "stream": true}
 		switch wire {
@@ -627,18 +671,37 @@ func (l *Lane) attemptModel(ctx context.Context, req Request, model, effort stri
 				body["tools"] = t
 			}
 		}
+		// Kilo's thinking control is the effort field itself, not a token
+		// ladder: the selected rung rides the request as the pool's own
+		// reasoning effort (light→low, balanced→medium, deep→high), verified
+		// against the families the pool honours. max_tokens still caps output.
+		if kilo && entry.Reasoning {
+			body["reasoning"] = map[string]any{"effort": kiloEffortRung(effort)}
+		}
 		return body
 	}
 
+	// The Zen lane fingerprints tools and mints session/request ids; the Kilo
+	// pool has no tool-name gate and no session concept — its models see the
+	// caller's tools exactly as declared, and a plain POST per turn.
 	session := SessionForConversation(req.SessionSeed)
 	requestID := RequestIdFor(session, req.TurnSeed)
+	post := func(cctx context.Context, body map[string]any, onData func(payload []byte) error) (*Usage, error) {
+		if kilo {
+			return PostKiloStreamed(cctx, body, onData)
+		}
+		return PostStreamed(cctx, EndpointFor(base), body, session, requestID, onData)
+	}
 
 	body := buildBody(messages, req.Tools, budget)
-	rename := ApplyFingerprint(body, style)
+	rename := map[string]string{}
+	if !kilo {
+		rename = ApplyFingerprint(body, style)
+	}
 
 	decoder := NewDecoder(wire, rename, emit)
 	var firstAt int64
-	usage, err := PostStreamed(ctx, EndpointFor(base), body, session, requestID, func(p []byte) error {
+	usage, err := post(ctx, body, func(p []byte) error {
 		if firstAt == 0 {
 			firstAt = time.Since(start).Milliseconds()
 		}
@@ -660,62 +723,93 @@ func (l *Lane) attemptModel(ctx context.Context, req Request, model, effort stri
 		return Outcome{Finish: result.Finish}, uerr, sawAny
 	}
 	if result.SawFinish {
+		switch result.FinishToken {
+		case "failed", "cancelled":
+			// A terminal frame that names the turn a failure is not a clean
+			// stop, even though the mapped reason collapses into stop.
+			l.record(CallRecord{Model: base, Ok: false, Effort: effort, Agent: req.Agent, At: time.Now().UnixMilli()}, result, nil, firstAt)
+			return Outcome{Usage: result.Usage}, &UpstreamError{Code: CodeServer,
+				Message: "upstream ended the turn with " + result.FinishToken}, sawAny
+		}
 		l.MarkOK(base)
 		l.record(CallRecord{Model: base, Ok: true, Effort: effort, Agent: req.Agent, At: time.Now().UnixMilli()}, result, nil, firstAt)
 		return Outcome{Usage: result.Usage, Finish: result.Finish}, nil, true
 	}
 
-	// Cut stream. Retry only a pure-reasoning cut that produced nothing else —
-	// a mid-content cut is a property of this turn's length, and re-sending
-	// would pay the same five minutes again.
+	// Ending without its answer. Three shapes get one continuation each —
+	// a cut pure-reasoning turn (no finish), a clean stop that carried only
+	// thinking, and an answer truncated at the output ceiling — everything
+	// else reports honestly.
 	elapsed := time.Since(start).Milliseconds()
-	if !canRecover(result, elapsed) {
-		l.record(CallRecord{Model: base, Ok: false, Truncated: true, Effort: effort, Agent: req.Agent, At: time.Now().UnixMilli()}, result, nil, firstAt)
-		return Outcome{Usage: result.Usage}, &UpstreamError{Code: CodeTransport, Message: "upstream closed the stream without a finish token"}, sawAny
-	}
+	interrupted := canRecover(result, elapsed)
+	silentStop := !interrupted && canRecoverSilentStop(result, elapsed)
+	maxTokensCut := !interrupted && !silentStop && canContinueFromCut(result, elapsed)
 
-	recovBudget := min2(RecoveryMaxOutputTokens, budget-result.Usage.Output)
-	if recovBudget < 512 || !checkpointFits(messages, *entry, result.ReasoningText, recovBudget) {
-		l.record(CallRecord{Model: base, Ok: false, Truncated: true, Effort: effort, Agent: req.Agent, At: time.Now().UnixMilli()}, result, nil, firstAt)
-		return Outcome{Usage: result.Usage}, &UpstreamError{Code: CodeTransport, Message: "upstream cut a pure-reasoning turn; recovery does not fit the context"}, sawAny
-	}
-	recMsgs := append(append([]Message{}, messages...), Message{Role: RoleUser, Parts: []Part{
-		TextPart{Text: recoveryInstruction + jsonString(result.ReasoningText)},
-	}})
-	recBody := buildBody(recMsgs, nil, recovBudget)
-	ApplyFingerprint(recBody, style)
-	recDecoder := NewDecoder(wire, rename, emit)
-	remaining := RecoveryTotalTimeoutMS - elapsed
-	if remaining > RecoveryMaxContinuationMS {
-		remaining = RecoveryMaxContinuationMS
-	}
-	rctx, cancel := context.WithTimeout(ctx, time.Duration(remaining)*time.Millisecond)
-	defer cancel()
-
-	recUsage, rerr := PostStreamed(rctx, EndpointFor(base), recBody, session, RequestIdFor(session, req.TurnSeed+":recovery"), func(p []byte) error {
-		recDecoder.Decode(p)
-		return nil
-	})
-	recResult := recDecoder.Finish()
-	if recUsage != nil && recResult.Usage.TotalTokens == 0 {
-		recResult.Usage = *recUsage
-	}
-	if rerr == nil && recResult.SawFinish && recResult.Finish == FinishStop && recResult.SawText {
-		recResult.Usage.Merge(&result.Usage)
-		l.MarkOK(base)
-		l.record(CallRecord{Model: base, Ok: true, Recovered: true, Effort: effort, Agent: req.Agent, At: time.Now().UnixMilli()}, recResult, nil, firstAt)
-		return Outcome{Usage: recResult.Usage, Finish: recResult.Finish, Recovered: true}, nil, true
-	}
-	recResult.Usage.Merge(&result.Usage)
-	l.record(CallRecord{Model: base, Ok: false, Truncated: true, Effort: effort, Agent: req.Agent, At: time.Now().UnixMilli()}, recResult, rerr, firstAt)
-	if rerr != nil {
-		uerr := asUpstream(rerr)
-		if uerr.Code == CodeQuota {
-			l.MarkThrottled(base, uerr.RetryAfter)
+	if interrupted || silentStop || maxTokensCut {
+		remaining := budget - result.Usage.Output
+		recovBudget := min2(RecoveryMaxOutputTokens, remaining)
+		checkpoint := result.ReasoningText
+		var recMsgs []Message
+		if maxTokensCut {
+			// The partial answer is already valid assistant output; the wire's
+			// own history carries it, no checkpoint injection.
+			recMsgs = append(append([]Message{}, messages...),
+				Message{Role: RoleAssistant, Parts: []Part{TextPart{Text: result.AnswerText}}},
+				Message{Role: RoleUser, Parts: []Part{TextPart{Text: continuationInstruction}}})
+			checkpoint = result.AnswerText
+		} else {
+			recMsgs = append(append([]Message{}, messages...), Message{Role: RoleUser, Parts: []Part{
+				TextPart{Text: recoveryInstruction + jsonString(result.ReasoningText)},
+			}})
 		}
-		return Outcome{Usage: recResult.Usage}, uerr, true
+		if recovBudget < 512 || !checkpointFits(recMsgs, *entry, checkpoint, recovBudget) {
+			l.record(CallRecord{Model: base, Ok: false, Truncated: true, Effort: effort, Agent: req.Agent, At: time.Now().UnixMilli()}, result, nil, firstAt)
+			return Outcome{Usage: result.Usage}, &UpstreamError{Code: CodeTransport, Message: "upstream cut a turn short; the continuation does not fit the context"}, sawAny
+		}
+		recBody := buildBody(recMsgs, nil, recovBudget)
+		if !kilo {
+			ApplyFingerprint(recBody, style)
+		}
+		recDecoder := NewDecoder(wire, rename, emit)
+		// The continuation deadline is the remainder of the turn's window —
+		// whatever the first segment left, at most.
+		remainingWall := RecoveryTotalTimeoutMS - elapsed
+		if remainingWall > RecoveryMaxContinuationMS {
+			remainingWall = RecoveryMaxContinuationMS
+		}
+		rctx, cancel := context.WithTimeout(ctx, time.Duration(remainingWall)*time.Millisecond)
+		defer cancel()
+
+		recUsage, rerr := post(rctx, recBody, func(p []byte) error {
+			recDecoder.Decode(p)
+			return nil
+		})
+		recResult := recDecoder.Finish()
+		if recUsage != nil && recResult.Usage.TotalTokens == 0 {
+			recResult.Usage = *recUsage
+		}
+		if rerr == nil && recResult.SawFinish && recResult.FinishToken != "failed" && recResult.FinishToken != "cancelled" && recResult.SawText {
+			recResult.Usage.Merge(&result.Usage)
+			l.MarkOK(base)
+			l.record(CallRecord{Model: base, Ok: true, Recovered: true, Effort: effort, Agent: req.Agent, At: time.Now().UnixMilli()}, recResult, nil, firstAt)
+			return Outcome{Usage: recResult.Usage, Finish: recResult.Finish, Recovered: true}, nil, true
+		}
+		recResult.Usage.Merge(&result.Usage)
+		l.record(CallRecord{Model: base, Ok: false, Truncated: true, Effort: effort, Agent: req.Agent, At: time.Now().UnixMilli()}, recResult, rerr, firstAt)
+		if rerr != nil {
+			uerr := asUpstream(rerr)
+			if uerr.Code == CodeQuota {
+				l.MarkThrottled(base, uerr.RetryAfter)
+			}
+			return Outcome{Usage: recResult.Usage}, uerr, true
+		}
+		return Outcome{Usage: recResult.Usage}, &UpstreamError{Code: CodeTransport, Message: "upstream cut the stream; the continuation did not complete"}, true
 	}
-	return Outcome{Usage: recResult.Usage}, &UpstreamError{Code: CodeTransport, Message: "upstream cut the stream; recovery did not complete"}, true
+
+	// Not recoverable: a mid-content cut is a property of this turn's length,
+	// and re-sending would pay the same five minutes again.
+	l.record(CallRecord{Model: base, Ok: false, Truncated: true, Effort: effort, Agent: req.Agent, At: time.Now().UnixMilli()}, result, nil, firstAt)
+	return Outcome{Usage: result.Usage}, &UpstreamError{Code: CodeTransport, Message: "upstream closed the stream without a finish token"}, sawAny
 }
 
 func (l *Lane) record(rec CallRecord, result StreamResult, err error, firstAt int64) {
@@ -752,6 +846,43 @@ func canRecover(result StreamResult, elapsedMS int64) bool {
 		!result.SawToolCall &&
 		!result.CheckpointTruncated &&
 		nonWhitespace(result.ReasoningText)
+}
+
+// canRecoverSilentStop: the upstream closed cleanly but produced only
+// thinking and no answer — most clients judge such a turn an empty response,
+// so it gets the same one checkpoint continuation a cut pure-reasoning turn
+// gets. The raw token decides "clean": the mapped Finish collapses unknown
+// spellings into stop, so failed/cancelled must be excluded here by token.
+func canRecoverSilentStop(result StreamResult, elapsedMS int64) bool {
+	if !result.SawFinish || elapsedMS >= RecoveryTotalTimeoutMS {
+		return false
+	}
+	switch result.FinishToken {
+	case "", "stop", "end_turn", "stop_sequence":
+	default:
+		return false
+	}
+	return result.SawReasoning &&
+		!result.SawText &&
+		!result.SawToolCall &&
+		!result.CheckpointTruncated &&
+		nonWhitespace(result.ReasoningText)
+}
+
+// canContinueFromCut: the answer hit the output ceiling (finish length) and
+// was cut mid-answer, not faulted. The partial answer feeds back as an
+// assistant turn and exactly one continuation with the remaining budget
+// replaces the client's manual "send 继续" relay. First segment only — a
+// continuation that hits the wall again reports max-tokens honestly instead
+// of continuing forever.
+func canContinueFromCut(result StreamResult, elapsedMS int64) bool {
+	return result.SawFinish &&
+		result.Finish == FinishMaxTokens &&
+		result.SawText &&
+		!result.SawToolCall &&
+		!result.BrokenToolCall &&
+		elapsedMS < RecoveryTotalTimeoutMS &&
+		nonWhitespace(result.AnswerText)
 }
 
 func nonWhitespace(s string) bool {

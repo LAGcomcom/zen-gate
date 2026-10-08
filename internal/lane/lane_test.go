@@ -480,3 +480,173 @@ func TestToClaudeMessagesToolResultLeads(t *testing.T) {
 		t.Fatalf("tool_result must lead the user turn, got %v", third[0]["type"])
 	}
 }
+
+// --- reasoning spellings -----------------------------------------------------
+
+func TestDecoderChatReasoningSpellings(t *testing.T) {
+	var reasons []string
+	for _, spelling := range []string{"reasoning", "reasoning_content", "reasoning_text", "thinking"} {
+		reasons = nil
+		dec := NewDecoder("chat", nil, func(c Chunk) {
+			if c.Kind == ChunkReasonDelta {
+				reasons = append(reasons, c.Delta)
+			}
+		})
+		dec.Decode([]byte(`{"choices":[{"delta":{` + `"` + spelling + `":"deep thought"}}]}`))
+		if strings.Join(reasons, "") != "deep thought" {
+			t.Fatalf("spelling %q not read as reasoning", spelling)
+		}
+	}
+	// reasoning_details array form, and only the first non-empty spelling
+	// counting when a frame carries two names for the same text.
+	reasons = nil
+	dec := NewDecoder("chat", nil, func(c Chunk) {
+		if c.Kind == ChunkReasonDelta {
+			reasons = append(reasons, c.Delta)
+		}
+	})
+	dec.Decode([]byte(`{"choices":[{"delta":{"reasoning_details":[{"text":"part "},{"text":"two"}]}}]}`))
+	if strings.Join(reasons, "") != "part two" {
+		t.Fatalf("reasoning_details not read: %v", reasons)
+	}
+	reasons = nil
+	dec.Decode([]byte(`{"choices":[{"delta":{"reasoning_content":"a","reasoning":"b"}}]}`))
+	// "reasoning" heads the priority order, so the duplicated frame reads once.
+	if strings.Join(reasons, "") != "b" {
+		t.Fatalf("duplicated spelling must not double the block: %v", reasons)
+	}
+}
+
+// --- nameless tool calls -----------------------------------------------------
+
+func TestDecoderChatNamelessToolCallBroken(t *testing.T) {
+	dec := NewDecoder("chat", nil, func(Chunk) {})
+	dec.Decode([]byte(`{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"a","function":{"arguments":"{}"}}]}}]}`))
+	dec.Decode([]byte(`{"choices":[{"delta":{},"finish_reason":"tool_calls"}]}`))
+	res := dec.Finish()
+	if !res.BrokenToolCall || res.Finish != FinishMaxTokens {
+		t.Fatalf("a call that never learned its name must break the turn: %+v", res)
+	}
+}
+
+func TestRepairToolPairingDropsNamelessAnsweredCall(t *testing.T) {
+	msgs := []Message{
+		{Role: RoleUser, Parts: []Part{TextPart{"q"}}},
+		{Role: RoleAssistant, Parts: []Part{ToolCallPart{ID: "c1", Name: "", Arguments: "{}"}}},
+		{Role: RoleTool, Parts: []Part{ToolResultPart{ToolCallID: "c1", Text: "Error: unknown tool \"\""}}},
+	}
+	out := RepairToolPairing(msgs)
+	if len(out) != 2 {
+		t.Fatalf("nameless call and its result must both go: %+v", out)
+	}
+	for _, m := range out {
+		for _, p := range m.Parts {
+			switch p.(type) {
+			case ToolCallPart, ToolResultPart:
+				t.Fatalf("call/result husk survived the repair: %+v", out)
+			}
+		}
+	}
+	// A named, answered call is untouched.
+	paired := []Message{
+		{Role: RoleAssistant, Parts: []Part{ToolCallPart{ID: "c2", Name: "bash", Arguments: "{}"}}},
+		{Role: RoleTool, Parts: []Part{ToolResultPart{ToolCallID: "c2", Text: "ok"}}},
+	}
+	if got := RepairToolPairing(paired); len(got) != 2 {
+		t.Fatalf("paired history must be untouched: %+v", got)
+	}
+}
+
+// --- recovery shapes ---------------------------------------------------------
+
+func TestRecoveryShapes(t *testing.T) {
+	pureReasoning := StreamResult{SawReasoning: true, ReasoningText: "thinking"}
+	if !canRecover(pureReasoning, 1000) {
+		t.Fatal("cut pure-reasoning turn must recover")
+	}
+	silentStop := StreamResult{SawFinish: true, Finish: FinishStop, FinishToken: "end_turn", SawReasoning: true, ReasoningText: "thinking"}
+	if !canRecoverSilentStop(silentStop, 1000) {
+		t.Fatal("clean stop carrying only thinking must recover")
+	}
+	if canRecoverSilentStop(StreamResult{SawFinish: true, Finish: FinishStop, FinishToken: "failed", SawReasoning: true, ReasoningText: "t"}, 1000) {
+		t.Fatal("a failed ending must not read as a silent stop")
+	}
+	cutAnswer := StreamResult{SawFinish: true, Finish: FinishMaxTokens, SawText: true, AnswerText: "half an answer"}
+	if !canContinueFromCut(cutAnswer, 1000) {
+		t.Fatal("an answer cut at the output ceiling must continue")
+	}
+	if canContinueFromCut(cutAnswer, RecoveryTotalTimeoutMS+1) {
+		t.Fatal("the wall clock bounds continuations too")
+	}
+	if canContinueFromCut(StreamResult{SawFinish: true, Finish: FinishMaxTokens, SawToolCall: true}, 1000) {
+		t.Fatal("a tool turn must never take the answer-continuation path")
+	}
+}
+
+// --- failure classification --------------------------------------------------
+
+func TestClassifyHTMLPageAndClientCodes(t *testing.T) {
+	page := "<!doctype html><html><body>Request blocked</body></html>"
+	if got := ClassifyFailure(403, page, 0); got.Code != CodeClient {
+		t.Fatalf("a WAF page at 403 is the front proxy, not the credential store: %s", got.Code)
+	}
+	if got := ClassifyFailure(413, "payload too large", 0); got.Code != CodeClient {
+		t.Fatalf("413 is the request's own fault: %s", got.Code)
+	}
+	if got := ClassifyFailure(408, "timeout", 0); got.Code != CodeServer {
+		t.Fatalf("408 names the gateway's own timing trouble: %s", got.Code)
+	}
+	e := ClassifyFailure(403, page, 0)
+	if strings.Contains(e.Message, "<html") || !strings.Contains(e.Message, "front proxy") {
+		t.Fatalf("the message must name the hop, not quote the markup: %q", e.Message)
+	}
+}
+
+func TestClassifyKiloFailures(t *testing.T) {
+	if got := ClassifyKiloFailure(401, `{"error":{"code":"PAID_MODEL_AUTH_REQUIRED","message":"needs an account"}}`, 0); got.Code != CodeClient {
+		t.Fatalf("a paid id requested keyless is a request defect: %+v", got)
+	}
+	got := ClassifyKiloFailure(429, `{"error_type":"rate_limited"}`, 0)
+	if got.Code != CodeQuota {
+		t.Fatalf("error_type envelope must reshape onto the shared vocabulary: %+v", got)
+	}
+}
+
+// --- kilo catalog ------------------------------------------------------------
+
+func TestBuildKiloCatalog(t *testing.T) {
+	rows := []map[string]any{
+		{"id": "nvidia/nemotron-3-ultra:free", "name": "NVIDIA: Nemotron 3 Ultra (free)", "isFree": true,
+			"context_length": 128000.0,
+			"top_provider":   map[string]any{"max_completion_tokens": 32768.0},
+			"architecture":   map[string]any{"input_modalities": []any{"text", "image"}},
+			"supported_parameters": []any{"reasoning"}},
+		{"id": "stepfun/step-3:free", "name": "StepFun: Step 3 (free)", "isFree": true,
+			"supported_parameters": []any{"reasoning"}},
+		{"id": "vendor/paid-model", "isFree": false},
+		{"id": "nvidia/nemotron-3-ultra:free", "isFree": true},
+	}
+	cat := BuildKiloCatalog(rows)
+	if len(cat) != 2 {
+		t.Fatalf("free filter + dedupe wrong: %+v", cat)
+	}
+	m := cat[0]
+	if m.Channel != ChannelKilo || m.Wire != "chat" || !m.Vision || !m.Reasoning {
+		t.Fatalf("kilo entry fields wrong: %+v", m)
+	}
+	if m.ContextWindow != 128000 || m.MaxOutput != 32768 {
+		t.Fatalf("capacities wrong: %+v", m)
+	}
+	if m.Name != "Nemotron 3 Ultra" {
+		t.Fatalf("display name wrong: %q", m.Name)
+	}
+	if !m.CanDisableThinking {
+		t.Fatal("nemotron tolerates the off rung")
+	}
+	if cat[1].CanDisableThinking {
+		t.Fatal("stepfun refuses the off rung; its menu must not promise one")
+	}
+	if kiloEffortRung("light") != "low" || kiloEffortRung("balanced") != "medium" || kiloEffortRung("deep") != "high" {
+		t.Fatal("effort rung mapping wrong")
+	}
+}

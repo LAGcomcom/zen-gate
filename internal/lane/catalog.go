@@ -12,6 +12,7 @@ type ModelInfo struct {
 	Name               string `json:"name"`
 	Blurb              string `json:"blurb,omitempty"`     // 一行小介绍：社区评价 + 性能定位 + 推荐度
 	Wire               string `json:"wire"`                // chat | responses | messages | systemone
+	Channel            string `json:"channel,omitempty"`   // "" | "kilo" — which free source serves this id
 	SystemOne          bool   `json:"systemOne,omitempty"` // decision model, not chat-capable
 	Vision             bool   `json:"vision"`
 	AudioInput         bool   `json:"audioInput,omitempty"`
@@ -22,6 +23,10 @@ type ModelInfo struct {
 	CanDisableThinking bool   `json:"canDisableThinking"`
 	RegionSensitive    bool   `json:"regionSensitive"`
 }
+
+// Channel tags for the catalog's free sources. The empty channel is the
+// OpenCode Zen lane itself; ChannelKilo is the keyless Kilo free pool.
+const ChannelKilo = "kilo"
 
 var alwaysFree = map[string]bool{"union-alpha": true, "space-bunny-free": true}
 

@@ -13,8 +13,7 @@ import (
 const CheckpointLimit = 131072
 
 // Decoder turns upstream payloads (SSE frames or one JSON body) into
-// normalized Chunks, across the three wire protocols. It mirrors the
-// BlockSink semantics of the reference implementation.
+// normalized Chunks, across the three wire protocols.
 type Decoder struct {
 	wire     string // chat | messages | responses
 	rename   map[string]string
@@ -23,6 +22,8 @@ type Decoder struct {
 	blocks   map[string]int // key → block index
 	next     int
 	toolArgs map[int]string // block index → accumulated tool arguments
+	toolName map[int]string // block index → latest non-empty tool name
+	kind     map[int]string // block index → block type
 	result   StreamResult
 	dsml     dsmlScrubber
 	// messages-wire provider block index → key
@@ -34,13 +35,15 @@ type Decoder struct {
 }
 
 // StreamResult accumulates what one upstream call produced.
+//
 // DeepSeek v4-family models occasionally leak internal DSML control markup
-// into visible content at the reasoning→action boundary (upstream issue,
-// ported from dsh-our-free-model v1.4.4): a literal "<｜DSML｜ calls>" marker streamed as text right before a legitimate tool call. Scrub <｜DSML｜…> fragments from
-// visible text as it flows; a tail that could still complete into the opening
-// is held back until the next delta resolves it, and Finish flushes what is
-// left. A user quoting the token verbatim loses those characters — the trade
-// is deliberate: leaking control tokens routinely is worse.
+// into visible content at the reasoning→action boundary: a literal
+// "<｜DSML｜ calls>" marker streamed as text right before a legitimate tool
+// call. Scrub <｜DSML｜…> fragments from visible text as it flows; a tail that
+// could still complete into the opening is held back until the next delta
+// resolves it, and Finish flushes what is left. A user quoting the token
+// verbatim loses those characters — the trade is deliberate: leaking control
+// tokens routinely is worse.
 const dsmlOpening = "<｜DSML｜"
 var dsmlTag = regexp.MustCompile("<｜DSML｜[^>]*>")
 
@@ -67,14 +70,23 @@ func (s *dsmlScrubber) flush() string {
 }
 
 type StreamResult struct {
-	Usage               Usage
-	Finish              string // "" = upstream closed without a terminal frame
+	Usage  Usage
+	Finish string // "" = upstream closed without a terminal frame
+	// FinishToken is the raw terminal token the wire carried ("stop",
+	// "end_turn", "failed", …) before mapping. The mapped Finish collapses
+	// unknown spellings into stop, so a normal-ending judgement must consult
+	// the token, not the mapping.
+	FinishToken         string
 	SawFinish           bool
 	SawReasoning        bool
 	SawText             bool
 	SawToolCall         bool
 	BrokenToolCall      bool
 	ReasoningText       string
+	// AnswerText is the concatenated answer, capped like the reasoning
+	// checkpoint — it feeds the max-tokens continuation without buffering
+	// more than one cap's worth.
+	AnswerText          string
 	CheckpointTruncated bool
 	MaxTokens           int // echo of what was requested, for stats
 }
@@ -87,14 +99,50 @@ func NewDecoder(wire string, rename map[string]string, emit func(Chunk)) *Decode
 		emit:     emit,
 		blocks:   map[string]int{},
 		toolArgs: map[int]string{},
+		toolName: map[int]string{},
+		kind:     map[int]string{},
 		pidx:     map[float64]string{},
 		oidx:     map[float64]string{},
 		chatTool: map[string]int{},
 	}
 }
 
+// reasoningOf extracts the thinking one chat delta carries, in whichever
+// spelling the upstream used. `reasoning` is the spelling this lane sends;
+// `reasoning_content`, `reasoning_text` and `thinking` are the other spellings
+// in the wild — a turn whose thinking arrived under one of those used to reach
+// the caller as a turn with no reasoning at all: no thinking shown, an empty
+// ReasoningText that keeps the recovery path from firing, and an apparently
+// empty answer. Only the first non-empty spelling is taken: some relays report
+// the same text under two names at once, and reading every name would double
+// the block.
+func reasoningOf(delta map[string]any) (string, bool) {
+	for _, field := range []string{"reasoning", "reasoning_content", "reasoning_text", "thinking"} {
+		if c, ok := delta[field].(string); ok && c != "" {
+			return c, true
+		}
+	}
+	if parts, ok := delta["reasoning_details"].([]any); ok {
+		text := ""
+		for _, part := range parts {
+			if m, ok := part.(map[string]any); ok {
+				if t, ok := m["text"].(string); ok {
+					text += t
+				}
+			}
+		}
+		if text != "" {
+			return text, true
+		}
+	}
+	return "", false
+}
+
 // toolDelta records and emits one tool-argument fragment.
 func (d *Decoder) toolDelta(idx int, id, name, delta string) {
+	if name != "" {
+		d.toolName[idx] = name
+	}
 	if delta == "" {
 		return
 	}
@@ -109,6 +157,10 @@ func (d *Decoder) startBlock(key, blockType, id, name string) int {
 	idx := d.next
 	d.next++
 	d.blocks[key] = idx
+	d.kind[idx] = blockType
+	if blockType == "tool-call" && name != "" {
+		d.toolName[idx] = name
+	}
 	d.emit(Chunk{Kind: ChunkBlockStart, Index: idx, BlockType: blockType, ID: id, Name: name})
 	return idx
 }
@@ -162,15 +214,10 @@ func (d *Decoder) Finish() StreamResult {
 		}
 	}
 	d.endAllBlocks()
-	if d.result.SawFinish {
-		switch d.result.Finish {
-		case FinishToolCalls:
-			if d.result.BrokenToolCall {
-				d.result.Finish = FinishMaxTokens
-			}
-		case "":
-			d.result.Finish = ""
-		}
+	if d.result.SawFinish && d.result.BrokenToolCall {
+		// A broken tool call (unparseable arguments, or a call that never
+		// learned its name) must not read as a clean success on any finish.
+		d.result.Finish = FinishMaxTokens
 	}
 	return d.result
 }
@@ -194,7 +241,7 @@ func (d *Decoder) decodeChat(frame map[string]any) {
 				d.chatDelta(msg)
 			}
 			if fr, ok := choice["finish_reason"]; ok && fr != nil {
-				d.setFinish(finishReason(jsonString(fr)))
+				d.setFinish(jsonString(fr))
 			}
 		}
 	}
@@ -203,17 +250,14 @@ func (d *Decoder) decodeChat(frame map[string]any) {
 func (d *Decoder) chatDelta(delta map[string]any) {
 	if c, ok := delta["content"].(string); ok && c != "" {
 		idx := d.startBlock("text", "text", "", "")
-		d.emit(Chunk{Kind: ChunkTextDelta, Index: idx, Delta: d.dsml.push(c)})
-		d.result.SawText = true
+		scrubbed := d.dsml.push(c)
+		if scrubbed != "" {
+			d.appendAnswer(scrubbed)
+			d.emit(Chunk{Kind: ChunkTextDelta, Index: idx, Delta: scrubbed})
+			d.result.SawText = true
+		}
 	}
-	reasoning := ""
-	if c, ok := delta["reasoning_content"].(string); ok {
-		reasoning = c
-	}
-	if c, ok := delta["reasoning"].(string); ok && reasoning == "" {
-		reasoning = c
-	}
-	if reasoning != "" {
+	if reasoning, ok := reasoningOf(delta); ok {
 		idx := d.startBlock("reasoning", "reasoning", "", "")
 		d.emit(Chunk{Kind: ChunkReasonDelta, Index: idx, Delta: reasoning})
 		d.result.SawReasoning = true
@@ -318,8 +362,12 @@ func (d *Decoder) decodeMessages(frame map[string]any) {
 		case "text_delta":
 			t := jsonString(delta["text"])
 			if t != "" {
-				d.emit(Chunk{Kind: ChunkTextDelta, Index: blockIdx, Delta: d.dsml.push(t)})
-				d.result.SawText = true
+				scrubbed := d.dsml.push(t)
+				if scrubbed != "" {
+					d.appendAnswer(scrubbed)
+					d.emit(Chunk{Kind: ChunkTextDelta, Index: blockIdx, Delta: scrubbed})
+					d.result.SawText = true
+				}
 			}
 		case "thinking_delta":
 			t := jsonString(delta["thinking"])
@@ -344,20 +392,44 @@ func (d *Decoder) decodeMessages(frame map[string]any) {
 	case "message_delta":
 		if sr, ok := frame["delta"].(map[string]any); ok {
 			if reason := jsonString(sr["stop_reason"]); reason != "" {
-				d.setFinish(finishReason(reason))
+				d.setFinish(reason)
 			}
 		}
 	case "message_stop":
-		d.setFinish(FinishStop)
+		// This frame carries no token of its own — an ending whose
+		// normal-ness only the caller can vouch for.
+		d.setFinish("")
 	case "error":
 		// handled by readSSE
 	}
 }
 
-// checkToolBlock validates the accumulated arguments of an ending tool block;
-// arguments that never parse mark the call broken (the turn downgrades to
-// max-tokens).
+// appendAnswer records answer text for the continuation path, capped at the
+// checkpoint limit.
+func (d *Decoder) appendAnswer(text string) {
+	if d.result.CheckpointTruncated && len(d.result.AnswerText) >= CheckpointLimit {
+		return
+	}
+	if len(d.result.AnswerText)+len(text) > CheckpointLimit {
+		text = text[:CheckpointLimit-len(d.result.AnswerText)]
+	}
+	d.result.AnswerText += text
+}
+
+// checkToolBlock validates an ending tool-call block; arguments that never
+// parse, or a call that never learned its name (a relayed model leaked its
+// tool markup mid-text and the stream half-parsed it into an empty-named
+// shell — executing it would answer "unknown tool \"\"" and, being
+// *answered*, the pairing repair would keep the husk forever, failing every
+// later turn on every model), mark the turn broken and downgrade it to
+// max-tokens. Other block kinds validate nothing.
 func (d *Decoder) checkToolBlock(blockIdx int) {
+	if d.kind[blockIdx] != "tool-call" {
+		return
+	}
+	if d.toolName[blockIdx] == "" {
+		d.result.BrokenToolCall = true
+	}
 	args, ok := d.toolArgs[blockIdx]
 	if !ok {
 		return
@@ -408,8 +480,12 @@ func (d *Decoder) decodeResponses(frame map[string]any) {
 			if idx, ok2 := d.blocks[key]; ok2 {
 				t := jsonString(frame["delta"])
 				if t != "" {
-					d.emit(Chunk{Kind: ChunkTextDelta, Index: idx, Delta: d.dsml.push(t)})
-					d.result.SawText = true
+					scrubbed := d.dsml.push(t)
+					if scrubbed != "" {
+						d.appendAnswer(scrubbed)
+						d.emit(Chunk{Kind: ChunkTextDelta, Index: idx, Delta: scrubbed})
+						d.result.SawText = true
+					}
 				}
 			}
 		}
@@ -440,7 +516,7 @@ func (d *Decoder) decodeResponses(frame map[string]any) {
 			delete(d.oidx, oi)
 		}
 	case typ == "response.completed" || typ == "response.done":
-		d.setFinish(FinishStop)
+		d.setFinish("stop")
 	case typ == "response.incomplete":
 		reason := ""
 		if det, ok := frame["response"].(map[string]any); ok {
@@ -449,13 +525,14 @@ func (d *Decoder) decodeResponses(frame map[string]any) {
 			}
 		}
 		if reason == "max_output_tokens" {
-			d.setFinish(FinishMaxTokens)
+			d.setFinish("max_output_tokens")
 		} else {
-			d.setFinish(FinishStop)
+			d.setFinish("stop")
 		}
 	case typ == "response.failed":
-		// A normal terminal shape on this wire; status surfaces via usage.
-		d.setFinish(FinishStop)
+		// A terminal shape on this wire; the raw token reaches the caller so a
+		// failed turn is never mistaken for a clean stop.
+		d.setFinish("failed")
 	}
 }
 
@@ -468,9 +545,12 @@ func oIdxOf(frame map[string]any) float64 {
 
 // --- shared ------------------------------------------------------------------
 
-func (d *Decoder) setFinish(reason string) {
+func (d *Decoder) setFinish(rawToken string) {
 	d.result.SawFinish = true
-	d.result.Finish = reason
+	if d.result.FinishToken == "" {
+		d.result.FinishToken = rawToken
+	}
+	d.result.Finish = finishReason(rawToken)
 }
 
 func (d *Decoder) appendCheckpoint(text string) {

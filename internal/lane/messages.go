@@ -6,9 +6,9 @@ import (
 )
 
 // RepairToolPairing removes dangling tool calls (assistant requests with no
-// later result) and orphan tool results. A request replayed upstream with an
-// unmatched tool call is rejected with 400 and then poisons the session for
-// every subsequent turn — the reference implementation repairs before sending.
+// later result) and orphan tool results, plus nameless call husks. A request
+// replayed upstream with an unmatched tool call is rejected with 400 and then
+// poisons the session for every subsequent turn — repair before sending.
 // Paired history is left untouched.
 func RepairToolPairing(messages []Message) []Message {
 	called := map[string]bool{}
@@ -17,7 +17,9 @@ func RepairToolPairing(messages []Message) []Message {
 		for _, p := range m.Parts {
 			switch t := p.(type) {
 			case ToolCallPart:
-				if t.ID != "" {
+				// A nameless call is not executable; marking it here means its
+				// result fails the paired-result test and goes with it.
+				if t.ID != "" && t.Name != "" {
 					called[t.ID] = true
 				}
 			case ToolResultPart:
@@ -33,7 +35,13 @@ func RepairToolPairing(messages []Message) []Message {
 		for _, p := range m.Parts {
 			switch t := p.(type) {
 			case ToolCallPart:
-				if t.ID != "" && resulted[t.ID] {
+				// A call with no name is not executable. One that reached the
+				// host was answered "unknown tool \"\"" — an *answered* call,
+				// so the result-presence test alone kept the husk in the
+				// history forever and every later turn 400'd on every model.
+				// A nameless call is dropped like an unanswered one; its
+				// result then fails the paired-result test and goes with it.
+				if t.ID != "" && t.Name != "" && resulted[t.ID] {
 					kept = append(kept, p)
 				}
 			case ToolResultPart:

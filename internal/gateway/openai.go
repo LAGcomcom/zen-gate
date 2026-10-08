@@ -650,6 +650,8 @@ func errorStatus(e *lane.UpstreamError) int {
 		return 403
 	case lane.CodeCredential:
 		return 401
+	case lane.CodeClient:
+		return 400
 	case lane.CodeTimeout:
 		return 504
 	case lane.CodeTransport, lane.CodeServer, lane.CodeEmpty:
@@ -665,6 +667,8 @@ func errorType(e *lane.UpstreamError) string {
 		return "rate_limit_error"
 	case lane.CodeRegion, lane.CodeCredential:
 		return "authentication_error"
+	case lane.CodeClient:
+		return "invalid_request_error"
 	default:
 		return "api_error"
 	}
