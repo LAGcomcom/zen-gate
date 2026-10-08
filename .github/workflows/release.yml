@@ -48,6 +48,37 @@ jobs:
         run: |
           gh release create "${{ github.ref_name }}" dist/zen-gate.exe dist/zenstats.exe dist/*.zip --title "${{ github.ref_name }}" --generate-notes --latest
 
+  # The Linux port ships for real: the AppImage bundles GTK3 plus
+  # libayatana-appindicator, the .deb depends on the distro's libraries. The
+  # job also doubles as the PR build gate for the linux-tagged files — the
+  # Windows and macOS runners never compile those.
+  build-linux:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-3-dev libayatana-appindicator3-dev
+
+      - name: Build AppImage
+        run: tools/build-linux.sh "${GITHUB_REF_NAME#v}"
+
+      - name: Build .deb
+        run: tools/build-deb.sh "${GITHUB_REF_NAME#v}"
+
+      - name: Upload to release
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "${{ github.ref_name }}" dist/*.AppImage dist/*.deb --clobber
+
   # The macOS port builds here but is not published: the bundle is only
   # ad-hoc signed, and shipping that would hand every user a Gatekeeper warning
   # until there is a Developer ID to notarize against. This job is the build
