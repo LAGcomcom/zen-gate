@@ -16,6 +16,13 @@ import (
 // top-level `model_catalog_json` key — that key must sit before the first
 // [table] header, so it gets its own marker pair inserted there.
 //
+// A config that already carries a top-level `model_catalog_json` (the user's
+// own, or one left behind without markers) must not grow a second one — TOML
+// rejects duplicate keys and Codex refuses to parse the whole file ("Cannot
+// overwrite a value"). Enable therefore strips the managed blocks first and
+// moves any pre-existing top-level catalog key into the stash before
+// inserting the managed line; Disable puts it back verbatim.
+//
 // Schema notes (validated against `codex debug models`, v0.158): every model
 // needs base_instructions, supported_reasoning_levels, shell_type,
 // support_verbosity, truncation_policy{mode,limit},
@@ -211,7 +218,9 @@ func stripMarkers(src string, begin, end string) string {
 }
 
 // codexStatePath stores the pre-existing top-level model_provider/model lines
-// this adapter replaces, so Disable can put them back verbatim.
+// this adapter replaces — and any top-level lines it removes outright (a
+// pre-existing model_catalog_json) — so Disable can put them all back
+// verbatim.
 func (c *codex) codexStatePath() string {
 	return homePath(".codex", "zen-gate-state.json")
 }
@@ -244,6 +253,46 @@ func replaceTopLevelKeys(src string, repl map[string]string, stash map[string]st
 	return strings.Join(lines, "\n")
 }
 
+// topLevelKeyOf extracts the bare key name from a top-level `key = value`
+// line; "" when the line is not one.
+func topLevelKeyOf(t string) string {
+	eq := strings.Index(t, "=")
+	if eq <= 0 {
+		return ""
+	}
+	return strings.TrimSpace(t[:eq])
+}
+
+// removeTopLevelKeys deletes every top-level occurrence of the given keys
+// (before the first [table] header) and records the first-seen original line
+// per key in stash, so Disable can put them back verbatim. This is what keeps
+// a pre-existing `model_catalog_json = "..."` from turning into a duplicate
+// top-level key — TOML forbids the same key twice and Codex would fail to
+// parse the whole file.
+func removeTopLevelKeys(src string, keys map[string]bool, stash map[string]string) string {
+	lines := strings.Split(src, "\n")
+	out := make([]string, 0, len(lines))
+	top := true
+	for _, l := range lines {
+		t := strings.TrimSpace(l)
+		if top && strings.HasPrefix(t, "[") {
+			top = false
+		}
+		key := ""
+		if top {
+			key = topLevelKeyOf(t)
+		}
+		if key != "" && keys[key] {
+			if _, recorded := stash[key]; !recorded {
+				stash[key] = l
+			}
+			continue // drop the line entirely
+		}
+		out = append(out, l)
+	}
+	return strings.Join(out, "\n")
+}
+
 func (c *codex) Enable(o Options) error {
 	path := c.configPath()
 	var src string
@@ -253,25 +302,11 @@ func (c *codex) Enable(o Options) error {
 		return err
 	}
 
-	// The desktop picker changes the model name but keeps routing through the
-	// config's active provider, so zen_gate must become the active provider
-	// for picker selections to work at all. The user's original top-level
-	// model_provider/model lines are stashed and restored on Disable.
 	def := o.DefaultModel
 	for _, m := range o.Models {
 		if !m.RegionSensitive {
 			def = m.ID
 			break
-		}
-	}
-	stash := map[string]string{}
-	replaced := replaceTopLevelKeys(src, map[string]string{
-		"model_provider": `"zen_gate"`,
-		"model":          fmt.Sprintf("%q", def),
-	}, stash)
-	if len(stash) > 0 {
-		if b, err := json.Marshal(map[string]string(stash)); err == nil {
-			_ = atomicWrite(c.codexStatePath(), b)
 		}
 	}
 
@@ -283,12 +318,55 @@ func (c *codex) Enable(o Options) error {
 		return err
 	}
 
-	base := stripMarkers(stripMarkers(replaced, codexMarkerBegin, codexMarkerEnd), codexCatalogKeyBegin, codexCatalogKeyEnd)
+	// Seed the stash from a previous enable: on re-enable the config carries
+	// zen-gate's own rewritten lines, and recording them as "originals" would
+	// clobber the user's real ones.
+	stash := map[string]string{}
+	if b, err := os.ReadFile(c.codexStatePath()); err == nil {
+		var prev map[string]string
+		if json.Unmarshal(b, &prev) == nil {
+			for k, v := range prev {
+				stash[k] = v
+			}
+		}
+	}
+
+	out := c.applyEnable(src, o, def, c.catalogPath(), stash)
+	if len(stash) > 0 {
+		if b, err := json.Marshal(map[string]string(stash)); err == nil {
+			_ = atomicWrite(c.codexStatePath(), b)
+		}
+	}
+	return atomicWrite(path, []byte(out))
+}
+
+// applyEnable builds the new config.toml text from the user's current config
+// text. stash collects the pre-enable originals — lines rewritten in place
+// and lines removed entirely — so Disable can undo the whole operation.
+func (c *codex) applyEnable(src string, o Options, def, catalogPath string, stash map[string]string) string {
+	// Strip previous managed blocks first: on re-enable the managed
+	// model_catalog_json line must not reach the stashing passes below, or
+	// zen-gate's own line would be recorded as the user's "original".
+	base := stripMarkers(stripMarkers(src, codexMarkerBegin, codexMarkerEnd), codexCatalogKeyBegin, codexCatalogKeyEnd)
+	// The desktop picker changes the model name but keeps routing through the
+	// config's active provider, so zen_gate must become the active provider
+	// for picker selections to work at all. The user's original top-level
+	// model_provider/model lines are stashed and restored on Disable.
+	base = replaceTopLevelKeys(base, map[string]string{
+		"model_provider": `"zen_gate"`,
+		"model":          fmt.Sprintf("%q", def),
+	}, stash)
+	// A config that already carries a top-level model_catalog_json — the
+	// user's own, or one left behind without markers — must not end up with
+	// the key twice: TOML rejects duplicate keys and Codex refuses to parse
+	// the whole file. Remove the pre-existing line (stashed for Disable)
+	// before the managed one goes in.
+	base = removeTopLevelKeys(base, map[string]bool{"model_catalog_json": true}, stash)
 	if base != "" && !strings.HasSuffix(base, "\n") {
 		base += "\n"
 	}
-	keyLine := fmt.Sprintf("model_catalog_json = '%s'", filepath.ToSlash(c.catalogPath()))
-	return atomicWrite(path, []byte(insertTopLevelKey(base+"\n"+c.block(o), keyLine)))
+	keyLine := fmt.Sprintf("model_catalog_json = '%s'", filepath.ToSlash(catalogPath))
+	return insertTopLevelKey(base+"\n"+c.block(o), keyLine)
 }
 
 func (c *codex) Disable() error {
@@ -298,31 +376,59 @@ func (c *codex) Disable() error {
 		_ = os.Remove(c.codexStatePath())
 		return nil
 	}
-	// Restore the user's original model_provider/model lines.
+	// Managed blocks go first: the stash undo below must not mistake
+	// zen-gate's own managed model_catalog_json line for the user's.
+	clean := stripMarkers(stripMarkers(string(data), codexMarkerBegin, codexMarkerEnd), codexCatalogKeyBegin, codexCatalogKeyEnd)
+	// Restore the user's original top-level lines: rewritten ones in place,
+	// lines that Enable removed entirely (e.g. a pre-existing
+	// model_catalog_json) re-inserted before the first [table] header.
 	if b, err := os.ReadFile(c.codexStatePath()); err == nil {
 		var stash map[string]string
-		if json.Unmarshal(b, &stash) == nil {
-			lines := strings.Split(string(data), "\n")
-			for i, l := range lines {
-				t := strings.TrimSpace(l)
-				if strings.HasPrefix(t, "[") {
-					break
-				}
-				eq := strings.Index(t, "=")
-				if eq <= 0 {
-					continue
-				}
-				key := strings.TrimSpace(t[:eq])
-				// The stash records the pre-enable lines verbatim; restore
-				// them unconditionally — that is the undo.
-				if orig, ok := stash[key]; ok {
-					lines[i] = orig
-				}
-			}
-			data = []byte(strings.Join(lines, "\n"))
+		if json.Unmarshal(b, &stash) == nil && len(stash) > 0 {
+			clean = applyDisable(clean, stash)
 		}
 		_ = os.Remove(c.codexStatePath())
 	}
-	clean := stripMarkers(stripMarkers(string(data), codexMarkerBegin, codexMarkerEnd), codexCatalogKeyBegin, codexCatalogKeyEnd)
 	return atomicWrite(path, []byte(clean+"\n"))
+}
+
+// applyDisable undoes applyEnable's text transforms: stashed lines are put
+// back verbatim — rewritten keys in place, keys whose lines were removed
+// entirely re-inserted before the first [table] header (top-level keys must
+// precede every table).
+func applyDisable(src string, stash map[string]string) string {
+	lines := strings.Split(src, "\n")
+	present := map[string]bool{}
+	at := len(lines)
+	for i, l := range lines {
+		t := strings.TrimSpace(l)
+		if strings.HasPrefix(t, "[") {
+			at = i
+			break
+		}
+		if key := topLevelKeyOf(t); key != "" {
+			if orig, ok := stash[key]; ok {
+				lines[i] = orig // restore the rewritten line verbatim
+			}
+			present[key] = true
+		}
+	}
+	var missing []string
+	for k := range stash {
+		if !present[k] {
+			missing = append(missing, k)
+		}
+	}
+	if len(missing) > 0 {
+		sort.Strings(missing)
+		add := make([]string, 0, len(missing))
+		for _, k := range missing {
+			add = append(add, stash[k])
+		}
+		out := append([]string{}, lines[:at]...)
+		out = append(out, add...)
+		out = append(out, lines[at:]...)
+		lines = out
+	}
+	return strings.Join(lines, "\n")
 }

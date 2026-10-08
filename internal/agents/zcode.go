@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 )
 
 // zCode injects a personal provider rule into ZCode's provider_config.json.
@@ -69,8 +70,11 @@ type zcodeProviderConfig struct {
 			ProviderRules []map[string]any `json:"providerRules"`
 		} `json:"providerConfigRules"`
 		ModelConfigRules struct {
-			ProviderModelRules     []map[string]any `json:"providerModelRules"`
-			ManualProviderModelRules []map[string]any `json:"manualProviderModelRules,omitempty"`
+			ProviderModelRules []map[string]any `json:"providerModelRules"`
+			// manualProviderModelRules is mandatory in ZCode's Zod schema —
+			// omitting it (as omitempty did) fails validation for the whole
+			// file and ZCode degrades to an empty provider registry.
+			ManualProviderModelRules []map[string]any `json:"manualProviderModelRules"`
 		} `json:"modelConfigRules"`
 	} `json:"config"`
 }
@@ -89,6 +93,11 @@ func (z *zcode) read() (*zcodeProviderConfig, error) {
 
 func (z *zcode) Enable(o Options) error {
 	path := z.configPath()
+	// A machine where ZCode never ran has no ~/.zcode/v2 yet — without this
+	// the write fails with "cannot find the path" and nothing gets injected.
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return err
+	}
 	var cfg *zcodeProviderConfig
 	if data, err := os.ReadFile(path); err == nil {
 		cfg = &zcodeProviderConfig{}
@@ -138,10 +147,19 @@ func (z *zcode) Enable(o Options) error {
 	cfg.Config.ProviderConfigRules.ProviderRules = rules
 
 	// Model rules: capability metadata per model — context window plus the
-	// thought-level selector for reasoning models.
+	// thought-level selector for reasoning models. ZCode's Zod schema rejects
+	// the whole file over a single contextWindow <= 0, so a model whose
+	// capacity is unknown gets no rule at all: it still appears via
+	// personalModelIds, just without metadata.
 	mc := cfg.Config.ModelConfigRules
 	if mc.ProviderModelRules == nil {
 		mc.ProviderModelRules = []map[string]any{}
+	}
+	if mc.ManualProviderModelRules == nil {
+		// The user's manual rules (if any) were preserved by the unmarshal
+		// above; only a file that never had the mandatory key gets the empty
+		// array — writing null or omitting it would fail ZCode's validation.
+		mc.ManualProviderModelRules = []map[string]any{}
 	}
 	kept := []map[string]any{}
 	for _, existing := range mc.ProviderModelRules {
@@ -151,6 +169,9 @@ func (z *zcode) Enable(o Options) error {
 		kept = append(kept, existing)
 	}
 	for _, m := range o.Models {
+		if m.ContextWindow <= 0 {
+			continue
+		}
 		entry := map[string]any{
 			"modelId":    m.ID,
 			"providerId": stableProviderID,
@@ -189,17 +210,24 @@ func (z *zcode) Disable() error {
 		rules = append(rules, existing)
 	}
 	cfg.Config.ProviderConfigRules.ProviderRules = rules
-	if mc := cfg.Config.ModelConfigRules; mc.ProviderModelRules != nil {
-		kept := []map[string]any{}
-		for _, existing := range mc.ProviderModelRules {
-			if pid, _ := existing["providerId"].(string); pid == stableProviderID {
-				continue
-			}
-			kept = append(kept, existing)
-		}
-		mc.ProviderModelRules = kept
-		cfg.Config.ModelConfigRules = mc
+	// Keep the file schema-valid after removal: both mandatory arrays stay
+	// present as arrays (never null, never omitted).
+	mc := cfg.Config.ModelConfigRules
+	if mc.ProviderModelRules == nil {
+		mc.ProviderModelRules = []map[string]any{}
 	}
+	if mc.ManualProviderModelRules == nil {
+		mc.ManualProviderModelRules = []map[string]any{}
+	}
+	kept := []map[string]any{}
+	for _, existing := range mc.ProviderModelRules {
+		if pid, _ := existing["providerId"].(string); pid == stableProviderID {
+			continue
+		}
+		kept = append(kept, existing)
+	}
+	mc.ProviderModelRules = kept
+	cfg.Config.ModelConfigRules = mc
 	data, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {
 		return err
