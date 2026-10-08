@@ -384,17 +384,20 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	sendChunk := func(delta map[string]any, finish any, usage any) {
-		choice := map[string]any{"index": 0, "delta": delta, "finish_reason": finish}
-		payload := map[string]any{
-			"id": id, "object": "chat.completion.chunk", "created": created,
-			"model": base, "choices": []any{choice},
+		if !sse.flushed {
+			// The role preamble commits the 200 the stream opens with, so it waits
+			// for the first byte of content: a lane that refuses before speaking
+			// must still be able to answer with a real 429 and Retry-After, which
+			// is what agents back off on.
+			sse.event(chunkPayload(id, created, base, map[string]any{"role": "assistant", "content": ""}, nil, nil))
 		}
-		if usage != nil {
-			payload["usage"] = usage
-		}
-		sse.event(payload)
+		sse.event(chunkPayload(id, created, base, delta, finish, usage))
 	}
-	sendChunk(map[string]any{"role": "assistant", "content": ""}, nil, nil)
+	inStreamFail := func(uerr *lane.UpstreamError) {
+		sse.event(map[string]any{"error": map[string]any{
+			"message": uerr.Message, "type": errorType(uerr), "code": uerr.Code}})
+		sse.done()
+	}
 
 	outcome, uerr := s.Lane.Complete(ctx, lane.Request{
 		Model: model, Effort: effort, Messages: unified,
@@ -436,6 +439,13 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
+		if sse.flushed {
+			// The fallback put bytes on the wire before it failed: the 200 is
+			// committed, so report inside the stream rather than promising a
+			// status the client can no longer read.
+			inStreamFail(uerr)
+			return
+		}
 		setRetryAfter(w, uerr)
 		body := openaiError(uerr.Message, errorType(uerr))
 		if uerr.Code == lane.CodeQuota {
@@ -446,9 +456,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 	if uerr != nil {
 		// mid-stream failure after content went out: report as an SSE error
-		sse.event(map[string]any{"error": map[string]any{
-			"message": uerr.Message, "type": errorType(uerr), "code": uerr.Code}})
-		sse.done()
+		inStreamFail(uerr)
 		return
 	}
 	finish := "stop"
@@ -511,6 +519,19 @@ type chatToolBuf struct {
 }
 
 func (e *chatEmitter) hasAny() bool { return e.sawAny }
+
+// chunkPayload builds one chat.completion.chunk frame for the streaming paths
+// in openai.go and relay.go.
+func chunkPayload(id string, created int64, model string, delta map[string]any, finish any, usage any) map[string]any {
+	payload := map[string]any{
+		"id": id, "object": "chat.completion.chunk", "created": created,
+		"model": model, "choices": []any{map[string]any{"index": 0, "delta": delta, "finish_reason": finish}},
+	}
+	if usage != nil {
+		payload["usage"] = usage
+	}
+	return payload
+}
 
 func (e *chatEmitter) consume(c lane.Chunk, text, reasoning *strings.Builder, toolCalls *[]map[string]any) {
 	e.sawAny = true

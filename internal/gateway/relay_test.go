@@ -254,6 +254,37 @@ func TestProviderModelsRefreshPrunesToSelection(t *testing.T) {
 	}
 }
 
+// 刷新模型 must not rewrite a config snapshot it handed out earlier: a request
+// already in flight reads its provider out of exactly such a snapshot, and the
+// catalog merge also writes through the ModelMeta map the snapshot shares.
+func TestProviderModelsRefreshLeavesHeldSnapshotAlone(t *testing.T) {
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("content-type", "application/json")
+		fmt.Fprint(w, `{"data":[{"id":"m1","max_input_tokens":131072}]}`)
+	}))
+	defer up.Close()
+	s := newTestServer(t, up)
+	addProvider(t, s, up, store.ProtocolOpenAI, "sk", true, "m1", "retired-model")
+	ts := httptest.NewServer(s.mux)
+	defer ts.Close()
+
+	held := s.Store.Config()
+	postAdmin(t, ts.URL+"/admin/api/providers/models", `{"id":"prov"}`)
+
+	got := held.Providers[0].Models
+	if len(got) != 2 || got[1] != "retired-model" {
+		t.Errorf("the refresh rewrote a config handed out before it: %v", got)
+	}
+	if held.Providers[0].ModelMeta != nil {
+		t.Errorf("the refresh merged catalog metadata into a shared map: %v", held.Providers[0].ModelMeta)
+	}
+	// The published config must have changed, or nothing was tested.
+	now := s.Store.Config().Providers[0].Models
+	if len(now) != 1 || now[0] != "m1" {
+		t.Fatalf("published models = %v, want [m1]", now)
+	}
+}
+
 // declaredListing offers m1 with published token capacities, m2 without any.
 func declaredListing() *httptest.Server {
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

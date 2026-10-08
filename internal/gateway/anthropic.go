@@ -237,16 +237,28 @@ func (s *Server) handleAnthropicMessages(w http.ResponseWriter, r *http.Request)
 	}
 	st.sse = sse
 	msgID := randomID("msg_")
-	sse.event(map[string]any{"type": "message_start", "message": map[string]any{
-		"id": msgID, "type": "message", "role": "assistant", "model": base,
-		"content": []any{}, "stop_sequence": nil, "stop_reason": nil,
-		"usage": map[string]any{"input_tokens": 0, "output_tokens": 0}}})
+	// message_start commits the 200 and the event-stream type, so it waits for
+	// the first chunk: a lane that refuses before speaking can then still answer
+	// with the status and Retry-After agents back off on.
+	begin := func() {
+		if sse.flushed {
+			return
+		}
+		sse.event(map[string]any{"type": "message_start", "message": map[string]any{
+			"id": msgID, "type": "message", "role": "assistant", "model": base,
+			"content": []any{}, "stop_sequence": nil, "stop_reason": nil,
+			"usage": map[string]any{"input_tokens": 0, "output_tokens": 0}}})
+	}
+	feed := func(c lane.Chunk) {
+		begin()
+		st.consume(c)
+	}
 
 	outcome, uerr := s.Lane.Complete(ctx, lane.Request{
 		Model: model, Effort: effort, Messages: unified, Tools: tools,
 		MaxTokens: req.MaxTokens, SessionSeed: seed, TurnSeed: turn,
 		Agent: agent, Needs: needs,
-	}, st.consume)
+	}, feed)
 	stop := "end_turn"
 	switch {
 	case outcome.Finish == lane.FinishToolCalls:
@@ -262,7 +274,7 @@ func (s *Server) handleAnthropicMessages(w http.ResponseWriter, r *http.Request)
 			}
 			if usage, finish, _, _, ok := s.providerFallback(ctx,
 				s.providerFallbackPicks(needs, base), unified, tools,
-				fbMaxTok, agent, st.consume); ok {
+				fbMaxTok, agent, feed); ok {
 				stop := "end_turn"
 				switch {
 				case finish == lane.FinishToolCalls:
@@ -270,6 +282,7 @@ func (s *Server) handleAnthropicMessages(w http.ResponseWriter, r *http.Request)
 				case finish == lane.FinishMaxTokens || finish == "":
 					stop = "max_tokens"
 				}
+				begin()
 				sse.event(map[string]any{"type": "message_delta",
 					"delta": map[string]any{"stop_reason": stop, "stop_sequence": nil},
 					"usage": map[string]any{"output_tokens": usage.Output}})
@@ -277,9 +290,17 @@ func (s *Server) handleAnthropicMessages(w http.ResponseWriter, r *http.Request)
 				return
 			}
 		}
-		sse.event(map[string]any{"type": "error", "error": map[string]any{"type": errorType(uerr), "message": uerr.Message}})
+		if sse.flushed {
+			// Content (or a started fallback) already went on the wire, so the 200
+			// is committed: the refusal travels as an in-stream error event.
+			sse.event(map[string]any{"type": "error", "error": map[string]any{"type": errorType(uerr), "message": uerr.Message}})
+			return
+		}
+		setRetryAfter(w, uerr)
+		writeJSON(w, errorStatus(uerr), map[string]any{"type": "error", "error": map[string]any{"type": errorType(uerr), "message": uerr.Message}})
 		return
 	}
+	begin()
 	sse.event(map[string]any{"type": "message_delta",
 		"delta": map[string]any{"stop_reason": stop, "stop_sequence": nil},
 		"usage": map[string]any{"output_tokens": outcome.Usage.Output}})
