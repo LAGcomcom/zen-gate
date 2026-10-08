@@ -5,8 +5,10 @@ package subs
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"syscall"
 )
 
@@ -21,12 +23,23 @@ func tieToParent(p *os.Process) error {
 	return nil
 }
 
+// runningImage reports the executable a pid is running. Only Linux has
+// /proc/<pid>/exe; darwin and the BSDs have no procfs, so the image is read
+// from ps. When nothing can be established the caller refuses to kill — an
+// unknown process is never treated as our own sidecar.
 func runningImage(pid int) (string, error) {
-	exe, err := filepath.EvalSymlinks("/proc/" + strconv.Itoa(pid) + "/exe")
+	if exe, err := filepath.EvalSymlinks("/proc/" + strconv.Itoa(pid) + "/exe"); err == nil {
+		return exe, nil
+	}
+	out, err := exec.Command("ps", "-p", strconv.Itoa(pid), "-o", "comm=").Output()
 	if err != nil {
 		return "", fmt.Errorf("进程 %d 不存在", pid)
 	}
-	return exe, nil
+	name := strings.TrimSpace(string(out))
+	if name == "" {
+		return "", fmt.Errorf("进程 %d 的映像读不到", pid)
+	}
+	return name, nil
 }
 
 func terminatePID(pid int) error {

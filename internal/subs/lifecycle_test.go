@@ -5,6 +5,7 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -144,6 +145,27 @@ func TestPortsFreeSeesAHeldPort(t *testing.T) {
 	}
 	if portsFree([]string{"127.0.0.1:" + reservedPort(t)}, time.Second) != true {
 		t.Errorf("a free port reported busy")
+	}
+}
+
+// Two paths to one binary must read as one image, or the reaper refuses to kill
+// its own sidecar — on macOS ps reports /var/folders/… while the recorded path
+// is /private/var/folders/….
+func TestSameImageResolvesSymlinkedPaths(t *testing.T) {
+	dir := t.TempDir()
+	real := filepath.Join(dir, "sing-box")
+	if err := os.WriteFile(real, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(dir, "sb-link")
+	if err := os.Symlink(real, link); err != nil {
+		t.Skipf("this machine cannot create symlinks: %v", err)
+	}
+	if !sameImage(link, real) {
+		t.Errorf("the same binary reached by two paths read as different images")
+	}
+	if sameImage(real, filepath.Join(dir, "other-name")) {
+		t.Errorf("two different binaries read as the same image")
 	}
 }
 

@@ -108,7 +108,19 @@ func inboundPorts(n int) []string {
 }
 
 func sameImage(a, b string) bool {
-	return strings.EqualFold(strings.TrimSpace(a), strings.TrimSpace(b))
+	return strings.EqualFold(canonicalImage(a), canonicalImage(b))
+}
+
+// canonicalImage resolves symlinks before comparing. macOS hands the same
+// binary back as /var/folders/… from ps and /private/var/folders/… from
+// os.Executable(), and a false "that is not our sidecar" would leave the
+// orphan holding the port and crash-looping every restart.
+func canonicalImage(p string) string {
+	p = strings.TrimSpace(p)
+	if r, err := filepath.EvalSymlinks(p); err == nil {
+		p = r
+	}
+	return filepath.Clean(p)
 }
 
 // pidRecord is what the manager needs to recognise its own sidecar again after
