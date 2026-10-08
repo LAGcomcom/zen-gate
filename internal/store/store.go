@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"zen-gate/internal/lane"
@@ -224,11 +225,14 @@ type ModelTag struct {
 
 // Store owns config + stats files.
 type Store struct {
-	Home      string
-	cfg       *Config
-	stats     *Stats
-	quota     map[string]QuotaNote
-	perf      map[string][]int64 // per-model probe first-token samples (ms)
+	Home  string
+	stats *Stats
+	quota map[string]QuotaNote
+	perf  map[string][]int64 // per-model probe first-token samples (ms)
+	// cfg is published as an immutable snapshot: readers take it as it is, a
+	// mutation replaces it with a copy (see Mutate). Written as one pointer, so
+	// Config() needs no lock.
+	cfg       atomic.Pointer[Config]
 	perfDirty bool
 	tags      map[string]ModelTag
 	mu        sync.Mutex
@@ -415,7 +419,7 @@ func Open() (*Store, error) {
 	if cfg.ProbeIntervalMinutes <= 0 {
 		cfg.ProbeIntervalMinutes = 15
 	}
-	s.cfg = cfg
+	s.cfg.Store(cfg)
 
 	stats, err := loadJSON[Stats](filepath.Join(home, "stats.json"))
 	if err != nil || stats.Version != statsVersion {
@@ -448,9 +452,20 @@ func Open() (*Store, error) {
 }
 
 // SetModelTag records one model's capability verdict and persists tags.json.
+// The capacities survive a write that does not state them: a 能力实测 run
+// answers the three modality questions and nothing about token windows, so its
+// verdict must not erase the window the provider's listing declared.
 func (s *Store) SetModelTag(model string, t ModelTag) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if prev, ok := s.tags[model]; ok {
+		if t.ContextWindow == 0 {
+			t.ContextWindow = prev.ContextWindow
+		}
+		if t.MaxOutput == 0 {
+			t.MaxOutput = prev.MaxOutput
+		}
+	}
 	s.tags[model] = t
 	_ = writeJSON(filepath.Join(s.Home, "tags.json"), s.tags)
 }
@@ -470,8 +485,9 @@ func (s *Store) ModelTagOf(model string) (ModelTag, bool) {
 func (s *Store) DeclaredMeta(model string) (ModelMeta, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	for i := range s.cfg.Providers {
-		p := &s.cfg.Providers[i]
+	cfg := s.cfg.Load()
+	for i := range cfg.Providers {
+		p := &cfg.Providers[i]
 		if !p.Enabled {
 			continue
 		}
@@ -549,27 +565,125 @@ func GenerateKey(prefix string) string {
 	return "ofm-" + base64.RawURLEncoding.EncodeToString(b)
 }
 
-// Config returns the live config (mutable via Save).
-func (s *Store) Config() *Config { return s.cfg }
+// Config returns the current config snapshot. Treat it as read-only: a writer
+// publishes a copy through Mutate, so a caller may hold this pointer for as
+// long as it needs a consistent view. Editing it in place is what used to make
+// an admin write race the request goroutines reading the same object.
+func (s *Store) Config() *Config { return s.cfg.Load() }
+
+// Mutate applies fn to a deep copy of the live config and publishes the result.
+// It does not persist; callers keep calling Save when they mean to.
+func (s *Store) Mutate(fn func(cfg *Config)) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	next := s.cfg.Load().clone()
+	fn(next)
+	s.cfg.Store(next)
+}
+
+// Replace publishes a whole config (the settings-import path) as a fresh
+// snapshot, so the imported document cannot keep aliasing the caller's.
+func (s *Store) Replace(cfg Config) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.cfg.Store(cfg.clone())
+}
+
+// MaskedValue stands in for a credential in an export meant for sharing.
+const MaskedValue = "‹已隐去›"
+
+// Masked returns the config with every credential replaced by MaskedValue: the
+// gateway key, the per-agent keys, each provider's API key, and the
+// subscription URLs — a subscription link carries the account token. 导出配置
+// is the file people paste into an issue, so it goes out masked; the export
+// endpoint hands back the live snapshot only when asked with ?secrets=1.
+func (s *Store) Masked() *Config {
+	cfg := s.Config().clone()
+	if cfg.MainKey != "" {
+		cfg.MainKey = MaskedValue
+	}
+	for k := range cfg.AgentKeys {
+		cfg.AgentKeys[k] = MaskedValue
+	}
+	for i := range cfg.Providers {
+		if cfg.Providers[i].APIKey != "" {
+			cfg.Providers[i].APIKey = MaskedValue
+		}
+	}
+	for i := range cfg.Subscriptions {
+		if cfg.Subscriptions[i].URL != "" {
+			cfg.Subscriptions[i].URL = MaskedValue
+		}
+	}
+	return cfg
+}
+
+// clone copies the config with no mutable value shared with the original, which
+// is what lets a snapshot handed to one goroutine survive the next Mutate.
+func (c *Config) clone() *Config {
+	next := *c
+	next.AgentKeys = cloneMap(c.AgentKeys)
+	next.EnabledAgents = cloneBoolMap(c.EnabledAgents)
+	next.LogCategories = cloneBoolMap(c.LogCategories)
+	next.SeenAnnouncements = cloneSlice(c.SeenAnnouncements)
+	next.HiddenModels = cloneSlice(c.HiddenModels)
+	next.Subscriptions = cloneSlice(c.Subscriptions)
+	if c.Providers != nil {
+		next.Providers = make([]Provider, len(c.Providers))
+		for i, p := range c.Providers {
+			p.Models = cloneSlice(p.Models)
+			p.ModelMeta = cloneMeta(p.ModelMeta)
+			next.Providers[i] = p
+		}
+	}
+	return &next
+}
+
+func cloneMap(m map[string]string) map[string]string {
+	if m == nil {
+		return nil
+	}
+	out := make(map[string]string, len(m))
+	for k, v := range m {
+		out[k] = v
+	}
+	return out
+}
+
+func cloneBoolMap(m map[string]bool) map[string]bool {
+	if m == nil {
+		return nil
+	}
+	out := make(map[string]bool, len(m))
+	for k, v := range m {
+		out[k] = v
+	}
+	return out
+}
+
+func cloneMeta(m map[string]ModelMeta) map[string]ModelMeta {
+	if m == nil {
+		return nil
+	}
+	out := make(map[string]ModelMeta, len(m))
+	for k, v := range m {
+		out[k] = v
+	}
+	return out
+}
+
+func cloneSlice[T any](s []T) []T {
+	if s == nil {
+		return nil
+	}
+	return append(make([]T, 0, len(s)), s...)
+}
 
 // Save persists the config.
 func (s *Store) Save() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return writeJSON(filepath.Join(s.Home, "config.json"), s.cfg)
-}
-
-// KeyForAgent returns (creating if needed) the stable subkey of one agent.
-func (s *Store) KeyForAgent(agentID string) string {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if k, ok := s.cfg.AgentKeys[agentID]; ok && k != "" {
-		return k
-	}
-	k := GenerateKey(agentID)
-	s.cfg.AgentKeys[agentID] = k
-	_ = s.Save()
-	return k
+	return writeJSON(filepath.Join(s.Home, "config.json"), s.cfg.Load())
 }
 
 // Record folds one call into the stats.
