@@ -44,6 +44,16 @@ const continuationInstruction = "You reached the output token limit and your ans
 	"Resume the sentence that was cut off, then finish the remaining content and stop. " +
 	"Do not call tools for this continuation."
 
+// maxConcurrentUpstream caps how many logical requests may be in flight to the
+// upstream at once; the rest queue. The exit pool is a set of shared public
+// proxies, and letting an unbounded number of requests pile through them makes
+// nodes drop connections (observed as more 502/EOF under higher concurrency).
+// Queueing is preferable to melting the pool, and it does not affect rotation —
+// each request still gets its own exit.
+const maxConcurrentUpstream = 6
+
+var upstreamSem = make(chan struct{}, maxConcurrentUpstream)
+
 // CallRecord is emitted after every upstream request (physical, not logical).
 type CallRecord struct {
 	Model     string `json:"model"`
@@ -525,6 +535,13 @@ func (l *Lane) notify() {
 // refused request never consumed any).
 const quotaEgressRetries = 3
 
+// quotaEgressTotalMS bounds the *total* time the retry-on-another-exit loop may
+// spend. A per-attempt count alone is not enough: a stalling exit burns the
+// whole attempt budget each time, so 3 retries can still mean a minute of
+// waiting. Fast refusals (a 429 usually answers in well under a second) still
+// get all their retries; only the stalling case is cut short.
+const quotaEgressTotalMS = 40000
+
 // Complete runs one logical turn: effort budgeting, wire encoding, the
 // fingerprint gate, streaming decode, and — for a cut pure-reasoning turn —
 // one bounded checkpoint recovery request.
@@ -534,6 +551,14 @@ const quotaEgressRetries = 3
 // accounted per session; a retry is a second burn), so switching is the only
 // honest lever.
 func (l *Lane) Complete(ctx context.Context, req Request, emit func(Chunk)) (Outcome, *UpstreamError) {
+	// Concurrency gate: wait here when saturated (the caller can still cancel).
+	select {
+	case upstreamSem <- struct{}{}:
+		defer func() { <-upstreamSem }()
+	case <-ctx.Done():
+		return Outcome{}, &UpstreamError{Code: CodeAborted, Message: "cancelled"}
+	}
+
 	effort := req.Effort
 	if effort == "" {
 		effort = EffortOf(req.Model)
@@ -548,6 +573,7 @@ func (l *Lane) Complete(ctx context.Context, req Request, emit func(Chunk)) (Out
 	model := requested
 	failovers := 0
 	egressTries := 0
+	egressDeadline := time.Now().Add(quotaEgressTotalMS * time.Millisecond)
 	tried := map[string]bool{requested: true}
 	for {
 		out, uerr, sawAny := l.attemptModel(ctx, req, model, effort, emit)
@@ -560,7 +586,7 @@ func (l *Lane) Complete(ctx context.Context, req Request, emit func(Chunk)) (Out
 		// counted per egress IP and a funded exit may be two hops away, so ask
 		// the pool a few times before believing it. Every retry is a fresh dial
 		// (rotate disables keep-alives) and the node round-robin moves on.
-		if uerr.Code == CodeQuota && !sawAny && RotationActive() && egressTries < quotaEgressRetries {
+		if uerr.Code == CodeQuota && !sawAny && RotationActive() && egressTries < quotaEgressRetries && time.Now().Before(egressDeadline) {
 			egressTries++
 			continue
 		}

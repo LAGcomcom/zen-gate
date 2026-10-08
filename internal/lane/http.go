@@ -162,6 +162,8 @@ func rotateDialContext(ctx context.Context, network, addr string) (net.Conn, err
 		var d net.Dialer
 		return d.DialContext(ctx, network, addr)
 	}
+	ctx, cancel := context.WithTimeout(ctx, dialTimeout)
+	defer cancel()
 	rotMu.RLock()
 	r := rotator
 	rotMu.RUnlock()
@@ -175,6 +177,14 @@ func rotateDialContext(ctx context.Context, network, addr string) (net.Conn, err
 	var d net.Dialer
 	return d.DialContext(ctx, network, addr)
 }
+
+// dialTimeout bounds one dial through a node.
+//
+// Without it a node that accepts the TCP connection but then stalls keeps a
+// request alive far past any useful budget (observed: single requests taking
+// 80s+, because the retry path re-dials and stalls the same way). Failing the
+// dial lets the pool move to the next node instead.
+const dialTimeout = 20 * time.Second
 
 // isLoopbackAddr reports whether host:port names this machine.
 func isLoopbackAddr(addr string) bool {

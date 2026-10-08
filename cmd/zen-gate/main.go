@@ -12,6 +12,8 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
+	"runtime/debug"
 	"strings"
 	"time"
 
@@ -36,6 +38,21 @@ var mainHwnd uintptr
 var windowHidden bool
 
 func main() {
+	// Process-level crash visibility.
+	//
+	// The Windows build is linked with -H=windowsgui, so a panic's stderr has
+	// nowhere to go: the process dies silently while the tray and the sidecar
+	// disappear, and the only symptom is clients seeing requests cut off. The
+	// gateway already recovers panics inside HTTP handlers, but a panic on any
+	// other goroutine still takes the whole process down — leave a stack behind
+	// so that failure is diagnosable.
+	defer func() {
+		if p := recover(); p != nil {
+			writeCrash(p)
+			panic(p) // keep the crash semantics: non-zero exit, watchdog restarts
+		}
+	}()
+
 	// DPI awareness before any window (main window or tray) exists.
 	window.SetProcessDPIAwareness()
 
@@ -455,4 +472,18 @@ func trayStatus(st *store.Store, ln *lane.Lane) string {
 		tok = d.Output
 	}
 	return fmt.Sprintf("运行中 · 今日输出 %d tok · %d 模型可用", tok, len(ln.ServableModels()))
+}
+
+// writeCrash appends a panic value and the full goroutine stack to crash.log.
+// Its only job is to make a -H=windowsgui crash leave evidence.
+func writeCrash(p any) {
+	defer func() { _ = recover() }() // a crash log must never crash the crash path
+	f, err := os.OpenFile(filepath.Join(store.Home(), "crash.log"),
+		os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+	fmt.Fprintf(f, "\n===== PANIC at %s =====\n%v\n\n%s\n",
+		time.Now().Format(time.RFC3339), p, debug.Stack())
 }
