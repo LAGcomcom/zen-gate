@@ -73,6 +73,7 @@ type Server struct {
 	// announcementPull re-runs the feed fetch on demand (dashboard 刷新 button);
 	// wired from main alongside the periodic loop.
 	announcementPull func()
+	modelsSync       func()
 	// updateCheck re-runs the release check on demand (设置页 检测更新 button).
 	updateCheck func() (bool, string)
 	// subs is the sing-box sidecar manager, injected by main when the
@@ -136,6 +137,11 @@ type logSink interface {
 	Warnf(format string, args ...any)
 	Errorf(format string, args ...any)
 }
+
+// SetModelsSync wires the "model set changed" callback: agents' static
+// configs only re-inject when this runs, so anything that edits provider
+// metadata must fire it before asking for a resync.
+func (s *Server) SetModelsSync(fn func()) { s.modelsSync = fn }
 
 // SetLogger wires the logx logger.
 func (s *Server) SetLogger(l logSink) { s.logger = l }
@@ -641,6 +647,7 @@ func (s *Server) InjectableModels() []lane.ModelInfo {
 				entry.Vision = caps.Vision
 				entry.AudioInput = caps.Audio
 				entry.FileInput = caps.File
+				entry.Reasoning = caps.Reasoning
 				if caps.ContextWindow > 0 {
 					entry.ContextWindow = caps.ContextWindow
 				}

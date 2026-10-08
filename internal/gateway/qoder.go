@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"zen-gate/internal/lane"
 	"zen-gate/internal/logx"
 	"zen-gate/internal/store"
 )
@@ -33,11 +34,12 @@ const (
 )
 
 type qoderStatus struct {
-	Running       bool     `json:"running"`
-	LoggedIn      bool     `json:"loggedIn"`
-	ModelIDs      []string `json:"models"`
-	Detail        string   `json:"detail"`
-	ProviderWired bool     `json:"providerWired"`
+	Running       bool               `json:"running"`
+	LoggedIn      bool               `json:"loggedIn"`
+	ModelIDs      []string           `json:"models"`
+	Detail        string             `json:"detail"`
+	ProviderWired bool               `json:"providerWired"`
+	Catalog       []lane.ListingMeta `json:"-"`
 }
 
 func qoderGet(path string) (int, []byte, error) {
@@ -131,11 +133,66 @@ func probeQoder() qoderStatus {
 		}
 	}
 	sort.Strings(st.ModelIDs)
+	st.Catalog = parseQoderCatalog(body)
 	if len(st.ModelIDs) == 0 {
 		st.LoggedIn = false
 		st.Detail = "已登录但渠道没有返回任何模型"
 	}
 	return st
+}
+
+// qoderRow mirrors one listing row's capability flags.
+type qoderRow struct {
+	ID          string `json:"id"`
+	IsVL        bool   `json:"is_vl"`
+	IsReasoning bool   `json:"is_reasoning"`
+}
+
+// qoderCorrections carries user-verified facts that override the sidecar's
+// own listing: the vendor UI states Qwen3.8-Flash serves 1M context with a
+// top thinking rung, while the listing publishes neither.
+var qoderCorrections = map[string]struct {
+	contextWindow int
+	reasoning     bool
+}{
+	"Qwen3.8-Flash": {contextWindow: 1000000, reasoning: true},
+}
+
+// parseQoderCatalog turns the sidecar's listing rows into ListingMeta through
+// the shared row reader, applies the verified corrections, and marks every row
+// the listing says anything about as declared — the vendor states is_vl /
+// is_reasoning and the context capacity per model, and without the declared
+// flags the capability chain discards all of it as unknown.
+func parseQoderCatalog(body []byte) []lane.ListingMeta {
+	var payload map[string]any
+	if json.Unmarshal(body, &payload) != nil {
+		return nil
+	}
+	rows := lane.ParseListingMeta(payload)
+	var raw []qoderRow
+	_ = json.Unmarshal(body, &raw)
+	byID := map[string]qoderRow{}
+	for _, r := range raw {
+		if r.ID != "" {
+			byID[r.ID] = r
+		}
+	}
+	for i := range rows {
+		if r, ok := byID[rows[i].ID]; ok {
+			rows[i].Vision = r.IsVL
+			rows[i].Reasoning = r.IsReasoning
+			rows[i].InputDeclared = true
+			rows[i].OutputDeclared = true
+		}
+		if c, ok := qoderCorrections[rows[i].ID]; ok {
+			rows[i].ContextWindow = c.contextWindow
+			rows[i].Reasoning = c.reasoning
+		}
+		if rows[i].ContextWindow > 0 {
+			rows[i].InputDeclared = true
+		}
+	}
+	return rows
 }
 
 // ensureQoderProvider syncs the managed provider to the observed state: a
@@ -176,6 +233,7 @@ func (s *Server) ensureQoderProvider(st qoderStatus) bool {
 			Enabled: true, Models: st.ModelIDs,
 			Note: "由 zen-gate 托管的 qodercn-gateway sidecar 自动管理，登录状态跟随 Qoder IDE",
 		}
+		mergeCatalog(&p, st.Catalog)
 		s.Store.Mutate(func(c *store.Config) {
 			c.Providers = append(c.Providers, p)
 		})
@@ -187,32 +245,37 @@ func (s *Server) ensureQoderProvider(st qoderStatus) bool {
 		return true
 	}
 	p := cfg.Providers[idx]
-	rosterChanged := len(p.Models) != len(st.ModelIDs)
-	if !rosterChanged {
-		for i := range st.ModelIDs {
-			if p.Models[i] != st.ModelIDs[i] {
-				rosterChanged = true
-				break
-			}
-		}
-	}
-	needsEnable := !p.Enabled
-	if !rosterChanged && !needsEnable {
-		return true
-	}
+	// The roster is the user's: they may have unchecked models in the edit
+	// form, and this sync must never resurrect them. Only capacities (the
+	// listing meta, with verified corrections applied) re-sync here.
+	changed := !p.Enabled
 	s.Store.Mutate(func(c *store.Config) {
 		for i := range c.Providers {
 			if c.Providers[i].ID != qoderProviderID {
 				continue
 			}
-			if rosterChanged {
-				c.Providers[i].Models = st.ModelIDs
+			if !c.Providers[i].Enabled {
+				c.Providers[i].Enabled = true
 			}
-			c.Providers[i].Enabled = true
+			if len(st.Catalog) > 0 {
+				mergeCatalog(&c.Providers[i], st.Catalog)
+			}
 		}
 	})
 	_ = s.Store.Save()
-	s.logCat(logx.CatAdmin, "info", "Qoder 账号渠道已登录：模型名单同步（%d 个）", len(st.ModelIDs))
+	if changed {
+		s.logCat(logx.CatAdmin, "info", "Qoder 账号渠道已登录：供应商重新启用")
+	}
+	if s.registry != nil {
+		time.AfterFunc(1500*time.Millisecond, func() {
+			if s.modelsSync != nil {
+				s.modelsSync() // the resync reads the cached model set: refresh it first
+			}
+			if n := s.registry.ResyncEnabled(); n > 0 && s.logger != nil {
+				s.logger.Infof("Qoder 渠道元数据更新，已重新注入 %d 个已开启 Agent 的配置", n)
+			}
+		})
+	}
 	return true
 }
 

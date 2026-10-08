@@ -212,6 +212,7 @@ func main() {
 		tray.SetStatus(trayStatus(st, ln))
 	}
 	ln.OnChange = syncEndpoints
+	gw.SetModelsSync(syncEndpoints)
 	ln.StartLoops(ctx, time.Duration(cfg.ProbeIntervalMinutes)*time.Minute)
 	syncEndpoints()
 
