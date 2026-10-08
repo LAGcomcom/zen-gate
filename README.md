@@ -37,8 +37,10 @@ OpenCode Zen 提供了一批**免登录、免计费**的模型车道，但它们
   内置 NVIDIA NIM、Google Gemini、GitHub Models、Groq、Cerebras、Mistral、OpenRouter、
   HuggingFace、硅基流动、魔搭、智谱、LongCat 等 13 个免费商预设一键填充，
   填上自己的 Key 后自动检索模型列表，模型以 `供应商ID/模型名` 出现在所有 Agent 选择器里；
-- **协议完整移植**：会话铸造、指纹门、三种线协议（chat / responses / messages）、
-  纯思考断流恢复——全部来自 MIT 协议层参考实现 dsh-our-free-model；
+- **协议层实测打磨**：会话铸造、指纹门、三种线协议（chat / responses / messages），
+  断流续写、空停续写、截断自动续写三重兜底——全部按真实客户端行为逐项实测；
+- **Kilo 免费池**：第二条免凭据免费源直接并入目录，与免费车道共用路由、
+  限流切换与探测看板；免费池提示词可能被上游记录，别交机密内容；
 - **单模型体检**：每个模型可单独探测可用性与首字延迟，探测历史持久化、跨重启可查。
 
 ## 亮点
