@@ -573,10 +573,6 @@ func jsonString(v any) string {
 		return ""
 	case string:
 		return t
-	case nil:
-		// An absent field is nothing, never the literal token a JSON
-		// marshaller would invent for it.
-		return ""
 	default:
 		b, _ := json.Marshal(t)
 		return string(b)
