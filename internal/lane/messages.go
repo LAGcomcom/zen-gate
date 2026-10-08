@@ -180,7 +180,7 @@ func ToChatMessages(messages []Message) []map[string]any {
 func ToClaudeMessages(messages []Message) (system string, out []map[string]any) {
 	sysParts := []string{}
 	type pendingTurn struct {
-		role  string
+		role   string
 		blocks []map[string]any
 	}
 	turns := []pendingTurn{}

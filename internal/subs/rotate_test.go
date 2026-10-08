@@ -41,8 +41,8 @@ func TestRotationSkipsParkedAndDead(t *testing.T) {
 	until := time.Now().Add(time.Minute).UnixMilli()
 	nodes := []Node{{ID: "a"}, {ID: "b"}, {ID: "c"}}
 	health := map[string]*NodeHealth{
-		"a": {ID: "a", Port: 1, Alive: false},          // 探测失败
-		"b": {ID: "b", Port: 2, Alive: true},           // 健康
+		"a": {ID: "a", Port: 1, Alive: false},                  // 探测失败
+		"b": {ID: "b", Port: 2, Alive: true},                   // 健康
 		"c": {ID: "c", Port: 3, Alive: true, CoolUntil: until}, // 拨号失败被暂缓
 	}
 	m := newTestManager(nodes, health)

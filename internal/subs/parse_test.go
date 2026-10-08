@@ -109,7 +109,7 @@ func TestParseTrojanSSHy2Tuic(t *testing.T) {
 		t.Fatalf("hy2 obfs 错误: %v", obf)
 	}
 
-	n, err = ParseURI("tuic://"+testUUID+":tuicpass@sg.example.com:8443?congestion_control=bbr&alpn=h3&sni=sg.example.com#SG-01")
+	n, err = ParseURI("tuic://" + testUUID + ":tuicpass@sg.example.com:8443?congestion_control=bbr&alpn=h3&sni=sg.example.com#SG-01")
 	if err != nil {
 		t.Fatal(err)
 	}

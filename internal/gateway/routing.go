@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"zen-gate/internal/lane"
+	"zen-gate/internal/logx"
 	"zen-gate/internal/relay"
 	"zen-gate/internal/store"
 )
@@ -12,30 +13,60 @@ import (
 // Cross-lane routing: merged capability resolution plus the one-way fallback
 // that offers a free-lane-exhausted turn to user-added providers.
 
-// modalityCaps is a model's merged input-modality verdict. Trust order:
-// live probe (实测) > AI tagger (AI标注) > name heuristics (规则) > unknown.
+// modalityCaps is one model's merged input-capability verdict. Trust order for
+// the modality bools: live probe (实测) > the provider's own listing (上游声明)
+// > AI tagger (AI标注) > name heuristics (规则) > unknown.
 type modalityCaps struct {
 	Vision        bool
 	Audio         bool
 	File          bool
-	Known         bool // any source produced a verdict
+	Reasoning     bool
+	Known         bool // a modality source produced a verdict
 	ContextWindow int
+	MaxOutput     int
 	Source        string
 }
 
 // modalityCapsOf resolves capabilities for one upstream model id (no
-// namespace) from the tag store, falling back to the baked-in heuristics.
+// namespace). Trust order for the modality bools: a live probe beats the
+// provider's own listing, which beats the AI tagger, which beats the name
+// heuristics. Token capacities merge per field — a source that measured the
+// window but not the output cap must not discard the other's number.
 func (s *Server) modalityCapsOf(upstreamModel string) modalityCaps {
-	if tag, ok := s.Store.ModelTagOf(upstreamModel); ok {
-		return modalityCaps{Vision: tag.Vision, Audio: tag.Audio, File: tag.File,
-			Known: true, ContextWindow: tag.ContextWindow, Source: tag.Source}
+	tag, hasTag := s.Store.ModelTagOf(upstreamModel)
+	declared, hasDeclared := s.Store.DeclaredMeta(upstreamModel)
+	var c modalityCaps
+	switch {
+	case hasTag && tag.Source == store.TagSourceProbe:
+		c = modalityCaps{Vision: tag.Vision, Audio: tag.Audio, File: tag.File,
+			Reasoning: tag.Reasoning, Known: true, Source: tag.Source}
+	case hasDeclared && (declared.InputDeclared || declared.OutputDeclared):
+		c = modalityCaps{Vision: declared.Vision, Audio: declared.Audio, File: declared.File,
+			Reasoning: declared.Reasoning,
+			// Inputs are what the router filters on; an output-only
+			// declaration is not a modality verdict.
+			Known: declared.InputDeclared, Source: store.TagSourceListing}
+	case hasTag:
+		c = modalityCaps{Vision: tag.Vision, Audio: tag.Audio, File: tag.File,
+			Reasoning: tag.Reasoning, Known: true, Source: tag.Source}
+	default:
+		if nt := lane.NameCapabilities(upstreamModel); nt.Matched {
+			c = modalityCaps{Vision: nt.Vision, Audio: nt.Audio, File: nt.File,
+				Reasoning: nt.Reasoning, Known: true, Source: store.TagSourceHeuris}
+		}
 	}
-	nt := lane.NameCapabilities(upstreamModel)
-	if nt.Matched {
-		return modalityCaps{Vision: nt.Vision, Audio: nt.Audio, File: nt.File,
-			Known: true, Source: store.TagSourceHeuris}
+	if hasTag {
+		c.ContextWindow, c.MaxOutput = tag.ContextWindow, tag.MaxOutput
 	}
-	return modalityCaps{}
+	if hasDeclared {
+		if c.ContextWindow == 0 {
+			c.ContextWindow = declared.ContextWindow
+		}
+		if c.MaxOutput == 0 {
+			c.MaxOutput = declared.MaxOutput
+		}
+	}
+	return c
 }
 
 // satisfiesCaps reports whether a model can carry a request's modality
@@ -116,12 +147,12 @@ func (s *Server) providerFallback(ctx context.Context, picks []fallbackPick, uni
 			Provider: pick.p, Model: pick.model, Messages: unified,
 			Tools: tools, MaxTokens: maxTokens, Agent: agent,
 		}, emit)
-		s.recordRelay(pick.p, pick.model, agent, finish != "", usage, 0, finish, uerr)
+		s.recordRelay(ctx, pick.p, pick.model, agent, finish != "", usage, 0, finish, uerr)
 		if uerr == nil {
-			s.logInfof("免费车道耗尽，已回落自定义 API: %s/%s", pick.p.ID, pick.model)
+			s.logCat(logx.CatRouting, "info", "免费车道耗尽，已回落自定义 API: %s/%s", pick.p.ID, pick.model)
 			return usage, finish, pick.p.ID + "/" + pick.model, nil, true
 		}
-		s.logInfof("回落候选 %s/%s 失败: %s", pick.p.ID, pick.model, uerr.Message)
+		s.logCat(logx.CatRouting, "warn", "回落候选 %s/%s 失败: %s", pick.p.ID, pick.model, uerr.Message)
 	}
 	return lane.Usage{}, "", "", nil, false
 }

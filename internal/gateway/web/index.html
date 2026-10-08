@@ -229,6 +229,45 @@
   .mcard .qtext.warn2 { color:var(--warn, #fbbf24); }
   .mcard .mdetail { font-size:11.5px; color:var(--ink-mute); border-top:1px dashed var(--hairline-soft); padding-top:6px; word-break:break-all; }
 
+  /* ---- 探测进度（测试 / 能力实测）---- */
+  .mcard .mtask { margin-top:8px; border-top:1px dashed var(--hairline-soft); padding-top:7px;
+    display:flex; flex-direction:column; gap:5px; }
+  .mcard .mtask .th { display:flex; align-items:center; gap:7px; font-size:11.5px; color:var(--ink-dim); }
+  .mcard .mtask .th .grow { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .mcard .mtask .th b { font-family:var(--mono); font-variant-numeric:tabular-nums; color:var(--ink); }
+  .mcard .mtask .tdet { font-size:11px; padding:1px 8px; flex:none; }
+  .mcard .mtask .tps { display:flex; gap:5px; flex-wrap:wrap; }
+  .mcard .tp { font-size:11px; border-radius:5px; padding:1px 7px; background:var(--panel-2);
+    color:var(--ink-mute); display:inline-flex; gap:4px; align-items:center; }
+  .mcard .tp b { font-family:var(--mono); font-variant-numeric:tabular-nums; font-weight:600; }
+  .mcard .tp.run { color:var(--accent); background:var(--accent-soft); animation:tpb 1.4s ease-in-out infinite; }
+  .mcard .tp.ok { color:var(--ok, #34d399); }
+  .mcard .tp.fail { color:var(--bad, #f87171); }
+  .mcard .tp.unknown { color:var(--warn, #fbbf24); }
+  @keyframes tpb { 0%,100% { opacity:1; } 50% { opacity:.5; } }
+
+  /* ---- 探测详情抽屉 ---- */
+  #tdrawer { position:fixed; top:0; right:0; bottom:0; width:min(470px,92vw); z-index:80;
+    background:var(--panel); border-left:1px solid var(--hairline); box-shadow:-12px 0 32px rgba(0,0,0,.3);
+    display:flex; flex-direction:column; }
+  #tdrawer .hd { display:flex; align-items:center; gap:10px; padding:13px 16px; border-bottom:1px solid var(--hairline); }
+  #tdrawer .hd .t { font-weight:600; font-size:12.5px; flex:1; min-width:0; word-break:break-all; }
+  #tdrawer .bd { overflow:auto; padding:12px 16px 20px; }
+  #tdrawer .run { border:1px solid var(--hairline); border-radius:var(--r-md); padding:8px 10px;
+    margin-bottom:9px; background:var(--panel-2); }
+  #tdrawer .rh { font-size:11.5px; color:var(--ink-dim); margin-bottom:6px; display:flex; gap:9px; }
+  #tdrawer .row { display:grid; grid-template-columns:62px 1fr auto; gap:8px; font-size:11.5px;
+    padding:2px 0; align-items:start; }
+  #tdrawer .row .tm { color:var(--ink-mute); font-family:var(--mono); }
+  #tdrawer .row .nm { color:var(--ink); min-width:0; word-break:break-all; }
+  #tdrawer .row .ms { color:var(--ink-mute); font-family:var(--mono); text-align:right; white-space:nowrap; }
+  #tdrawer .row .err, #tdrawer .row .out { grid-column:1/-1; border-radius:5px; padding:5px 7px;
+    font-family:var(--mono); font-size:11px; white-space:pre-wrap; word-break:break-all; user-select:all;
+    background:var(--panel); border:1px solid var(--hairline); }
+  #tdrawer .row .err { color:var(--bad, #f87171); }
+  #tdrawer .row .out { color:var(--ink-dim); }
+  #tdrawer .empty { color:var(--ink-mute); font-size:12px; }
+
   /* ---- agent cards ---- */
   .agrid { display:grid; grid-template-columns:repeat(auto-fill,minmax(240px,1fr)); gap:10px; }
   .acard { background:var(--panel); box-shadow:var(--card-shadow); border:1px solid var(--hairline);
@@ -441,9 +480,30 @@ let STATE = null;
 function toast(m){ const t=$("#toast"); t.textContent=m; t.style.display="block";
   t.style.animation="none"; void t.offsetWidth; t.style.animation="";
   clearTimeout(t._h); t._h=setTimeout(()=>t.style.display="none",2400); }
-function esc(s){ return (s||"").replace(/[<>&]/g,c=>({"<":"&lt;",">":"&gt;","&":"&amp;"}[c])); }
+function esc(s){ return (s||"").replace(/[<>&"']/g,c=>({"<":"&lt;",">":"&gt;","&":"&amp;",'"':"&#34;","'":"&#39;"}[c])); }
+/* 详情/发布页/申请 Key links point outside the app, and the announcement feed
+   is not ours: a javascript: href survives escaping and runs in the admin page. */
+function safeHref(u){ const s=String(u==null?"":u); return /^https?:\/\/\S/.test(s)?s:"#"; }
 function fmtN(n){ return n>=1e6?(n/1e6).toFixed(1)+"M":n>=1e3?(n/1e3).toFixed(0)+"K":String(n||0); }
+/* 系统信息 shows one label per proxy mode — an unmapped mode used to print its
+   raw key ("system", "rotate") where 设置 has Chinese names for it. */
+function proxyLabel(mode,url){ if(mode==="custom") return url||"自定义 URL（未填）"; return {system:"跟随系统代理",env:"跟随环境变量",direct:"直连",rotate:"订阅轮询 (sing-box)"}[mode]||mode||"未知"; }
+/* The 10-second state refresh must never overwrite the field the user is
+   typing in. */
+function fill(el,v){ if(el&&document.activeElement!==el) el.value=(v==null?"":String(v)); }
+/* 日志 auto-refresh follows the visible page: opening it from the overview (or
+   booting straight into it) used to leave a static list. */
+function syncLogTimer(t){ if(cur==="logs") return t||setInterval(()=>{ if(cur==="logs") renderLogs(); },5000); if(t) clearInterval(t); return null; }
 function fmtK(n){ return n>=1e6?(n/1e6).toFixed(1)+"M":n>=1e3?(n/1e3).toFixed(0)+"K":String(n||0); }
+/* Providers publish capacities both ways: 128000 (decimal, "128K") and 131072
+   (binary, also "128K"). Read the number the way the vendor wrote it. */
+function fmtCap(n){
+  if(!n) return "—";
+  const dec = n % 1000 === 0;
+  const k = dec ? n/1000 : n/1024;
+  if(k < 1000) return Math.round(k)+"K";
+  return Math.round((dec ? n/1e6 : n/1048576)*100)/100+"M";
+}
 async function api(path,body){
   const r = await fetch("/admin/api"+path, body?{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify(body)}:{});
   const j = await r.json().catch(()=>({}));
@@ -451,7 +511,7 @@ async function api(path,body){
   return j;
 }
 function statePill(st){ const c={available:"ok",unknown:"unknown","region-blocked":"warn",throttled:"warn",unavailable:"bad",custom:"custom"}[st]||"unknown";
-  const t={available:"可用",unknown:"未探测","region-blocked":"地区受限",throttled:"已限额",unavailable:"不可用",custom:"自定义"}[st]||st;
+  const t={available:"可用",unknown:"未探测","region-blocked":"地区受限",throttled:"暂时限流·可重试",unavailable:"不可用",custom:"自定义"}[st]||st;
   return `<span class="pill ${c}">${t}</span>`; }
 const cssVar = (n,f) => (getComputedStyle(document.documentElement).getPropertyValue(n)||f).trim();
 
@@ -534,10 +594,7 @@ function nav(){
       `<button data-p="${id}" title="${label}" class="${id===cur?"on":""}">${icon(ic)}<span class="lbl">${label}</span></button>`).join("");
   }
   $("#nav").innerHTML = html;
-  $("#nav").querySelectorAll("button").forEach(b=>b.onclick=()=>{ cur=b.dataset.p; localStorage.setItem("zengate.page",cur); nav(); render();
-    if (cur==="logs") { renderLogs(); if(logTimer) clearInterval(logTimer); logTimer = setInterval(()=>{ if(cur==="logs") renderLogs(); }, 5000); }
-    else if (logTimer) { clearInterval(logTimer); logTimer = null; }
-  });
+  $("#nav").querySelectorAll("button").forEach(b=>b.onclick=()=>{ cur=b.dataset.p; localStorage.setItem("zengate.page",cur); nav(); render(); logTimer = syncLogTimer(logTimer); });
 
   // 侧栏伸缩（记忆状态）
   const side = document.getElementById("side");
@@ -561,17 +618,22 @@ function render(){ if(!STATE) return; const s=STATE;
   $("#svcstat").textContent = "运行中";
   const todayKey0 = Object.keys(s.stats.days||{}).sort().pop();
   $("#side-today").textContent = fmtN(todayKey0 ? (s.stats.days[todayKey0].output||0) : 0);
-  $("#side-models").textContent = s.models.filter(m=>m.state==="available").length + "/" + s.models.length;
+  // Only the free lane is probed on a timer; a custom provider's models are
+  // tested on demand, so counting them here would cap the ratio below 100%.
+  const lane = s.models.filter(m=>!m.custom);
+  $("#side-models").textContent = lane.filter(m=>m.state==="available").length + "/" + lane.length;
   $("#side-ver").textContent = s.version || "";
   $("#egress-foot").textContent = s.egress&&s.egress.ip ? `${s.egress.ip} (${s.egress.country||"?"})` : "出口未知";
   renderDash(s); renderAgents(s); renderModels(s); renderProviders(s); renderAccess(s); renderUsage(s); renderSettings(s);
   if (cur === "logs") renderLogs();
+  logTimer = syncLogTimer(logTimer);
   renderDashExtras(s);
 }
 
 /* ---- 总览 ---- */
 function renderDash(s){
-  const avail = s.models.filter(m=>m.state==="available" && !m.hidden).length;
+  const laneModels = s.models.filter(m=>!m.custom);
+  const avail = laneModels.filter(m=>m.state==="available" && !m.hidden).length;
   const on = s.agents.filter(a=>a.enabled).length;
   const todayKey = Object.keys(s.stats.days||{}).sort().pop();
   const day = todayKey ? s.stats.days[todayKey] : null;
@@ -581,7 +643,7 @@ function renderDash(s){
   const banner = s.settings.updateAvailable ? `
     <div class="card" style="border-color:var(--accent); display:flex; justify-content:space-between; align-items:center; gap:10px; padding:10px 16px; margin-bottom:12px">
       <span>发现新版本 <b>${esc(s.settings.updateVersion)}</b>（当前 ${esc(s.version)}）</span>
-      <span style="display:flex; gap:8px; align-items:center">${updAct}<a href="${esc(s.settings.updateURL||"#")}" target="_blank" style="font-size:13px">发布页 →</a></span>
+      <span style="display:flex; gap:8px; align-items:center">${updAct}<a href="${esc(safeHref(s.settings.updateURL))}" target="_blank" style="font-size:13px">发布页 →</a></span>
     </div>` : "";
   // 公告卡常驻总览：critical/warn/info 分级着色，未读高亮 + 可标记已读；
   // 卡片只显示最新 2 条，「过往公告」弹窗里看全部（含已结束归档）。
@@ -597,7 +659,7 @@ function renderDash(s){
           ${a.start?`<span class="muted" style="font-size:11px; margin-left:6px">${esc(a.start)}${a.end?" ~ "+esc(a.end):""}</span>`:""}
         </span>
         <span style="display:flex; gap:8px; align-items:center">
-          ${a.url?`<a href="${esc(a.url)}" target="_blank" style="font-size:12px; color:var(--accent)">详情 →</a>`:""}
+          ${a.url?`<a href="${esc(safeHref(a.url))}" target="_blank" style="font-size:12px; color:var(--accent)">详情 →</a>`:""}
           ${a.unread&&!ended?`<button class="ghost ann-read" data-id="${esc(a.id)}" style="padding:2px 10px; font-size:11.5px">知道了</button>`:""}
         </span>
       </div>
@@ -623,7 +685,7 @@ function renderDash(s){
     <h2 class="pt">总览 <span class="sub">本地免费模型网关 v${esc(s.version)}</span></h2>${banner}${annHtml}
 
     <div class="sumstrip">
-      <div class="cell"><div class="v">${avail}/${s.models.length}</div><div class="l">模型可用</div></div>
+      <div class="cell" title="免费车道实测可用 / 免费车道总数；自定义供应商的模型只在点「测试」时实测，不计入这里"><div class="v">${avail}/${laneModels.length}</div><div class="l">模型可用</div></div>
       <div class="cell"><div class="v">${on}/${s.agents.filter(a=>a.installed).length}</div><div class="l">Agent 已开启</div></div>
       <div class="cell"><div class="v">${fmtN(day?day.output:0)}</div><div class="l">今日输出 tokens</div></div>
       <div class="cell"><div class="v">${fmtN(day?day.requests:0)}</div><div class="l">今日请求${failPill}</div></div>
@@ -640,7 +702,9 @@ function renderDash(s){
             <button class="ghost" data-copy="${s.mainKey}">复制</button></div>
           <div class="row" style="margin-top:10px"><span class="muted" style="font-size:12px">
             OpenAI 兼容 <code class="k">/v1/chat/completions</code> <code class="k">/v1/responses</code> ·
-            Anthropic 兼容 <code class="k">/v1/messages</code> · 只监听 127.0.0.1</span></div>
+            Anthropic 兼容 <code class="k">/v1/messages</code> · ${s.lanBaseURL ? "本机 + 局域网（需 API Key）" : "只监听 127.0.0.1"}</span></div>
+          ${s.lanBaseURL ? `<div class="row" style="margin-top:8px"><span class="dim">局域网 Base URL</span><code class="k">${s.lanBaseURL}</code>
+            <button class="ghost" data-copy="${s.lanBaseURL}">复制</button></div>` : ""}
           <div class="row" style="margin-top:10px">
             <button class="ghost" id="dash-copy-full">复制完整接入配置</button>
             <button class="ghost" id="dash-reprobe">重新探测</button>
@@ -672,7 +736,7 @@ function renderDash(s){
         <div class="kv"><span class="k">已运行</span><span class="v" id="uptime-val">${s.uptimeSec!=null ? fmtUptime(s.uptimeSec) : esc(s.uptime)}</span></div>
         <div class="kv"><span class="k">数据目录</span><span class="v mono" style="font-size:11px">${esc(s.dataDir)}</span></div>
         <div class="kv"><span class="k">出口</span><span class="v mono">${esc(s.egress&&s.egress.ip ? s.egress.ip+" ("+(s.egress.country||"?")+")" : "未知")}</span></div>
-        <div class="kv"><span class="k">代理</span><span class="v">${esc(s.settings.proxyMode==="custom" ? s.settings.proxyURL : {env:"跟随环境变量",direct:"直连"}[s.settings.proxyMode]||s.settings.proxyMode)}</span></div>
+        <div class="kv"><span class="k">代理</span><span class="v">${esc(proxyLabel(s.settings.proxyMode, s.settings.proxyURL))}</span></div>
         <div class="kv"><span class="k">托盘 / 通知</span><span class="v">${s.settings.closeToTray?"开":"关"} / ${s.settings.notifications?"开":"关"}</span></div>
       </div>
     </div>`;
@@ -810,6 +874,107 @@ function renderAgents(s){
 
 /* ---- 模型 ---- */
 const STATE_ORDER = { available:0, custom:1, unknown:2, throttled:3, "region-blocked":4, unavailable:5 };
+
+/* 探测进度：状态存在服务端的任务登记处，所以 10s 网格重建不会把进度擦掉。 */
+let fastPollTimer = 0, tickTimer = 0, drawerFor = "", drawerTimer = 0;
+
+function fmtMs(ms){
+  if(ms >= 60000) return Math.floor(ms/60000) + "分" + String(Math.round(ms%60000/1000)).padStart(2,"0") + "秒";
+  return ms >= 1000 ? (ms/1000).toFixed(1) + "s" : Math.round(ms) + "ms";
+}
+function fmtClock(ms){ return ms ? new Date(ms).toTimeString().slice(0,8) : ""; }
+const TP_MARK = { running:"…", ok:"✓", fail:"✕", unknown:"·" };
+const TP_CLASS = { running:"run", ok:"ok", fail:"fail", unknown:"unknown" };
+function taskKindLabel(kind){ return kind === "caps" ? "能力实测" : "可用性测试"; }
+// 一个模态会先报「开始」再报「结论」，卡片上只显示最新的那一步。
+function lastPhases(steps){
+  const by = new Map();
+  for(const st of (steps||[])) by.set(st.name, st);
+  return [...by.values()];
+}
+function taskBand(m){
+  const t = m.task;
+  if(!t) return "";
+  const running = t.status === "running";
+  const when = running
+    ? `已用时 <b class="elapsed" data-start="${t.started}">…</b>`
+    : (t.status === "failed" ? "已中止 · " : "完成 · ") + fmtClock(t.updated);
+  const phases = lastPhases(t.steps).map(st=>{
+    const cls = TP_CLASS[st.status] || "unknown";
+    return `<span class="tp ${cls}" title="${esc(st.detail||"")}">${esc(st.name)} ${TP_MARK[st.status]||"·"}`
+      + (st.ms?` <b>${fmtMs(st.ms)}</b>`:"") + `</span>`;
+  }).join("");
+  return `<div class="mtask"><div class="th"><span>${taskKindLabel(t.kind)}</span>`
+    + `<span class="grow">${when}</span>`
+    + `<button class="ghost tdet" data-m="${esc(m.id)}" title="展开这次探测的阶段明细">详情</button></div>`
+    + `<div class="tps">${phases}</div></div>`;
+}
+function startTaskTicker(){
+  if(!document.querySelector("#page-models .elapsed")){
+    if(tickTimer){ clearInterval(tickTimer); tickTimer = 0; }
+    return;
+  }
+  const paint = ()=>{
+    const now = Date.now();
+    document.querySelectorAll("#page-models .elapsed").forEach(e=>{
+      e.textContent = fmtMs(Math.max(0, now - Number(e.dataset.start)));
+    });
+  };
+  paint();
+  if(!tickTimer) tickTimer = setInterval(paint, 250);
+}
+
+function drawerRows(runs){
+  if(!runs.length) return `<div class="empty">这个模型还没有测试记录。点卡片上的「测试」或「能力实测」就会出现进度。</div>`;
+  return runs.map(t=>{
+    const st = t.status === "running" ? "进行中" : (t.status === "failed" ? "已中止" : "已完成");
+    // 同一阶段会有「开始」和「结果」两行，抽屉里只留最后一条状态，否则每个模态重复一次。
+    const rows = lastPhases(t.steps).map(s=>{
+      const detail = s.detail
+        ? `<span class="${s.status==="fail"||s.status==="unknown" ? "err" : "out"}">${esc(s.detail)}</span>` : "";
+      return `<div class="row"><span class="tm">${fmtClock(s.at)}</span>`
+        + `<span class="nm">${esc(s.name)} ${TP_MARK[s.status]||"·"}</span>`
+        + `<span class="ms">${s.ms?fmtMs(s.ms):""}</span>${detail}</div>`;
+    }).join("");
+    return `<div class="run"><div class="rh"><b>${taskKindLabel(t.kind)}</b><span>${st}</span>`
+      + `<span>开始 ${fmtClock(t.started)}</span></div>${rows}</div>`;
+  }).join("");
+}
+async function paintDrawer(){
+  if(!drawerFor) return;
+  const box = document.getElementById("tdrawer");
+  if(!box) return;
+  const j = await fetch("/admin/api/tasks?model=" + encodeURIComponent(drawerFor)).then(r=>r.json()).catch(()=>null);
+  if(!drawerFor || !document.getElementById("tdrawer")) return;
+  const runs = (j && j.runs) || [];
+  box.querySelector(".bd").innerHTML = drawerRows(runs);
+  clearTimeout(drawerTimer);
+  if(runs.some(t=>t.status === "running")) drawerTimer = setTimeout(paintDrawer, 1000);
+}
+function closeTaskDrawer(){
+  drawerFor = "";
+  clearTimeout(drawerTimer);
+  document.getElementById("tdrawer")?.remove();
+  document.getElementById("tdmask")?.remove();
+}
+async function openTaskDrawer(model){
+  closeTaskDrawer();
+  drawerFor = model;
+  const mask = document.createElement("div");
+  mask.id = "tdmask";
+  mask.style.cssText = "position:fixed; inset:0; z-index:79; background:rgba(0,0,0,.45)";
+  mask.onclick = closeTaskDrawer;
+  const box = document.createElement("div");
+  box.id = "tdrawer";
+  box.innerHTML = `<div class="hd"><span class="t">${esc(model)}</span>`
+    + `<button class="ghost" id="tdclose">关闭 ✕</button></div><div class="bd"></div>`;
+  document.body.appendChild(mask);
+  document.body.appendChild(box);
+  box.querySelector("#tdclose").onclick = closeTaskDrawer;
+  await paintDrawer();
+}
+document.addEventListener("keydown", e=>{ if(e.key === "Escape" && drawerFor) closeTaskDrawer(); });
+
 function renderModels(s){
   const el = $("#page-models");
   const sorted = [...s.models].sort((a,b)=>{
@@ -817,9 +982,12 @@ function renderModels(s){
     if(b.id===s.probingModel) return 1;
     return (STATE_ORDER[a.state]??1)-(STATE_ORDER[b.state]??1);
   });
-  const avail = s.models.filter(m=>m.state==="available" && !m.hidden).length;
+  const laneModels = s.models.filter(m=>!m.custom);
+  const customModels = s.models.filter(m=>m.custom);
+  const customProbed = customModels.filter(m=>m.state!=="custom").length;
+  const avail = laneModels.filter(m=>m.state==="available" && !m.hidden).length;
   const hiddenCount = s.models.filter(m=>m.hidden).length;
-  el.innerHTML = `<h2 class="pt">模型 <span class="sub">可用性由本机网络出口实测（每 ${s.settings.probeIntervalMinutes} 分钟）· ${avail} 个可用 · 勾选「选用」才会出现在 Agent 的模型选择器里${hiddenCount?` · 已隐藏 ${hiddenCount} 个`:""}</span></h2>
+  el.innerHTML = `<h2 class="pt">模型 <span class="sub">可用性由本机网络出口实测（每 ${s.settings.probeIntervalMinutes} 分钟）· ${avail}/${laneModels.length} 个免费车道可用${customModels.length?` · 自定义 ${customProbed}/${customModels.length} 已实测`:""} · 勾选「选用」才会出现在 Agent 的模型选择器里${hiddenCount?` · 已隐藏 ${hiddenCount} 个`:""}</span></h2>
     <div class="card"><div class="row">
       <button class="ghost" id="reprobe">重新探测可用性</button>
       <button class="ghost" id="hide-dead" title="把探测为不可用 / 地区受限的模型全部从 Agent 选择器隐藏（随时可单卡恢复）">隐藏全部不可用</button>
@@ -843,41 +1011,12 @@ function renderModels(s){
     if(j){ toast("已全部恢复显示"); refresh(); }
   };
   const grid = el.querySelector("#mgrid");
-  grid.querySelectorAll(".mtest").forEach(b=>{
-    b.onclick = async ()=>{
-      b.disabled = true; b.textContent = "测试中…";
-      const j = await api("/probe/"+encodeURIComponent(b.dataset.m), {});
-      if(j && j.result){
-        const r = j.result;
-        const sec = r.ttftMs ? "首字 " + (r.ttftMs/1000).toFixed(1) + "s" : "";
-        if(r.state==="available") toast("✓ 可用" + (sec?" · "+sec:""));
-        else if(r.state==="throttled") toast("已限额 —— 请求在生成前就被拒绝，没有首字数据" + (r.detail?" · "+String(r.detail).slice(0,80):""));
-        else if(r.state==="unavailable") toast("不可用 · " + (r.detail||""));
-        else toast("探测未成功 · " + (r.detail||"上游无响应，稍后再试"));
-      }
-      refresh();
-    };
-  });
-  grid.querySelectorAll(".capstest").forEach(b=>{
-    b.onclick = async ()=>{
-      b.disabled = true; b.textContent = "实测中…";
-      const j = await api("/tags/probe", { id: b.dataset.m });
-      if(j && j.ok) toast("能力实测已开始（图像/音频/PDF 各一发），结果稍后显示在标签上");
-      else if(j && j.error) toast("实测失败 · " + j.error);
-      setTimeout(refresh, 2500);
-    };
-  });
-  grid.querySelectorAll("[data-vis]").forEach(cb=>{
-    cb.onchange = async ()=>{
-      const j = await api("/models/visibility", { id: cb.dataset.vis, hidden: !cb.checked });
-      if(j) toast(cb.checked ? "已选用，正在重新注入已开启的 Agent" : "已隐藏，正在重新注入已开启的 Agent");
-      refresh();
-    };
-  });
   for(const m of sorted){
     const card = document.createElement("div");
     card.className = "mcard st-" + (m.hidden ? "hidden" : (m.state||"unknown")) + (m.hidden ? " dimmed" : "");
     const eff = (m.efforts||[]).map(e=>`<span class="eff">${e.name} <b>${(e.tokens/1024|0)}K</b>${e.isDefault?" ★":""}</span>`).join("");
+    const probeBusy = !!(m.task && m.task.kind === "probe" && m.task.status === "running");
+    const capsBusy = !!(m.task && m.task.kind === "caps" && m.task.status === "running");
     const pill = m.id === s.probingModel
       ? `<span class="pill warn">探测中…</span>`
       : (m.hidden ? `<span class="pill hidsync">已隐藏</span>` : statePill(m.state));
@@ -897,7 +1036,7 @@ function renderModels(s){
       if(m.throttledAt){
         const since = fmtUptime(Math.max(1,(Date.now()-m.throttledAt)/1000));
         const eta = m.recoverEta ? ` · 预计 ${new Date(m.recoverEta).toTimeString().slice(0,5)} 恢复` : "";
-        parts.push(`<div class="qtext warn2">已限额 ${since}${eta}</div>`);
+        parts.push(`<div class="qtext warn2">暂时限流 ${since}${eta}</div>`);
       }
       if(parts.length) quotaRow = `<div class="mquota">${parts.join("")}</div>`;
     }
@@ -905,39 +1044,77 @@ function renderModels(s){
       + (m.vision?'<span class="tag">视觉</span>':"")
       + (m.audioInput?'<span class="tag">音频</span>':"")
       + (m.fileInput?'<span class="tag">文件</span>':"")
-      + (m.reasoning?'<span class="tag">思考</span>':(m.custom?"":'<span class="tag">纯文本</span>'))
+      + (m.reasoning?'<span class="tag">思考</span>':(m.custom||m.tagSource==="未标注"?"":'<span class="tag">纯文本</span>'))
       + (m.tagSource?`<span class="tag" title="能力标签来源：${esc(m.tagSource)}" style="opacity:.65">${esc(m.tagSource)}</span>`:"");
     card.innerHTML = `
       <div class="mhead"><span class="mname" title="${esc(m.name)}">${esc(m.name)}</span>${pill}</div>
       <div class="mid">${esc(m.id)}</div>
       ${m.blurb?`<div class="mblurb" title="${esc(m.blurb)}">${esc(m.blurb)}</div>`:""}
-      ${m.custom?`
       <div class="mmeta">
-        <span>首字 <b>${m.ttftMs?(m.ttftMs/1000).toFixed(1)+"s":"—"}</b></span>
-        <span title="${m.ttftCount?("近 "+m.ttftCount+" 次探测平均"):"暂无探测样本"}">平均首字 <b>${m.ttftAvgMs?(m.ttftAvgMs/1000).toFixed(1)+"s":"—"}</b></span>
-      </div>`:`
-      <div class="mmeta">
-        <span>首字 <b>${m.ttftMs?(m.ttftMs/1000).toFixed(1)+"s":"—"}</b></span>
-        <span title="${m.ttftCount?("近 "+m.ttftCount+" 次探测平均"):"暂无探测样本"}">平均首字 <b>${m.ttftAvgMs?(m.ttftAvgMs/1000).toFixed(1)+"s":"—"}</b></span>
-        <span>上下文 <b>${(m.contextWindow/1024|0)}K</b></span>
-        <span>输出 <b>${(m.maxOutput/1024|0)}K</b></span>
-      </div>`}
+        <span title="最近一次探测的首字；排队中的请求会把这一个值拉高">首字 <b>${m.ttftMs?(m.ttftMs/1000).toFixed(1)+"s":"—"}</b></span>
+        <span title="${m.ttftCount?("近 "+m.ttftCount+" 次样本的中位数，路由按它排序"):"暂无探测样本"}">典型首字 <b>${m.ttftMedMs?(m.ttftMedMs/1000).toFixed(1)+"s":"—"}</b></span>
+        ${m.contextWindow?`<span title="${m.custom?"供应商 /v1/models 声明或 AI 标注给出":"本地能力表"}">上下文 <b>${fmtCap(m.contextWindow)}</b></span>`:""}
+        ${m.maxOutput?`<span title="${m.custom?"供应商声明的完成上限（只写回显上下文窗口的供应商不显示）":"本地能力表"}">输出 <b>${fmtCap(m.maxOutput)}</b></span>`:""}
+      </div>
       ${(tags||eff)?`<div class="mtags">${tags}${eff?`<span class="meff">${eff}</span>`:""}</div>`:""}
       ${quotaRow}
       ${m.detail?`<div class="mdetail">${esc(m.detail).slice(0,120)}</div>`:""}
+      ${taskBand(m)}
       <div class="mfoot">
         <label class="vispick" title="勾选 = 出现在 Agent 的模型选择器里；取消勾选只是不对外展示，直接点名调用仍可用">
           <input type="checkbox" data-vis="${esc(m.id)}" ${m.hidden?"":"checked"}><span>选用</span></label>
-        <button class="ghost mtest" data-m="${esc(m.id)}" title="${m.custom?"向该供应商发一个最小请求，实测可用性与首字延迟":"单独探测这个模型的可用性"}">测试</button>
-        ${m.custom?`<button class="ghost capstest" data-m="${esc(m.id)}" title="用你的 Key 发最小图像 / 音频 / PDF 请求，实测该模型真正支持的输入模态（结果最优先）">能力实测</button>`:""}
+        <button class="ghost mtest" data-m="${esc(m.id)}" ${probeBusy?"disabled":""} title="${m.custom?"向该供应商发一个最小请求，实测可用性与首字延迟":"单独探测这个模型的可用性"}">${probeBusy?"测试中…":"测试"}</button>
+        ${m.custom?`<button class="ghost capstest" data-m="${esc(m.id)}" ${capsBusy?"disabled":""} title="用你的 Key 发最小图像 / 音频 / PDF 请求，实测该模型真正支持的输入模态（结果最优先）">${capsBusy?"实测中…":"能力实测"}</button>`:""}
       </div>`;
     grid.appendChild(card);
   }
+  // 处理器必须在卡片入 DOM 之后再绑定：#mgrid 在渲染前是空的，绑早了等于没绑。
+  grid.querySelectorAll(".mtest").forEach(b=>{
+    b.onclick = async ()=>{
+      b.disabled = true; b.textContent = "测试中…";
+      const j = await api("/probe/"+encodeURIComponent(b.dataset.m), {});
+      if(j && j.running){ toast("这个模型正在测试中，进度看卡片"); refresh(); return; }
+      if(j && j.result){
+        const r = j.result;
+        const sec = r.ttftMs ? "首字 " + (r.ttftMs/1000).toFixed(1) + "s" : "";
+        if(r.state==="available") toast("✓ 可用" + (sec?" · "+sec:""));
+        else if(r.state==="throttled") toast("暂时限流·可重试 —— 请求在生成前就被拒绝，没有首字数据" + (r.detail?" · "+String(r.detail).slice(0,80):""));
+        else if(r.state==="unavailable") toast("不可用 · " + (r.detail||""));
+        else toast("探测未成功 · " + (r.detail||"上游无响应，稍后再试"));
+      }
+      refresh();
+    };
+  });
+  grid.querySelectorAll(".capstest").forEach(b=>{
+    b.onclick = async ()=>{
+      b.disabled = true; b.textContent = "实测中…";
+      const j = await api("/tags/probe", { id: b.dataset.m });
+      if(j && j.running){ toast("能力实测进行中，进度看卡片"); refresh(); return; }
+      if(j && j.ok) toast("能力实测已开始（图像/音频/PDF 各一发），进度看卡片");
+      else if(j && j.error) toast("实测失败 · " + j.error);
+      refresh();
+    };
+  });
+  grid.querySelectorAll(".tdet").forEach(b=>{
+    b.onclick = ()=>openTaskDrawer(b.dataset.m);
+  });
+  grid.querySelectorAll("[data-vis]").forEach(cb=>{
+    cb.onchange = async ()=>{
+      const j = await api("/models/visibility", { id: cb.dataset.vis, hidden: !cb.checked });
+      if(j) toast(cb.checked ? "已选用，正在重新注入已开启的 Agent" : "已隐藏，正在重新注入已开启的 Agent");
+      refresh();
+    };
+  });
+  // 有探测在跑：卡片自己按 250ms 走动计时，并用 1s 的节奏跟服务端要新阶段。
+  startTaskTicker();
+  clearTimeout(fastPollTimer);
+  if(sorted.some(m=>m.task && m.task.status === "running")) fastPollTimer = setTimeout(refresh, 1000);
 }
 
 /* ---- 自定义 API ---- */
 let pvEditing = "";          // 正在编辑的供应商 id（"" = 新增）
 let pvFetched = [];          // 本次表单里拉到的模型全集
+let pvCatalog = [];          // 拉到的行（含供应商声明的上下文/输出）
 let pvSelected = new Set();  // 勾选要入库的模型
 let pvEditSaved = [];        // 编辑前的已保存模型（用于预勾选）
 
@@ -1010,6 +1187,7 @@ function renderProviders(s){
       if(!j.ok){ toast(j.error || "拉取失败"); return; }
       if(j.saved){ pvResetForm(); toast("模型列表已刷新"); refresh(); return; }
       pvFetched = j.models || [];
+      pvCatalog = j.catalog || [];
       // 默认只勾后端推荐的"好用"子集（策展名单 + 启发式过滤），不全部勾上
       const rec = j.recommended || [];
       pvSelected = new Set(rec.filter(m => pvFetched.includes(m)));
@@ -1024,7 +1202,10 @@ function renderProviders(s){
         protocol: pvProto(), enabled: true };
       if(pvEditing){
         body.id = pvEditing;
-        if(pvFetched.length) body.models = [...pvSelected];
+        if(pvFetched.length){
+          body.models = [...pvSelected];
+          if(pvCatalog.length) body.catalog = pvCatalog;
+        }
       } else {
         // 新增时没拉过模型就先拉一次：顺带验证连通性
         if(!pvFetched.length){
@@ -1034,13 +1215,17 @@ function renderProviders(s){
           const fj = await fr.json().catch(()=>({}));
           if(fj.ok){
             pvFetched = fj.models || [];
+            pvCatalog = fj.catalog || [];
             pvSelected = new Set((fj.recommended || []).filter(m => pvFetched.includes(m)));
             pvRenderPicker();
           }
           else if(!confirm("拉取模型失败：" + (fj.error||"") + "\n仍要保存吗？（可稍后手动拉取挑选）")) return;
         }
         if(!pvSelected.size && pvFetched.length && !confirm("还没有勾选任何模型，保存后模型列表为空。继续？")) return;
-        if(pvFetched.length) body.models = [...pvSelected];
+        if(pvFetched.length){
+          body.models = [...pvSelected];
+          if(pvCatalog.length) body.catalog = pvCatalog;
+        }
       }
       const j = await api("/providers", body);
       if(j){ const wasEditing = !!pvEditing; pvResetForm(); toast(wasEditing ? "已保存，模型列表已更新" : "已接入，勾选的模型已出现在 /v1/models"); refresh(); }
@@ -1058,7 +1243,7 @@ function renderProviders(s){
     pbox.querySelectorAll(".pchip").forEach(c=>{
       c.onclick = ()=>{
         const p = presets.find(x=>x.id===c.dataset.pid); if(!p) return;
-        pvEditing = ""; pvFetched = []; pvSelected = new Set(); pvEditSaved = [];
+        pvEditing = ""; pvFetched = []; pvCatalog = []; pvSelected = new Set(); pvEditSaved = [];
         el.querySelector("#pv-form-title").textContent = "添加供应商";
         el.querySelector("#pv-name").value = p.name;
         el.querySelector("#pv-url").value = p.baseUrl;
@@ -1068,7 +1253,7 @@ function renderProviders(s){
           [["openai","OpenAI 兼容"],["anthropic","Anthropic 兼容"]], p.protocol||"openai", null);
         el.querySelector("#pv-preset-hint").innerHTML =
           esc(p.name) + "：" + esc(p.note||"") +
-          (p.keyUrl ? ` · <a href="${esc(p.keyUrl)}" target="_blank" style="color:var(--accent)">申请 Key →</a>` : "");
+          (p.keyUrl ? ` · <a href="${esc(safeHref(p.keyUrl))}" target="_blank" style="color:var(--accent)">申请 Key →</a>` : "");
         pvRenderPicker();
         el.querySelector("#pv-name").scrollIntoView({behavior:"smooth", block:"center"});
       };
@@ -1101,7 +1286,7 @@ function pvPickCount(){
 }
 
 function pvResetForm(){
-  pvEditing = ""; pvFetched = []; pvSelected = new Set(); pvEditSaved = [];
+  pvEditing = ""; pvFetched = []; pvCatalog = []; pvSelected = new Set(); pvEditSaved = [];
   const el = $("#page-providers"); if(!el) return;
   el.querySelector("#pv-form-title").textContent = "添加供应商";
   ["#pv-name","#pv-url","#pv-key","#pv-pick-filter"].forEach(sel=>{ const n = el.querySelector(sel); if(n) n.value = ""; });
@@ -1199,6 +1384,8 @@ function renderAccess(s){
     <h2 class="pt">接入 <span class="sub">任何支持 OpenAI / Anthropic 兼容端点的客户端</span></h2>
     <div class="card"><h3>通用参数</h3>
       <div class="row"><span class="dim">Base URL</span><code class="k">${s.baseURL}</code><button class="ghost" data-copy="${s.baseURL}">复制</button></div>
+      ${s.lanBaseURL ? `<div class="row" style="margin-top:8px"><span class="dim">局域网 Base URL</span><code class="k">${s.lanBaseURL}</code><button class="ghost" data-copy="${s.lanBaseURL}">复制</button>
+        <span class="muted" style="font-size:11.5px;margin-left:8px">给同网段的其它设备用，把上面 curl 里的地址换成它</span></div>` : ""}
       <div class="row" style="margin-top:8px"><span class="dim">主 Key</span><code class="k">${s.mainKey}</code><button class="ghost" data-copy="${s.mainKey}">复制</button></div>
       <div class="muted" style="font-size:12px;margin-top:8px">每个已开启的 Agent 有独立子 Key（见「Agent 适配」页），便于分开统计用量。</div></div>
     <div class="cgrid">
@@ -1208,7 +1395,7 @@ function renderAccess(s){
         ["ChatWise","设置 → 提供商 → + 自定义（OpenAI 兼容 / Anthropic 兼容均可）"],
         ["Cline / Roo Code","VS Code 扩展设置里选 OpenAI Compatible，填 Base URL 与 Key（需手动）"],
         ["Claude Code","环境变量 ANTHROPIC_BASE_URL=" + s.baseURL.replace(/\/v1$/,"") + "，ANTHROPIC_AUTH_TOKEN=主 Key"],
-        ["OpenAI SDK / 任意语言","base_url 指向 Base URL，鉴权用 Bearer 主 Key，模型列表见 /v1/models"],
+        ["OpenAI SDK / 任意语言","base_url 指向 Base URL，鉴权用 Bearer 主 Key；/v1/models 除模型名还带上下文 / 输出上限 / 输入模态 / 思考档位与 capability_source（实测 > 上游声明 > AI标注 > 规则）"],
       ].map(([n,d])=>`<div class="ccard"><div class="cn">${esc(n)}</div><div class="cd">${esc(d)}</div>
         <button class="ghost" data-copy="${s.baseURL}">复制 Base URL</button></div>`).join("")}
     </div>
@@ -1498,40 +1685,140 @@ function renderRecent(recent){
     }).join("") + '</table>';
 }
 
+const LOG_CATS = [["access","请求"],["upstream","上游尝试"],["content","内容摘要"],["routing","路由"],
+  ["admin","配置"],["probe","探测"],["lifecycle","运行"]];
+const LOG_INP = 'background:var(--panel-2);border:1px solid var(--hairline);color:var(--ink);'
+  + 'border-radius:6px;padding:6px 9px;font-family:var(--mono);font-size:12px';
 let logLevel = "";
+let logDay = "";
+let logCat = "";
+let logQ = "";
+let logFilePick = "";
+let logKeepPick = "";
+let logDaysKey = "";
 let logTimer = null;
 
 async function renderLogs(){
   const el = $("#page-logs");
   if(!el) return;
   if(!el.dataset.init){
-    el.innerHTML = '<h2 class="pt">日志 <span class="sub">内存 ring 最近 1000 条 · 文件按日切割（保留 7 天）</span></h2>'
-      + '<div class="card"><div class="row" style="margin-bottom:8px">'
-      + '<div class="seg" id="log-levels">'
-      + [["","全部"],["info","Info"],["warn","Warn"],["error","Error"]].map(([v,t])=>
+    el.innerHTML = '<h2 class="pt">日志 <span class="sub" id="log-sub">分类开关即时生效</span></h2>'
+      + '<div class="card">'
+      + '<div class="row" id="log-cats" style="row-gap:6px"></div>'
+      + '<div class="row" style="margin-top:12px;align-items:center;gap:10px;row-gap:8px">'
+      +   '<span class="dim" style="font-size:12px">显示</span>'
+      +   '<div class="seg" id="log-levels">'
+      +   [["","全部"],["debug","Debug"],["info","Info"],["warn","Warn"],["error","Error"]].map(([v,t])=>
           '<button data-l="'+v+'" class="'+(logLevel===v?"on":"")+'">'+t+'</button>').join("")
-      + '</div><span class="muted" style="font-size:12px">每 5 秒自动刷新</span></div>'
-      + '<pre id="log-view" style="max-height:60vh; overflow:auto"></pre></div>';
+      +   '</div>'
+      +   '<span class="dim" style="font-size:12px">来源</span>'
+      +   '<select id="log-day" style="'+LOG_INP+';width:150px"></select>'
+      +   '<span class="dim" style="font-size:12px">只看</span>'
+      +   '<select id="log-cat" style="'+LOG_INP+';width:120px">'
+      +     '<option value="">全部分类</option>'
+      +     LOG_CATS.map(([k,label])=>'<option value="'+k+'">'+label+'</option>').join("")
+      +   '</select>'
+      +   '<input id="log-q" style="'+LOG_INP+';width:230px" placeholder="按请求 id 或关键字过滤">'
+      +   '<button class="ghost" id="log-dl">下载</button>'
+      +   '<span class="muted" style="font-size:11.5px" id="log-count"></span>'
+      + '</div>'
+      + '<div class="row" style="margin-top:10px;align-items:center;gap:10px;row-gap:8px">'
+      +   '<span class="dim" style="font-size:12px">写入文件</span>'
+      +   '<div class="seg" id="log-file-levels">'
+      +   [["debug","Debug"],["info","Info"],["warn","Warn"],["error","Error"]].map(([v,t])=>
+          '<button data-f="'+v+'">'+t+'</button>').join("")
+      +   '</div>'
+      +   '<label class="dim" style="font-size:12px">保留天数 <input type="number" id="log-keep" style="'+LOG_INP+';width:64px" min="1" max="365"></label>'
+      +   '<button class="act" id="log-save">保存</button>'
+      +   '<span class="muted" style="font-size:11.5px">「显示」只影响这一屏；「写入文件」决定日志文件里留下什么。</span>'
+      + '</div>'
+      + '<pre id="log-view" style="max-height:60vh; overflow:auto; margin-top:10px"></pre></div>';
     el.dataset.init = "1";
     el.querySelector("#log-levels").querySelectorAll("button").forEach(b=>b.onclick=()=>{
       logLevel=b.dataset.l;
       el.querySelectorAll("#log-levels button").forEach(x=>x.classList.toggle("on", x===b));
       renderLogs();
     });
+    el.querySelector("#log-file-levels").querySelectorAll("button").forEach(b=>b.onclick=()=>{
+      logFilePick = b.dataset.f;
+      el.querySelectorAll("#log-file-levels button").forEach(x=>x.classList.toggle("on", x===b));
+    });
+    el.querySelector("#log-day").onchange = e => { logDay = e.target.value; renderLogs(); };
+    el.querySelector("#log-cat").onchange = e => { logCat = e.target.value; renderLogs(); };
+    const q = el.querySelector("#log-q");
+    q.onchange = () => { logQ = q.value.trim(); renderLogs(); };
+    q.onkeydown = e => { if(e.key==="Enter"){ logQ = q.value.trim(); renderLogs(); } };
+    el.querySelector("#log-dl").onclick = () => { window.location.href = "/admin/api/logs/download" + logQuery(); };
+    el.querySelector("#log-save").onclick = async () => {
+      const on = el.querySelector("#log-file-levels button.on");
+      const keep = parseInt(el.querySelector("#log-keep").value) || undefined;
+      const j = await api("/settings", { logLevel: on ? on.dataset.f : "debug", logKeepDays: keep });
+      if(j){ logFilePick = ""; logKeepPick = ""; toast("日志设置已保存"); refresh(); }
+    };
   }
+
+  const st = (STATE && STATE.settings) || {};
+  const cats = st.logCategories || {};
+  const box = el.querySelector("#log-cats");
+  box.innerHTML = '<span class="dim" style="font-size:12px;margin-right:2px">记录开关</span>'
+    + LOG_CATS.map(([k,label])=>'<button class="chip'+(cats[k]?" on":"")+'" data-c="'+k+'">'
+        + '<span class="dotc" style="background:'+(cats[k]?"var(--accent)":"var(--ink-mute)")+'"></span>'+label
+        + '</button>').join("")
+    + '<span class="chip" style="cursor:default;opacity:.75">未分类信息 · 始终记录</span>';
+  box.querySelectorAll(".chip[data-c]").forEach(b=>b.onclick=async ()=>{
+    const next = {};
+    LOG_CATS.forEach(([k])=>{ next[k] = !!cats[k]; });
+    next[b.dataset.c] = !cats[b.dataset.c];
+    const j = await api("/settings", { logCategories: next });
+    if(j){ toast((next[b.dataset.c]?"已开始记录 ":"已停止记录 ")+b.textContent.trim()); refresh(); }
+  });
+  const keep = el.querySelector("#log-keep");
+  if(document.activeElement !== keep) keep.value = logKeepPick || st.logKeepDays || "";
+  keep.oninput = () => { logKeepPick = keep.value; };
+  const fl = el.querySelector("#log-file-levels");
+  const fileLevel = logFilePick || st.logLevel || "debug";
+  fl.querySelectorAll("button").forEach(b=>b.classList.toggle("on", b.dataset.f===fileLevel));
+  el.querySelector("#log-sub").textContent = "分类开关即时生效 · 文件保留 " + (st.logKeepDays||7) + " 天";
+  initSegs();
+
   try {
-    const j = await fetch("/admin/api/logs?level="+encodeURIComponent(logLevel)+"&limit=300");
+    const j = await fetch("/admin/api/logs" + logQuery());
     const data = await j.json();
     const view = el.querySelector("#log-view");
     if(!view) return;
+    const days = data.days || [];
+    const key = days.join(",");
+    if(key !== logDaysKey){
+      logDaysKey = key;
+      if(logDay && days.indexOf(logDay) < 0) logDay = "";
+      el.querySelector("#log-day").innerHTML = '<option value="">实时（内存）</option>'
+        + days.map(d=>'<option value="'+d+'"'+(d===logDay?" selected":"")+'>'+d+'</option>').join("");
+      el.querySelector("#log-day").value = logDay;
+    }
     const lines = (data.entries||[]).map(e=>{
       const c = {INFO:"var(--ink-dim)",WARN:"var(--warn)",ERROR:"var(--bad)"}[e.level]||"var(--ink-dim)";
-      return '<div style="color:'+c+'">['+String(e.at).slice(11,19)+'] ['+e.level+'] '+esc(e.msg)+'</div>';
+      return '<div style="color:'+c+'">['+String(e.at).slice(11,19)+'] ['+e.level+']'
+        + (e.cat ? ' <span style="color:var(--ink-mute)">['+e.cat+']</span> ' : ' ') + esc(e.msg)+'</div>';
     }).join("");
     view.innerHTML = lines || '<span class="muted">暂无日志。</span>';
+    el.querySelector("#log-count").textContent = (data.entries||[]).length + " 条"
+      + (logDay ? "（来自 " + logDay + " 的文件）" : "");
+    initSegs();
   } catch(e) {
-    view.innerHTML = '<span class="muted">加载失败。</span>';
+    const view = el.querySelector("#log-view");
+    if(view) view.innerHTML = '<span class="muted">加载失败。</span>';
   }
+}
+
+// logQuery is the filter the panel shows, so 下载 exports exactly what you see.
+function logQuery(){
+  const p = new URLSearchParams();
+  if(logCat) p.set("cat", logCat);
+  if(logLevel) p.set("level", logLevel);
+  if(logDay) p.set("day", logDay);
+  if(logQ) p.set("q", logQ);
+  p.set("limit", "500");
+  return "?"+p.toString();
 }
 
 /* ---- 设置 ---- */
@@ -1599,6 +1886,10 @@ function renderSettings(s){
           <span class="muted" style="font-size:12px" id="proxy-test-result"></span>
         </div>
         <div class="muted" style="font-size:12px;margin-top:8px">代理保存即热生效（影响上游推理/清单/探测请求）。</div>
+        <div class="switch" style="margin-top:12px"><div><span class="nm">允许局域网访问 API</span><div class="ds">同网段的其它机器即可用 <code class="k">http://&lt;本机 IP&gt;:${s.port}/v1</code> 调用接口，仍然必须携带 API Key；管理面板与 /admin 接口不受影响，永远只接受本机。切换会重新监听，正在流式输出的请求会被打断</div></div>
+          <button class="act off" id="tg-lan">关闭</button></div>
+        ${s.lanBaseURL ? `<div class="row" style="margin-top:6px"><span class="dim">局域网 Base URL</span><code class="k">${s.lanBaseURL}</code><button class="ghost" data-copy="${s.lanBaseURL}">复制</button></div>` : ""}
+        ${s.lanBaseURL ? `<div class="muted" style="font-size:11.5px">局域网连不上时，先在 Windows 防火墙放行 ${s.port} 端口入站。</div>` : ""}
       </div>
 
       <div class="card">
@@ -1613,7 +1904,7 @@ function renderSettings(s){
         </div>
         <div class="row" style="margin-top:10px">
           <div style="flex:1">
-            <div class="dim" style="font-size:12px;margin-bottom:4px">订阅 URL（一行一个，支持 vless / vmess / ss / trojan / hy2 / tuic 节点）</div>
+            <div class="dim" style="font-size:12px;margin-bottom:4px">订阅 URL（一行一个，支持 vless / vmess / ss / trojan / anytls / hy2 / tuic 节点）</div>
             <textarea id="subs-urls" rows="3" style="width:100%;background:var(--panel-2);border:1px solid var(--hairline);color:var(--ink);border-radius:6px;padding:6px 9px;font-family:var(--mono);font-size:12px" placeholder="https://example.com/api/v1/client/subscribe?token=..."></textarea>
           </div>
         </div>
@@ -1630,7 +1921,8 @@ function renderSettings(s){
       <div class="card">
         <h3>数据</h3>
         <div class="row">
-          <button class="ghost" id="btn-export">导出配置 (JSON)</button>
+          <button class="ghost" id="btn-export" title="密钥、供应商 Key 与订阅链接一律写成占位符，适合贴给他人排查">导出配置 (隐去密钥)</button>
+          <button class="ghost" id="btn-export-keys" title="含明文密钥，仅用于换机迁移">导出含密钥</button>
           <button class="ghost" id="btn-import">导入配置</button>
           <input type="file" id="import-file" accept=".json" style="display:none">
           <button class="ghost" id="btn-csv">导出用量 (CSV)</button>
@@ -1684,6 +1976,7 @@ function renderSettings(s){
       }
     };
     el.querySelector("#btn-export").onclick = ()=>{ window.location.href = "/admin/api/export"; };
+    el.querySelector("#btn-export-keys").onclick = ()=>{ if(confirm("这份文件包含全部明文密钥与订阅链接，请只通过安全渠道传输。")) window.location.href = "/admin/api/export?secrets=1"; };
     el.querySelector("#btn-csv").onclick = ()=>{ window.location.href = "/admin/api/usage.csv"; };
     el.querySelector("#btn-import").onclick = ()=>{ el.querySelector("#import-file").click(); };
     el.querySelector("#import-file").onchange = async e => {
@@ -1691,7 +1984,7 @@ function renderSettings(s){
       const text = await file.text();
       let body; try { body = JSON.parse(text); } catch(err){ toast("不是合法 JSON"); return; }
       const j = await api("/import", body);
-      if(j){ toast("配置已导入（端口保持不变）"); refresh(); }
+      if(j){ toast("配置已导入（端口保持不变；隐去密钥的导出会保留本机密钥）"); refresh(); }
       e.target.value = "";
     };
     el.querySelector("#btn-proxy-test").onclick = async () => {
@@ -1753,15 +2046,15 @@ function renderSettings(s){
     };
     el.dataset.rendered = "1";
   }
-  el.querySelector("#set-max").value = s.settings.defaultMaxTokens;
-  el.querySelector("#set-probe").value = s.settings.probeIntervalMinutes;
+  fill(el.querySelector("#set-max"), s.settings.defaultMaxTokens);
+  fill(el.querySelector("#set-probe"), s.settings.probeIntervalMinutes);
   makeDropdown(el.querySelector("#set-effort"),
     [["light","Light · 精简 (2K)"],["balanced","Balanced · 均衡 (8K)"],["deep","Deep · 深思 (模型上限)"]],
     s.settings.defaultEffort || "balanced", null);
   makeDropdown(el.querySelector("#set-proxy"),
     [["system","跟随系统代理"],["env","跟随环境变量"],["direct","直连"],["custom","自定义 URL"],["rotate","订阅轮询 (sing-box)"]],
     s.settings.proxyMode || "env", null);
-  el.querySelector("#set-proxy-url").value = s.settings.proxyURL || "";
+  fill(el.querySelector("#set-proxy-url"), s.settings.proxyURL);
   // --- 订阅轮询状态同步（每次刷新重绘节点表） ---
   const sub = s.subscriptions || {items:[], singbox:{}};
   const ta = el.querySelector("#subs-urls");
@@ -1809,6 +2102,7 @@ function renderSettings(s){
   setToggle("#tg-smart", s.settings.smartRouting);
   setToggle("#tg-fallback", s.settings.laneFallbackToProviders);
   setToggle("#tg-autotag", s.settings.autoTagEnabled);
+  setToggle("#tg-lan", s.settings.allowLan);
   const sseg = el.querySelector("#strategy-seg");
   if (sseg){
     const cur = s.settings.routingStrategy || "catalog";
@@ -1837,6 +2131,21 @@ function renderSettings(s){
   bindSettingToggle("#tg-smart", "smartRouting", "智能路由已开启：切换会避开不支持本次模态的模型", "智能路由已关闭：恢复目录顺序、不带能力过滤");
   bindSettingToggle("#tg-fallback", "laneFallbackToProviders", "耗尽后回落自定义 API 已开启（消耗你的 Key 额度）", "耗尽后回落自定义 API 已关闭");
   bindSettingToggle("#tg-autotag", "autoTagEnabled", "AI 能力标注已开启", "AI 能力标注已暂停");
+  const lanBtn = el.querySelector("#tg-lan");
+  if(lanBtn && !lanBtn.dataset.bound){
+    lanBtn.dataset.bound = "1";
+    lanBtn.onclick = async ()=>{
+      const on = lanBtn.dataset.on !== "1";
+      const j = await api("/settings", { allowLan: on });
+      if(!j) return;
+      setToggle("#tg-lan", on);
+      toast(on ? "局域网 API 已开放（同网段可连，记得保管主 Key）" : "局域网 API 已关闭，仅本机可用");
+      // 服务端回完响应才换监听，端口有几十毫秒的空窗，等它回来再刷新
+      const back = async () => { try { return (await fetch("/health")).ok; } catch(e){ return false; } };
+      for(let i=0;i<20 && !(await back());i++){ await new Promise(r=>setTimeout(r,200)); }
+      refresh();
+    };
+  }
   const retagBtn = el.querySelector("#btn-retag");
   if(retagBtn && !retagBtn.dataset.bound){
     retagBtn.dataset.bound = "1";

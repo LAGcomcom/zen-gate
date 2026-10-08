@@ -122,21 +122,27 @@ func satisfiesNeeds(m ModelInfo, needs Needs) bool {
 // the dominant term in every strategy: a probed-available model always beats
 // an unprobed one, and latency only ranks inside the same availability band.
 type candidateKey struct {
-	avail    int   // 0 probed-available, 1 unprobed
-	known    int   // 0 has a TTFT measurement, 1 unmeasured (latency only)
-	ttft     int64 // smoothed first-token ms (latency only)
-	catalogIdx int // catalog order tiebreak
+	avail      int   // 0 probed-available, 1 unprobed
+	known      int   // 0 has a TTFT measurement, 1 unmeasured (latency only)
+	ttft       int64 // smoothed first-token ms (latency only)
+	catalogIdx int   // catalog order tiebreak
 }
 
 func (l *Lane) candidateKey(m ModelInfo, idx int, av ProbeResult, strategy string, ttftFn TTFTSource) candidateKey {
 	key := candidateKey{avail: 1, known: 1, catalogIdx: idx}
-	if av.State == StateAvailable {
+	if FreshState(av) == StateAvailable {
 		key.avail = 0
 	}
 	if strategy == StrategyLatency {
-		ms := av.TTFTMs
-		if ms <= 0 && ttftFn != nil {
+		// The persisted ring is the estimate of what the model does; a single
+		// probe is one draw from it, and one queued probe would otherwise rank
+		// a fast model last until the next round.
+		var ms int64
+		if ttftFn != nil {
 			ms = ttftFn(m.ID)
+		}
+		if ms <= 0 {
+			ms = av.TTFTMs
 		}
 		if ms > 0 {
 			key.known = 0

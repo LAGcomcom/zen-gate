@@ -190,8 +190,8 @@ type Request struct {
 	Agent       string // caller label for stats (main key → "")
 	// Needs describes the request's modality footprint; the failover
 	// candidate filter matches it against model capabilities.
-	Needs Needs
-	Context     context.Context
+	Needs   Needs
+	Context context.Context
 	// OnAttempt is called before each upstream attempt with the model about to
 	// be tried — including failover attempts. The gateway uses it to stamp the
 	// served-by header at first byte.
@@ -224,6 +224,10 @@ type UpstreamError struct {
 	// Exhausted marks that the lane had no further failover candidate left —
 	// the gateway may offer this failure to user-added providers instead.
 	Exhausted bool
+	// UpstreamRID is the trace id the provider put on the response
+	// (x-request-id / request-id). It is the only handle the provider's
+	// support team can use to find a failed turn on their side.
+	UpstreamRID string
 }
 
 func (e *UpstreamError) Error() string { return fmt.Sprintf("%s: %s", e.Code, e.Message) }
@@ -243,3 +247,22 @@ const (
 	CodeEmpty      = "EMPTY_RESPONSE"
 	CodeAborted    = "ABORTED"
 )
+
+// traceKey carries the gateway's correlation id for one logical client request
+// into the lane, so every physical attempt (including failovers the client
+// never saw) can be reported back under the same id.
+type traceKey struct{}
+
+// WithTrace returns ctx carrying the request correlation id.
+func WithTrace(ctx context.Context, rid string) context.Context {
+	return context.WithValue(ctx, traceKey{}, rid)
+}
+
+// TraceFrom reads the correlation id, empty when the call was not made for a
+// client request (probes, background work).
+func TraceFrom(ctx context.Context) string {
+	if v, ok := ctx.Value(traceKey{}).(string); ok {
+		return v
+	}
+	return ""
+}

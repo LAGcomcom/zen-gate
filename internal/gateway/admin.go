@@ -1,10 +1,11 @@
 package gateway
 
 import (
-	_ "embed"
 	"context"
+	_ "embed"
 	"encoding/csv"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -18,6 +19,7 @@ import (
 	"zen-gate/internal/agents"
 	"zen-gate/internal/announce"
 	"zen-gate/internal/lane"
+	"zen-gate/internal/logx"
 	"zen-gate/internal/notify"
 	"zen-gate/internal/relay"
 	"zen-gate/internal/store"
@@ -69,15 +71,20 @@ func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request, rest string
 		has, ver := s.updateCheck()
 		writeJSON(w, 200, map[string]any{"ok": true, "has": has, "version": ver})
 	case rest == "key/rotate" && r.Method == http.MethodPost:
-		s.Store.Config().MainKey = store.GenerateKey("")
+		key := store.GenerateKey("")
+		s.Store.Mutate(func(cfg *store.Config) { cfg.MainKey = key })
 		_ = s.Store.Save()
 		writeJSON(w, 200, map[string]any{"ok": true, "key": s.Store.Config().MainKey})
 	case rest == "proxy-test" && r.Method == http.MethodPost:
 		s.adminProxyTest(w, r)
 	case rest == "logs" && r.Method == http.MethodGet:
 		s.adminLogs(w, r)
+	case rest == "logs/download" && r.Method == http.MethodGet:
+		s.adminLogsDownload(w, r)
 	case rest == "usage.csv" && r.Method == http.MethodGet:
 		s.adminUsageCSV(w, r)
+	case rest == "tasks" && r.Method == http.MethodGet:
+		s.adminTasks(w, r)
 	case strings.HasPrefix(rest, "probe/") && r.Method == http.MethodPost:
 		s.adminProbeOne(w, strings.TrimPrefix(rest, "probe/"))
 	case rest == "autostart" && r.Method == http.MethodPost:
@@ -179,30 +186,30 @@ func adminAllowed(w http.ResponseWriter, r *http.Request, mutating bool) bool {
 func (s *Server) adminState(w http.ResponseWriter) {
 	cfg := s.Store.Config()
 	cat, av, egress := s.Lane.Snapshot()
-		type modelRow struct {
-			ID            string             `json:"id"`
-			Name          string             `json:"name"`
-			Blurb         string             `json:"blurb,omitempty"`
-			State         string             `json:"state"`
-			Detail        string             `json:"detail,omitempty"`
-			TTFTMs        int64              `json:"ttftMs,omitempty"`
-			LatencyMs     int64              `json:"latencyMs,omitempty"`
-			Vision        bool               `json:"vision"`
-			AudioInput    bool               `json:"audioInput,omitempty"`
-			FileInput     bool               `json:"fileInput,omitempty"`
-			TagSource     string             `json:"tagSource,omitempty"`
-			Reasoning     bool               `json:"reasoning"`
-			SystemOne     bool               `json:"systemOne"`
-			ContextWindow int                `json:"contextWindow"`
-			MaxOutput     int                `json:"maxOutput"`
-			Efforts       []lane.LevelBudget `json:"efforts"`
+	type modelRow struct {
+		ID            string             `json:"id"`
+		Name          string             `json:"name"`
+		Blurb         string             `json:"blurb,omitempty"`
+		State         string             `json:"state"`
+		Detail        string             `json:"detail,omitempty"`
+		TTFTMs        int64              `json:"ttftMs,omitempty"`
+		LatencyMs     int64              `json:"latencyMs,omitempty"`
+		Vision        bool               `json:"vision"`
+		AudioInput    bool               `json:"audioInput,omitempty"`
+		FileInput     bool               `json:"fileInput,omitempty"`
+		TagSource     string             `json:"tagSource,omitempty"`
+		Reasoning     bool               `json:"reasoning"`
+		SystemOne     bool               `json:"systemOne"`
+		ContextWindow int                `json:"contextWindow"`
+		MaxOutput     int                `json:"maxOutput"`
+		Efforts       []lane.LevelBudget `json:"efforts"`
 		// Observed-quota fields (no official balance API exists upstream).
 		QuotaUsed     int   `json:"quotaUsed,omitempty"`
 		QuotaEstimate int   `json:"quotaEstimate,omitempty"`
 		ThrottledAt   int64 `json:"throttledAt,omitempty"`
 		RecoverEta    int64 `json:"recoverEta,omitempty"`
-		// Probe first-token history (persisted, survives restarts).
-		TTFTAvgMs int64 `json:"ttftAvgMs,omitempty"`
+		// Median of the persisted first-token ring (survives restarts).
+		TTFTMedMs int64 `json:"ttftMedMs,omitempty"`
 		TTFTCount int   `json:"ttftCount,omitempty"`
 		// Custom marks a user-added provider's model (no lane probe, no quota).
 		Custom     bool   `json:"custom,omitempty"`
@@ -210,6 +217,9 @@ func (s *Server) adminState(w http.ResponseWriter) {
 		// Hidden marks a model the user unchecked: servable but not advertised
 		// to agent pickers.
 		Hidden bool `json:"hidden,omitempty"`
+		// Task is the run the card shows progress for: the in-flight 测试 /
+		// 能力实测, or the most recent one.
+		Task *ProbeTask `json:"task,omitempty"`
 	}
 	days, recent := s.Store.SnapshotStats()
 	notes := s.Lane.ThrottleNotes()
@@ -222,7 +232,7 @@ func (s *Server) adminState(w http.ResponseWriter) {
 			ID: m.ID, Name: m.Name, Blurb: m.Blurb, State: stateOrDefault(p), Detail: p.Detail,
 			TTFTMs: p.TTFTMs, LatencyMs: p.LatencyMs,
 			Vision: m.Vision, AudioInput: m.AudioInput, FileInput: m.FileInput,
-			Reasoning: m.Reasoning,
+			Reasoning:     m.Reasoning,
 			SystemOne:     m.SystemOne,
 			ContextWindow: m.ContextWindow, MaxOutput: m.MaxOutput,
 			Efforts: lane.EffortsFor(m, 0, cfg.DefaultMaxTokens),
@@ -230,12 +240,16 @@ func (s *Server) adminState(w http.ResponseWriter) {
 		}
 		if tag, ok := s.Store.ModelTagOf(m.ID); ok {
 			row.TagSource = tag.Source
+		} else if lane.CapabilityMatched(m.ID) {
+			row.TagSource = store.TagSourceHeuris
+		} else {
+			row.TagSource = store.TagSourceUnknown
 		}
-		row.TTFTAvgMs, row.TTFTCount = s.Store.TTFTStats(m.ID)
+		row.TTFTMedMs, row.TTFTCount = s.Store.TTFTStats(m.ID)
 		// Right after a boot the fresh probe has not run yet — fall back to
-		// the persisted average so the picker shows yesterday's latency.
-		if row.TTFTMs == 0 && row.TTFTAvgMs > 0 {
-			row.TTFTMs = row.TTFTAvgMs
+		// the persisted median so the picker shows yesterday's latency.
+		if row.TTFTMs == 0 && row.TTFTMedMs > 0 {
+			row.TTFTMs = row.TTFTMedMs
 		}
 		if !m.SystemOne {
 			row.QuotaUsed = todayTokens(days, m.ID)
@@ -245,6 +259,7 @@ func (s *Server) adminState(w http.ResponseWriter) {
 				row.RecoverEta = s.Lane.RecoveryETA(m.ID)
 			}
 		}
+		row.Task = s.probeTasks.latest(m.ID)
 		models = append(models, row)
 	}
 	// Custom-provider models follow the free-lane ones so the 模型 page shows
@@ -263,22 +278,26 @@ func (s *Server) adminState(w http.ResponseWriter) {
 				Blurb:      "自定义供应商「" + p.Name + "」",
 				Hidden:     hidden[id],
 			}
-			if caps := s.modalityCapsOf(mid); caps.Known {
+			caps := s.modalityCapsOf(mid)
+			row.Reasoning, row.ContextWindow, row.MaxOutput = caps.Reasoning, caps.ContextWindow, caps.MaxOutput
+			if caps.Known {
 				row.Vision, row.AudioInput, row.FileInput = caps.Vision, caps.Audio, caps.File
 				row.TagSource = caps.Source
-				if caps.ContextWindow > 0 {
-					row.ContextWindow = caps.ContextWindow
-				}
 			}
+			if d, ok := s.Store.DeclaredMeta(mid); ok && d.Name != "" {
+				row.Name = d.Name
+			}
+
 			if pr, ok := s.customProbeOf(id); ok {
 				row.State = pr.State
 				row.Detail = pr.Detail
 				row.TTFTMs = pr.TTFTMs
 			}
-			row.TTFTAvgMs, row.TTFTCount = s.Store.TTFTStats(id)
-			if row.TTFTMs == 0 && row.TTFTAvgMs > 0 {
-				row.TTFTMs = row.TTFTAvgMs
+			row.TTFTMedMs, row.TTFTCount = s.Store.TTFTStats(id)
+			if row.TTFTMs == 0 && row.TTFTMedMs > 0 {
+				row.TTFTMs = row.TTFTMedMs
 			}
+			row.Task = s.probeTasks.latest(id)
 			models = append(models, row)
 		}
 	}
@@ -287,61 +306,64 @@ func (s *Server) adminState(w http.ResponseWriter) {
 		agentsView = s.registry.Views()
 	}
 	activeAnnouncements, endedAnnouncements := s.announcementViews()
+	settings := map[string]any{
+		"defaultMaxTokens":     cfg.DefaultMaxTokens,
+		"defaultEffort":        cfg.DefaultEffort,
+		"probeIntervalMinutes": cfg.ProbeIntervalMinutes,
+		"exposeRegion":         cfg.ExposeRegion,
+		"closeToTray":          cfg.CloseToTray,
+		"notifications":        cfg.Notifications,
+		"updateFeed":           cfg.UpdateFeed,
+		"announcementFeed":     cfg.AnnouncementFeed,
+		"statsServerUrl":       cfg.StatsServerURL,
+		"updateAvailable":      s.updateAvailable,
+		"updateVersion":        s.updateVersion,
+		"updateURL":            s.updateURL,
+		// Bundled builds cannot swap their own binary; the dashboard hides
+		// 一键更新 and just links to the release page.
+		"updateSelfUpdate":        update.SelfUpdateSupported,
+		"proxyMode":               cfg.ProxyMode,
+		"proxyURL":                cfg.ProxyURL,
+		"autostart":               s.autostartState(),
+		"failoverEnabled":         cfg.FailoverEnabled,
+		"failoverMax":             cfg.FailoverMax,
+		"smartRouting":            cfg.SmartRouting,
+		"routingStrategy":         cfg.RoutingStrategy,
+		"laneFallbackToProviders": cfg.LaneFallbackToProviders,
+		"autoTagEnabled":          cfg.AutoTagEnabled,
+		"allowLan":                cfg.AllowLan,
+	}
+	for k, v := range logSettingsView(cfg) {
+		settings[k] = v
+	}
 	writeJSON(w, 200, map[string]any{
-		"baseURL":   s.BaseURL(),
-		"port":      cfg.Port,
-		"mainKey":   cfg.MainKey,
-		"agentKeys": cfg.AgentKeys,
-		"egress":    egress,
-		"models":    models,
-		"agents":    agentsView,
-		"stats":     map[string]any{"days": days, "recent": recent},
-		"settings": map[string]any{
-			"defaultMaxTokens":     cfg.DefaultMaxTokens,
-			"defaultEffort":        cfg.DefaultEffort,
-			"probeIntervalMinutes": cfg.ProbeIntervalMinutes,
-			"exposeRegion":         cfg.ExposeRegion,
-			"closeToTray":          cfg.CloseToTray,
-			"notifications":        cfg.Notifications,
-			"updateFeed":           cfg.UpdateFeed,
-			"announcementFeed":     cfg.AnnouncementFeed,
-			"statsServerUrl":       cfg.StatsServerURL,
-			"updateAvailable":      s.updateAvailable,
-			"updateVersion":        s.updateVersion,
-			"updateURL":            s.updateURL,
-			// Bundled builds cannot swap their own binary; the dashboard hides
-			// 一键更新 and just links to the release page.
-			"updateSelfUpdate": update.SelfUpdateSupported,
-			"proxyMode":            cfg.ProxyMode,
-			"proxyURL":             cfg.ProxyURL,
-			"autostart":            s.autostartState(),
-			"failoverEnabled":      cfg.FailoverEnabled,
-			"failoverMax":          cfg.FailoverMax,
-			"smartRouting":         cfg.SmartRouting,
-			"routingStrategy":      cfg.RoutingStrategy,
-			"laneFallbackToProviders": cfg.LaneFallbackToProviders,
-			"autoTagEnabled":       cfg.AutoTagEnabled,
-		},
-		"probingModel":         s.currentProbingModel(),
-		"providers":            s.providerViews(),
-		"providerPresets":      relay.Presets,
-		"subscriptions":        s.subsState(),
-		"announcements":        activeAnnouncements,
-		"announcementArchive":  endedAnnouncements,
-		"version":              Version,
-		"startedAt":       startedAt.Format("2006-01-02 15:04:05"),
-		"uptime":          time.Since(startedAt).Round(time.Second).String(),
-		"uptimeSec":       int64(time.Since(startedAt).Seconds()),
-		"dataDir":         s.Store.Home,
-		"now":          time.Now().Format("2006-01-02 15:04:05"),
+		"baseURL":             s.BaseURL(),
+		"lanBaseURL":          s.LANBaseURL(),
+		"port":                cfg.Port,
+		"mainKey":             cfg.MainKey,
+		"agentKeys":           cfg.AgentKeys,
+		"egress":              egress,
+		"models":              models,
+		"agents":              agentsView,
+		"stats":               map[string]any{"days": days, "recent": recent},
+		"settings":            settings,
+		"probingModel":        s.currentProbingModel(),
+		"providers":           s.providerViews(),
+		"providerPresets":     relay.Presets,
+		"subscriptions":       s.subsState(),
+		"announcements":       activeAnnouncements,
+		"announcementArchive": endedAnnouncements,
+		"version":             Version,
+		"startedAt":           startedAt.Format("2006-01-02 15:04:05"),
+		"uptime":              time.Since(startedAt).Round(time.Second).String(),
+		"uptimeSec":           int64(time.Since(startedAt).Seconds()),
+		"dataDir":             s.Store.Home,
+		"now":                 time.Now().Format("2006-01-02 15:04:05"),
 	})
 }
 
 func stateOrDefault(p lane.ProbeResult) string {
-	if p.State == "" {
-		return lane.StateUnknown
-	}
-	return p.State
+	return lane.FreshState(p)
 }
 
 // estimateDailyQuota approximates a model's daily free-quota ceiling from
@@ -380,31 +402,40 @@ func todayTokens(days map[string]*store.DayStat, model string) int {
 
 func (s *Server) adminSettings(w http.ResponseWriter, r *http.Request) {
 	var in struct {
-		Port                 *int    `json:"port"`
-		DefaultMaxTokens     *int    `json:"defaultMaxTokens"`
-		DefaultEffort        *string `json:"defaultEffort"`
-		ProbeIntervalMinutes *int    `json:"probeIntervalMinutes"`
-		ExposeRegion         *bool   `json:"exposeRegion"`
-		CloseToTray          *bool   `json:"closeToTray"`
-		Notifications        *bool   `json:"notifications"`
-		ProxyMode            *string `json:"proxyMode"`
-		ProxyURL             *string `json:"proxyUrl"`
-		UpdateFeed           *string `json:"updateFeed"`
-		AnnouncementFeed     *string `json:"announcementFeed"`
-		StatsServerURL       *string `json:"statsServerUrl"`
-		FailoverEnabled      *bool   `json:"failoverEnabled"`
-		FailoverMax          *int    `json:"failoverMax"`
-		SmartRouting         *bool   `json:"smartRouting"`
-		RoutingStrategy      *string `json:"routingStrategy"`
-		LaneFallbackToProviders *bool `json:"laneFallbackToProviders"`
-		AutoTagEnabled       *bool   `json:"autoTagEnabled"`
+		Port                    *int             `json:"port"`
+		DefaultMaxTokens        *int             `json:"defaultMaxTokens"`
+		DefaultEffort           *string          `json:"defaultEffort"`
+		ProbeIntervalMinutes    *int             `json:"probeIntervalMinutes"`
+		ExposeRegion            *bool            `json:"exposeRegion"`
+		CloseToTray             *bool            `json:"closeToTray"`
+		Notifications           *bool            `json:"notifications"`
+		ProxyMode               *string          `json:"proxyMode"`
+		ProxyURL                *string          `json:"proxyUrl"`
+		UpdateFeed              *string          `json:"updateFeed"`
+		AnnouncementFeed        *string          `json:"announcementFeed"`
+		StatsServerURL          *string          `json:"statsServerUrl"`
+		FailoverEnabled         *bool            `json:"failoverEnabled"`
+		FailoverMax             *int             `json:"failoverMax"`
+		SmartRouting            *bool            `json:"smartRouting"`
+		RoutingStrategy         *string          `json:"routingStrategy"`
+		LaneFallbackToProviders *bool            `json:"laneFallbackToProviders"`
+		AutoTagEnabled          *bool            `json:"autoTagEnabled"`
+		AllowLan                *bool            `json:"allowLan"`
+		LogCategories           *map[string]bool `json:"logCategories"`
+		LogLevel                *string          `json:"logLevel"`
+		LogKeepDays             *int             `json:"logKeepDays"`
 	}
 	if err := decodeBody(r, &in); err != nil {
 		writeJSON(w, 400, map[string]any{"error": err.Error()})
 		return
 	}
-	cfg := s.Store.Config()
+	// Validate against the published snapshot but write into a local copy: the
+	// settings this handler owns are published in one Mutate at the end, so a
+	// request goroutine never reads a half-written config and a concurrent
+	// provider edit is not rolled back.
+	cfg := *s.Store.Config()
 	changed := false
+	lanChanged := false
 	if in.Port != nil && *in.Port > 0 && *in.Port < 65536 && *in.Port != cfg.Port {
 		cfg.Port = *in.Port
 		changed = true
@@ -436,7 +467,7 @@ func (s *Server) adminSettings(w http.ResponseWriter, r *http.Request) {
 	}
 	if in.ProxyMode != nil {
 		switch *in.ProxyMode {
-		case "env", "direct", "custom", "system":
+		case "env", "direct", "custom", "system", "rotate":
 			if *in.ProxyMode == "custom" && (in.ProxyURL == nil || strings.TrimSpace(*in.ProxyURL) == "") && strings.TrimSpace(cfg.ProxyURL) == "" {
 				writeJSON(w, 400, map[string]any{"ok": false, "error": "自定义代理需要填写代理地址"})
 				return
@@ -449,6 +480,11 @@ func (s *Server) adminSettings(w http.ResponseWriter, r *http.Request) {
 				lane.SetProxy(cfg.ProxyMode, cfg.ProxyURL)
 				changed = true
 			}
+		default:
+			// An unrecognised mode used to fall through silently: the panel
+			// said 已保存 and the egress never moved.
+			writeJSON(w, 400, map[string]any{"ok": false, "error": "未知代理模式：" + *in.ProxyMode})
+			return
 		}
 	}
 	if in.ProxyURL != nil && in.ProxyMode == nil {
@@ -504,10 +540,88 @@ func (s *Server) adminSettings(w http.ResponseWriter, r *http.Request) {
 		}
 		changed = true
 	}
+	if in.AllowLan != nil && *in.AllowLan != cfg.AllowLan {
+		cfg.AllowLan = *in.AllowLan
+		changed = true
+		lanChanged = true
+	}
+	logChanged := false
+	if in.LogCategories != nil {
+		next := make(map[string]bool, len(*in.LogCategories))
+		for k, v := range *in.LogCategories {
+			next[strings.ToLower(strings.TrimSpace(k))] = v
+		}
+		cfg.LogCategories = next
+		changed = true
+		logChanged = true
+	}
+	if in.LogLevel != nil {
+		switch *in.LogLevel {
+		case "debug", "info", "warn", "error":
+			cfg.LogLevel = *in.LogLevel
+			changed = true
+			logChanged = true
+		}
+	}
+	if in.LogKeepDays != nil && *in.LogKeepDays >= 1 && *in.LogKeepDays <= 365 {
+		cfg.LogKeepDays = *in.LogKeepDays
+		changed = true
+		logChanged = true
+	}
+	if logChanged {
+		s.ApplyLogSettings(&cfg)
+	}
 	if changed {
+		s.commitSettings(&cfg)
 		_ = s.Store.Save()
 	}
+	if lanChanged {
+		// The reply must leave before the switchover: Rebind closes the very
+		// listener serving this request, which would truncate the response.
+		writeJSON(w, 200, map[string]any{"ok": true, "changed": changed})
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+		if err := s.Rebind(); err != nil {
+			s.logCat(logx.CatLifecycle, "warn", "局域网监听切换失败，已回到仅本机: %v", err)
+			return
+		}
+		s.logCat(logx.CatLifecycle, "info", "监听地址切换为 %s:%d", s.bindHost(), cfg.Port)
+		return
+	}
 	writeJSON(w, 200, map[string]any{"ok": true, "changed": changed})
+}
+
+// commitSettings publishes the settings fields this handler owns. It lists them
+// instead of replacing the whole config, so a Providers edit that landed while
+// this request was validating survives it.
+func (s *Server) commitSettings(next *store.Config) {
+	s.Store.Mutate(func(c *store.Config) {
+		c.Port = next.Port
+		c.DefaultMaxTokens = next.DefaultMaxTokens
+		c.DefaultEffort = next.DefaultEffort
+		c.ProbeIntervalMinutes = next.ProbeIntervalMinutes
+		c.CloseToTray = next.CloseToTray
+		c.Notifications = next.Notifications
+		c.UpdateFeed = next.UpdateFeed
+		c.AnnouncementFeed = next.AnnouncementFeed
+		c.StatsServerURL = next.StatsServerURL
+		c.ExposeRegion = next.ExposeRegion
+		c.ProxyMode = next.ProxyMode
+		c.ProxyURL = next.ProxyURL
+		c.SubsEnabled = next.SubsEnabled
+		c.SingBoxPath = next.SingBoxPath
+		c.FailoverEnabled = next.FailoverEnabled
+		c.FailoverMax = next.FailoverMax
+		c.SmartRouting = next.SmartRouting
+		c.RoutingStrategy = next.RoutingStrategy
+		c.LaneFallbackToProviders = next.LaneFallbackToProviders
+		c.AutoTagEnabled = next.AutoTagEnabled
+		c.AllowLan = next.AllowLan
+		c.LogCategories = next.LogCategories
+		c.LogLevel = next.LogLevel
+		c.LogKeepDays = next.LogKeepDays
+	})
 }
 
 // adminModelVisibility updates which models appear in agent pickers and
@@ -531,9 +645,9 @@ func (s *Server) adminModelVisibility(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 400, map[string]any{"ok": false, "error": "missing id"})
 		return
 	}
-	cfg := s.Store.Config()
+	cur := s.Store.Config()
 	set := map[string]bool{}
-	for _, h := range cfg.HiddenModels {
+	for _, h := range cur.HiddenModels {
 		set[h] = true
 	}
 	changed := 0
@@ -553,7 +667,7 @@ func (s *Server) adminModelVisibility(w http.ResponseWriter, r *http.Request) {
 	}
 	if changed > 0 {
 		out := make([]string, 0, len(set))
-		for _, h := range cfg.HiddenModels {
+		for _, h := range cur.HiddenModels {
 			if set[h] {
 				out = append(out, h)
 				delete(set, h)
@@ -562,7 +676,7 @@ func (s *Server) adminModelVisibility(w http.ResponseWriter, r *http.Request) {
 		for h := range set {
 			out = append(out, h)
 		}
-		cfg.HiddenModels = out
+		s.Store.Mutate(func(cfg *store.Config) { cfg.HiddenModels = out })
 		if err := s.Store.Save(); err != nil {
 			writeJSON(w, 500, map[string]any{"ok": false, "error": err.Error()})
 			return
@@ -607,10 +721,13 @@ func (s *Server) adminAnnouncementRead(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	cfg.SeenAnnouncements = append(cfg.SeenAnnouncements, in.ID)
-	if n := len(cfg.SeenAnnouncements); n > 100 {
-		cfg.SeenAnnouncements = cfg.SeenAnnouncements[n-100:]
+	// Copy rather than append: append can write into the snapshot's backing
+	// array, which other goroutines may still be reading.
+	next := append(append([]string{}, cfg.SeenAnnouncements...), in.ID)
+	if n := len(next); n > 100 {
+		next = next[n-100:]
 	}
+	s.Store.Mutate(func(c *store.Config) { c.SeenAnnouncements = next })
 	if err := s.Store.Save(); err != nil {
 		writeJSON(w, 500, map[string]any{"ok": false, "error": err.Error()})
 		return
@@ -733,7 +850,7 @@ func (s *Server) adminSubsSave(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var in struct {
-		Enabled bool           `json:"enabled"`
+		Enabled bool                 `json:"enabled"`
 		Items   []store.Subscription `json:"items"`
 	}
 	if err := decodeBody(r, &in); err != nil {
@@ -754,17 +871,18 @@ func (s *Server) adminSubsSave(w http.ResponseWriter, r *http.Request) {
 		}
 		clean = append(clean, it)
 	}
-	cfg := s.Store.Config()
-	cfg.SubsEnabled = in.Enabled
-	cfg.Subscriptions = clean
+	s.Store.Mutate(func(cfg *store.Config) {
+		cfg.SubsEnabled = in.Enabled
+		cfg.Subscriptions = clean
+	})
 	_ = s.Store.Save()
 	if s.logger != nil {
 		s.logger.Infof("订阅轮询 = %v (%d 个订阅)", in.Enabled, len(clean))
 	}
 	if !in.Enabled {
 		s.subs.Stop()
-		if cfg.ProxyMode == "rotate" {
-			cfg.ProxyMode = "env"
+		if s.Store.Config().ProxyMode == "rotate" {
+			s.Store.Mutate(func(cfg *store.Config) { cfg.ProxyMode = "env" })
 			_ = s.Store.Save()
 			lane.SetProxy("env", "")
 			lane.SetRotator(nil)
@@ -857,24 +975,80 @@ func (s *Server) subsState() map[string]any {
 	singbox["configured"] = cfg.SubsEnabled
 	singbox["path"] = cfg.SingBoxPath
 	return map[string]any{
-		"enabled":  cfg.SubsEnabled,
-		"items":    items,
-		"singbox":  singbox,
+		"enabled": cfg.SubsEnabled,
+		"items":   items,
+		"singbox": singbox,
 	}
 }
 
-// adminLogs tails the in-memory ring with an optional level filter.
-func (s *Server) adminLogs(w http.ResponseWriter, r *http.Request) {
-	level := strings.ToLower(r.URL.Query().Get("level"))
-	limit := 200
-	if n, err := strconv.Atoi(r.URL.Query().Get("limit")); err == nil && n > 0 && n <= 1000 {
-		limit = n
+// logQueryOf reads the viewer's filters: class(es), a day (empty = the live
+// ring), a keyword, a minimum level and a line budget.
+func logQueryOf(r *http.Request) logx.Query {
+	q := logx.Query{
+		MinLevel: strings.ToLower(strings.TrimSpace(r.URL.Query().Get("level"))),
+		Contains: r.URL.Query().Get("q"),
+		Limit:    300,
 	}
-	if s.logger != nil {
-		writeJSON(w, 200, map[string]any{"entries": s.logger.Tail(level, limit)})
+	// Only a real date reaches the filename and the file reader below.
+	if day := strings.TrimSpace(r.URL.Query().Get("day")); isLogDay(day) {
+		q.Day = day
+	}
+	if csv := strings.TrimSpace(r.URL.Query().Get("cat")); csv != "" {
+		for _, part := range strings.Split(csv, ",") {
+			if part = strings.ToLower(strings.TrimSpace(part)); part != "" {
+				q.Cats = append(q.Cats, part)
+			}
+		}
+	}
+	if n, err := strconv.Atoi(r.URL.Query().Get("limit")); err == nil && n > 0 && n <= 2000 {
+		q.Limit = n
+	}
+	return q
+}
+
+// isLogDay accepts only the daily-file shape, so a day= value can never be
+// used to name a file outside the log directory or forge a download name.
+func isLogDay(day string) bool {
+	if len(day) != len("2006-01-02") {
+		return false
+	}
+	_, err := time.Parse("2006-01-02", day)
+	return err == nil
+}
+
+// adminLogs lists log lines: the live ring, or one day's file when ?day= is set.
+func (s *Server) adminLogs(w http.ResponseWriter, r *http.Request) {
+	if s.logger == nil {
+		writeJSON(w, 200, map[string]any{"entries": []any{}, "days": []string{}})
 		return
 	}
-	writeJSON(w, 200, map[string]any{"entries": []any{}})
+	q := logQueryOf(r)
+	writeJSON(w, 200, map[string]any{"entries": s.logger.Query(q), "days": s.logger.Days()})
+}
+
+// adminLogsDownload is the same filters as plain text — the shape you attach to
+// a bug report instead of a screenshot.
+func (s *Server) adminLogsDownload(w http.ResponseWriter, r *http.Request) {
+	q := logQueryOf(r)
+	q.Limit = 0
+	name := "zen-gate-log"
+	if q.Day != "" {
+		name += "-" + q.Day
+	} else {
+		name += "-live"
+	}
+	w.Header().Set("content-type", "text/plain; charset=utf-8")
+	w.Header().Set("content-disposition", `attachment; filename="`+name+`.txt"`)
+	if s.logger == nil {
+		return
+	}
+	for _, e := range s.logger.Query(q) {
+		if e.Cat == "" {
+			fmt.Fprintf(w, "[%s] [%s] %s\n", e.At.Format("2006-01-02 15:04:05.000"), e.Level, e.Msg)
+			continue
+		}
+		fmt.Fprintf(w, "[%s] [%s] {%s} %s\n", e.At.Format("2006-01-02 15:04:05.000"), e.Level, e.Cat, e.Msg)
+	}
 }
 
 // adminUsageCSV exports the per-day stats table (with per-model columns).
@@ -912,9 +1086,15 @@ func (s *Server) adminUsageCSV(w http.ResponseWriter, r *http.Request) {
 	cw.Flush()
 }
 
-// adminExport downloads config.json.
+// adminExport downloads config.json. Keys are masked unless the caller asks
+// for ?secrets=1, because this file is the one people attach to a bug report —
+// migrating to another machine is the only case that needs the real ones.
 func (s *Server) adminExport(w http.ResponseWriter, r *http.Request) {
-	data, err := json.MarshalIndent(s.Store.Config(), "", "  ")
+	src := s.Store.Masked()
+	if r.URL.Query().Get("secrets") == "1" {
+		src = s.Store.Config()
+	}
+	data, err := json.MarshalIndent(src, "", "  ")
 	if err != nil {
 		writeJSON(w, 500, map[string]any{"error": err.Error()})
 		return
@@ -940,6 +1120,28 @@ func (s *Server) adminImport(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 400, map[string]any{"ok": false, "error": "配置缺少 MainKey 或端口不合法"})
 		return
 	}
+	// Restoring a masked export (what 导出配置 produces by default) is the
+	// ordinary case, so its placeholders must not land as credentials: keep this
+	// machine's gateway key and leave the others unconfigured rather than
+	// importing a string that would fail as a key.
+	if incoming.MainKey == store.MaskedValue {
+		incoming.MainKey = s.Store.Config().MainKey
+	}
+	for k, v := range incoming.AgentKeys {
+		if v == store.MaskedValue {
+			incoming.AgentKeys[k] = ""
+		}
+	}
+	for i := range incoming.Providers {
+		if incoming.Providers[i].APIKey == store.MaskedValue {
+			incoming.Providers[i].APIKey = ""
+		}
+	}
+	for i := range incoming.Subscriptions {
+		if incoming.Subscriptions[i].URL == store.MaskedValue {
+			incoming.Subscriptions[i].URL = ""
+		}
+	}
 	port := s.Store.Config().Port
 	incoming.Port = port
 	if incoming.AgentKeys == nil {
@@ -960,7 +1162,7 @@ func (s *Server) adminImport(w http.ResponseWriter, r *http.Request) {
 	if incoming.ProxyMode == "" {
 		incoming.ProxyMode = "env"
 	}
-	*s.Store.Config() = incoming
+	s.Store.Replace(incoming)
 	_ = s.Store.Save()
 	if s.logger != nil {
 		s.logger.Infof("config imported; %d agent keys", len(incoming.AgentKeys))
@@ -981,13 +1183,14 @@ func (s *Server) adminRetag(w http.ResponseWriter) {
 		ids = append(ids, p.Models...)
 	}
 	s.tagger.Enqueue(ids...)
-	s.logInfof("已排队 %d 个模型等待 AI 标注", len(ids))
+	s.logCat(logx.CatAdmin, "info", "已排队 %d 个模型等待 AI 标注", len(ids))
 	writeJSON(w, 200, map[string]any{"ok": true, "queued": len(ids)})
 }
 
 // adminCapabilityProbe runs the live 实测 probe (image/audio/PDF) for one
 // custom-provider model in the background; verdicts land in tags.json and
-// surface on the next state refresh.
+// surface on the next state refresh. The run is recorded in the task registry
+// so the card can follow it modality by modality.
 func (s *Server) adminCapabilityProbe(w http.ResponseWriter, r *http.Request) {
 	var in struct {
 		ID string `json:"id"`
@@ -1005,45 +1208,80 @@ func (s *Server) adminCapabilityProbe(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 400, map[string]any{"ok": false, "error": "供应商已停用，先到「自定义 API」开启"})
 		return
 	}
+	t, fresh := s.probeTasks.begin("caps", in.ID)
+	if !fresh {
+		writeJSON(w, 200, map[string]any{"ok": true, "running": true, "task": s.probeTasks.latest(in.ID)})
+		return
+	}
 	go func() {
-		verdicts := s.probeCapabilities(context.Background(), p, upstream)
-		s.logInfof("能力实测 %s: 视觉=%s 音频=%s 文件=%s", in.ID,
+		ctx := lane.WithProbeSink(context.Background(), s.probeTasks.sink(t))
+		verdicts := s.probeCapabilities(ctx, p, upstream)
+		s.probeTasks.conclude(t, taskDone, nil, verdicts)
+		s.logCat(logx.CatProbe, "info", "能力实测 %s: 视觉=%s 音频=%s 文件=%s", in.ID,
 			verdicts["vision"], verdicts["audio"], verdicts["file"])
 	}()
-	writeJSON(w, 200, map[string]any{"ok": true, "started": true})
+	writeJSON(w, 200, map[string]any{"ok": true, "started": true, "task": s.probeTasks.latest(in.ID)})
+}
+
+// adminTasks answers the drawer: the last runs recorded for one model, newest
+// first, phases and all.
+func (s *Server) adminTasks(w http.ResponseWriter, r *http.Request) {
+	model := strings.TrimSpace(r.URL.Query().Get("model"))
+	if model == "" {
+		writeJSON(w, 400, map[string]any{"ok": false, "error": "missing model"})
+		return
+	}
+	writeJSON(w, 200, map[string]any{"model": model, "runs": s.probeTasks.history(model)})
 }
 
 // adminProbeOne re-tests a single model on demand and returns its fresh
 // verdict — the backend of the per-card 测试 button. Synchronous: the fetch
 // resolves when the probe verdict is in. Namespaced model ids probe their
-// custom provider instead of the free lane.
+// custom provider instead of the free lane. The run's phases go to the task
+// registry, and a second click while it is still in flight reuses that run
+// rather than spending a second upstream call on the same question.
 func (s *Server) adminProbeOne(w http.ResponseWriter, model string) {
 	model = strings.TrimSpace(model)
 	if model == "" {
 		writeJSON(w, 400, map[string]any{"ok": false, "error": "missing model"})
 		return
 	}
-	if p, upstream, ok := s.providerRoute(model); ok {
+	var prov *store.Provider
+	var upstream string
+	if p, up, ok := s.providerRoute(model); ok {
 		if !p.Enabled {
 			writeJSON(w, 400, map[string]any{"ok": false, "error": "供应商已停用，先到「自定义 API」开启"})
 			return
 		}
+		prov, upstream = p, up
+	}
+	t, fresh := s.probeTasks.begin("probe", model)
+	if !fresh {
+		writeJSON(w, 200, map[string]any{"ok": true, "running": true, "task": s.probeTasks.latest(model)})
+		return
+	}
+	// Detached from the request: a dashboard reload must not abort a probe that
+	// can take a minute on a queued lane, and its verdict is still worth the card.
+	ctx := lane.WithProbeSink(context.Background(), s.probeTasks.sink(t))
+	if prov != nil {
 		s.customProbing.Store(model)
 		defer s.customProbing.Store("")
-		r := relay.ProbeModel(context.Background(), p, upstream)
+		r := relay.ProbeModel(ctx, prov, upstream)
 		r.Model = model
 		s.setCustomProbe(model, r)
 		if r.TTFTMs > 0 {
 			s.Store.AddTTFTSample(model, r.TTFTMs)
 		}
-		s.logInfof("探测自定义模型 %s → %s (首字 %dms)", model, r.State, r.TTFTMs)
+		s.logCat(logx.CatProbe, "info", "探测自定义模型 %s → %s (首字 %dms)", model, r.State, r.TTFTMs)
+		s.probeTasks.conclude(t, taskDone, &r, nil)
 		writeJSON(w, 200, map[string]any{"ok": true, "result": r})
 		return
 	}
-	r := s.Lane.ProbeOne(model)
+	r := s.Lane.ProbeOneCtx(ctx, model)
 	if s.logger != nil {
 		s.logger.Infof("手动探测 %s → %s (首字 %dms)", model, r.State, r.TTFTMs)
 	}
+	s.probeTasks.conclude(t, taskDone, &r, nil)
 	writeJSON(w, 200, map[string]any{"ok": true, "result": r})
 }
 

@@ -1,11 +1,13 @@
 package gateway
 
 import (
+	"context"
 	"net/http"
 	"strings"
 	"time"
 
 	"zen-gate/internal/lane"
+	"zen-gate/internal/logx"
 	"zen-gate/internal/relay"
 	"zen-gate/internal/store"
 )
@@ -61,12 +63,17 @@ func (s *Server) relayError(w http.ResponseWriter, anthropic bool, uerr *lane.Up
 }
 
 // recordRelay folds one relayed turn into the usage stats under its
-// namespaced model id, so the heatmap and per-model tables cover providers too.
-func (s *Server) recordRelay(p *store.Provider, upstream, agent string, ok bool, usage lane.Usage, ttftMs int64, finish string, err *lane.UpstreamError) {
+// namespaced model id, so the heatmap and per-model tables cover providers too,
+// and reports it as one upstream attempt of the request it served.
+func (s *Server) recordRelay(ctx context.Context, p *store.Provider, upstream, agent string, ok bool, usage lane.Usage, ttftMs int64, finish string, err *lane.UpstreamError) {
 	rec := lane.CallRecord{
 		Model: p.ID + "/" + upstream, Agent: agent, Ok: ok && err == nil,
 		Input: usage.Input, Output: usage.Output, Reasoning: usage.Reasoning,
 		CacheRead: usage.CacheRead, TTFTMs: ttftMs, At: time.Now().UnixMilli(),
+		Trace: lane.TraceFrom(ctx),
+	}
+	if err != nil {
+		rec.ErrCode, rec.UpstreamRID = err.Code, err.UpstreamRID
 	}
 	if err == nil && usage.TotalTokens == 0 && ok {
 		rec.NoUsage = true
@@ -75,6 +82,7 @@ func (s *Server) recordRelay(p *store.Provider, upstream, agent string, ok bool,
 		rec.Truncated = true
 	}
 	s.Store.Record(rec)
+	s.NoteCall(rec)
 }
 
 // relayChatCompletions serves an OpenAI chat turn from a provider.
@@ -108,7 +116,7 @@ func (s *Server) relayChatCompletions(w http.ResponseWriter, r *http.Request, re
 		var text, reasoning strings.Builder
 		var toolCalls []map[string]any
 		usage, finish, uerr, ttft := doRelay(func(c lane.Chunk) { emit.consume(c, &text, &reasoning, &toolCalls) })
-		s.recordRelay(p, upstream, agent, finish != "", usage, ttft, finish, uerr)
+		s.recordRelay(ctx, p, upstream, agent, finish != "", usage, ttft, finish, uerr)
 		if uerr != nil && text.Len() == 0 && len(toolCalls) == 0 {
 			s.relayError(w, false, uerr)
 			return
@@ -141,19 +149,26 @@ func (s *Server) relayChatCompletions(w http.ResponseWriter, r *http.Request, re
 		return
 	}
 	sendChunk := func(delta map[string]any, finish any) {
-		sse.event(map[string]any{
-			"id": id, "object": "chat.completion.chunk", "created": created, "model": served,
-			"choices": []any{map[string]any{"index": 0, "delta": delta, "finish_reason": finish}},
-		})
+		if !sse.flushed {
+			// Same as the lane stream: the preamble commits the 200, so a provider
+			// that refuses before answering keeps its real status and Retry-After.
+			sse.event(chunkPayload(id, created, served, map[string]any{"role": "assistant", "content": ""}, nil, nil))
+		}
+		sse.event(chunkPayload(id, created, served, delta, finish, nil))
 	}
-	sendChunk(map[string]any{"role": "assistant", "content": ""}, nil)
 	usage, finish, uerr, ttft := doRelay(func(c lane.Chunk) {
 		for _, d := range emit.stream(c) {
 			sendChunk(d.delta, nil)
 		}
 	})
-	s.recordRelay(p, upstream, agent, finish != "", usage, ttft, finish, uerr)
+	s.recordRelay(ctx, p, upstream, agent, finish != "", usage, ttft, finish, uerr)
 	if uerr != nil && !emit.hasAny() {
+		if sse.flushed {
+			sse.event(map[string]any{"error": map[string]any{
+				"message": uerr.Message, "type": errorType(uerr), "code": uerr.Code}})
+			sse.done()
+			return
+		}
 		s.relayError(w, false, uerr)
 		return
 	}
@@ -197,7 +212,7 @@ func (s *Server) relayResponses(w http.ResponseWriter, r *http.Request, req resp
 		}
 		collector.consume(c)
 	})
-	s.recordRelay(p, upstream, agent, finish != "", usage, firstAt, finish, uerr)
+	s.recordRelay(ctx, p, upstream, agent, finish != "", usage, firstAt, finish, uerr)
 	outcome := lane.Outcome{Usage: usage, Finish: finish, ServedModel: served}
 	if uerr != nil && !collector.hasAnything() {
 		s.relayError(w, false, uerr)
@@ -240,7 +255,7 @@ func (s *Server) relayAnthropicMessages(w http.ResponseWriter, r *http.Request, 
 	if !req.Stream {
 		collector := newResponsesCollector()
 		usage, finish, uerr, ttft := doRelay(collector.consume)
-		s.recordRelay(p, upstream, agent, finish != "", usage, ttft, finish, uerr)
+		s.recordRelay(ctx, p, upstream, agent, finish != "", usage, ttft, finish, uerr)
 		outcome := lane.Outcome{Usage: usage, Finish: finish, ServedModel: served}
 		if uerr != nil && !collector.hasAnything() {
 			s.relayError(w, true, uerr)
@@ -258,12 +273,22 @@ func (s *Server) relayAnthropicMessages(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 	st.sse = sse
-	sse.event(map[string]any{"type": "message_start", "message": map[string]any{
-		"id": randomID("msg_"), "type": "message", "role": "assistant", "model": served,
-		"content": []any{}, "stop_sequence": nil, "stop_reason": nil,
-		"usage": map[string]any{"input_tokens": 0, "output_tokens": 0}}})
-	usage, finish, uerr, ttft := doRelay(st.consume)
-	s.recordRelay(p, upstream, agent, finish != "", usage, ttft, finish, uerr)
+	// message_start commits the 200, so it waits for the first chunk: a provider
+	// that refuses the turn outright can then still answer with a real status.
+	begin := func() {
+		if sse.flushed {
+			return
+		}
+		sse.event(map[string]any{"type": "message_start", "message": map[string]any{
+			"id": randomID("msg_"), "type": "message", "role": "assistant", "model": served,
+			"content": []any{}, "stop_sequence": nil, "stop_reason": nil,
+			"usage": map[string]any{"input_tokens": 0, "output_tokens": 0}}})
+	}
+	usage, finish, uerr, ttft := doRelay(func(c lane.Chunk) {
+		begin()
+		st.consume(c)
+	})
+	s.recordRelay(ctx, p, upstream, agent, finish != "", usage, ttft, finish, uerr)
 	stop := "end_turn"
 	switch {
 	case finish == lane.FinishToolCalls:
@@ -272,10 +297,15 @@ func (s *Server) relayAnthropicMessages(w http.ResponseWriter, r *http.Request, 
 		stop = "max_tokens"
 	}
 	if uerr != nil && finish == "" && !st.sawAny {
-		sse.event(map[string]any{"type": "error",
-			"error": map[string]any{"type": errorType(uerr), "message": uerr.Message}})
+		if sse.flushed {
+			sse.event(map[string]any{"type": "error",
+				"error": map[string]any{"type": errorType(uerr), "message": uerr.Message}})
+			return
+		}
+		s.relayError(w, true, uerr)
 		return
 	}
+	begin()
 	sse.event(map[string]any{"type": "message_delta",
 		"delta": map[string]any{"stop_reason": stop, "stop_sequence": nil},
 		"usage": map[string]any{"output_tokens": usage.Output}})
@@ -364,14 +394,59 @@ func (s *Server) providerViews() []map[string]any {
 
 // decodeProviderIn is the shared save/fetch request body.
 type providerIn struct {
-	ID       string   `json:"id"`
-	Name     string   `json:"name"`
-	BaseURL  string   `json:"baseUrl"`
-	APIKey   string   `json:"apiKey"`
-	Protocol string   `json:"protocol"`
-	Enabled  *bool    `json:"enabled"`
-	Models   []string `json:"models"`
-	Save     *bool    `json:"save"` // models fetch: false = probe only, don't persist
+	ID       string             `json:"id"`
+	Name     string             `json:"name"`
+	BaseURL  string             `json:"baseUrl"`
+	APIKey   string             `json:"apiKey"`
+	Protocol string             `json:"protocol"`
+	Enabled  *bool              `json:"enabled"`
+	Models   []string           `json:"models"`
+	Catalog  []lane.ListingMeta `json:"catalog"` // listing rows, numbers included
+	Save     *bool              `json:"save"`    // models fetch: false = probe only, don't persist
+}
+
+func catalogIDs(catalog []lane.ListingMeta) []string {
+	ids := make([]string, 0, len(catalog))
+	for _, row := range catalog {
+		ids = append(ids, row.ID)
+	}
+	return ids
+}
+
+// mergeCatalog records the token capacities a listing declared for the
+// provider's selected models and drops entries for deselected ones. A model
+// the listing did not number keeps whatever was known: a provider that stops
+// publishing capacities must not erase them.
+func mergeCatalog(p *store.Provider, catalog []lane.ListingMeta) {
+	selected := make(map[string]bool, len(p.Models))
+	for _, m := range p.Models {
+		selected[m] = true
+	}
+	for id := range p.ModelMeta {
+		if !selected[id] {
+			delete(p.ModelMeta, id)
+		}
+	}
+	for _, row := range catalog {
+		if !selected[row.ID] {
+			continue
+		}
+		meta := store.ModelMeta{
+			Name: row.Name, ContextWindow: row.ContextWindow, MaxOutput: row.MaxOutput,
+			Vision: row.Vision, Audio: row.Audio, File: row.File, Reasoning: row.Reasoning,
+			InputDeclared: row.InputDeclared, OutputDeclared: row.OutputDeclared,
+		}
+		if !meta.Declared() {
+			continue
+		}
+		if p.ModelMeta == nil {
+			p.ModelMeta = map[string]store.ModelMeta{}
+		}
+		p.ModelMeta[row.ID] = meta
+	}
+	if len(p.ModelMeta) == 0 {
+		p.ModelMeta = nil
+	}
 }
 
 func (in *providerIn) normalize() error {
@@ -432,31 +507,53 @@ func (s *Server) adminProviderSave(w http.ResponseWriter, r *http.Request) {
 		enabled = *in.Enabled
 	}
 	if in.ID != "" {
+		found := false
 		for k := range cfg.Providers {
-			if cfg.Providers[k].ID != in.ID {
-				continue
+			if cfg.Providers[k].ID == in.ID {
+				found = true
+				break
 			}
-			p := &cfg.Providers[k]
-			p.Name, p.BaseURL, p.Protocol = in.Name, in.BaseURL, in.Protocol
-			if in.APIKey != "" {
-				p.APIKey = strings.TrimSpace(in.APIKey)
-			}
-			p.Enabled = enabled
-			if in.Models != nil {
-				p.Models = cleanModels(in.Models)
-			}
-			if err := s.Store.Save(); err != nil {
-				writeJSON(w, 500, map[string]any{"ok": false, "error": err.Error()})
-				return
-			}
-			if s.tagger != nil && len(p.Models) > 0 {
-				s.tagger.Enqueue(p.Models...)
-			}
-			s.logInfof("自定义供应商已更新: %s (%s)", p.Name, p.ID)
-			writeJSON(w, 200, map[string]any{"ok": true, "id": p.ID})
+		}
+		if !found {
+			writeJSON(w, 404, map[string]any{"ok": false, "error": "供应商不存在: " + in.ID})
 			return
 		}
-		writeJSON(w, 404, map[string]any{"ok": false, "error": "供应商不存在: " + in.ID})
+		// The edit happens on the copy Mutate publishes, never on the snapshot
+		// request goroutines may be reading.
+		s.Store.Mutate(func(c *store.Config) {
+			for k := range c.Providers {
+				if c.Providers[k].ID != in.ID {
+					continue
+				}
+				p := &c.Providers[k]
+				p.Name, p.BaseURL, p.Protocol = in.Name, in.BaseURL, in.Protocol
+				if in.APIKey != "" {
+					p.APIKey = strings.TrimSpace(in.APIKey)
+				}
+				p.Enabled = enabled
+				if in.Models != nil {
+					p.Models = cleanModels(in.Models)
+				}
+				mergeCatalog(p, in.Catalog)
+				return
+			}
+		})
+		var models []string
+		for _, p := range s.Store.Config().Providers {
+			if p.ID == in.ID {
+				models = p.Models
+				break
+			}
+		}
+		if err := s.Store.Save(); err != nil {
+			writeJSON(w, 500, map[string]any{"ok": false, "error": err.Error()})
+			return
+		}
+		if s.tagger != nil && len(models) > 0 {
+			s.tagger.Enqueue(models...)
+		}
+		s.logCat(logx.CatAdmin, "info", "自定义供应商已更新: %s (%s)", in.Name, in.ID)
+		writeJSON(w, 200, map[string]any{"ok": true, "id": in.ID})
 		return
 	}
 	p := store.Provider{
@@ -464,7 +561,10 @@ func (s *Server) adminProviderSave(w http.ResponseWriter, r *http.Request) {
 		APIKey: strings.TrimSpace(in.APIKey), Protocol: in.Protocol,
 		Enabled: enabled, Models: cleanModels(in.Models),
 	}
-	cfg.Providers = append(cfg.Providers, p)
+	mergeCatalog(&p, in.Catalog)
+	s.Store.Mutate(func(c *store.Config) {
+		c.Providers = append(c.Providers, p)
+	})
 	if err := s.Store.Save(); err != nil {
 		writeJSON(w, 500, map[string]any{"ok": false, "error": err.Error()})
 		return
@@ -472,7 +572,7 @@ func (s *Server) adminProviderSave(w http.ResponseWriter, r *http.Request) {
 	if s.tagger != nil && len(p.Models) > 0 {
 		s.tagger.Enqueue(p.Models...)
 	}
-	s.logInfof("自定义供应商已添加: %s (%s, %d 模型)", p.Name, p.ID, len(p.Models))
+	s.logCat(logx.CatAdmin, "info", "自定义供应商已添加: %s (%s, %d 模型)", p.Name, p.ID, len(p.Models))
 	writeJSON(w, 200, map[string]any{"ok": true, "id": p.ID})
 }
 
@@ -489,12 +589,19 @@ func (s *Server) adminProviderDelete(w http.ResponseWriter, r *http.Request) {
 	for k := range cfg.Providers {
 		if cfg.Providers[k].ID == in.ID {
 			name := cfg.Providers[k].Name
-			cfg.Providers = append(cfg.Providers[:k], cfg.Providers[k+1:]...)
+			s.Store.Mutate(func(c *store.Config) {
+				for k := range c.Providers {
+					if c.Providers[k].ID == in.ID {
+						c.Providers = append(c.Providers[:k], c.Providers[k+1:]...)
+						return
+					}
+				}
+			})
 			if err := s.Store.Save(); err != nil {
 				writeJSON(w, 500, map[string]any{"ok": false, "error": err.Error()})
 				return
 			}
-			s.logInfof("自定义供应商已删除: %s (%s)", name, in.ID)
+			s.logCat(logx.CatAdmin, "info", "自定义供应商已删除: %s (%s)", name, in.ID)
 			writeJSON(w, 200, map[string]any{"ok": true})
 			return
 		}
@@ -515,64 +622,90 @@ func (s *Server) adminProviderModels(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	shouldSave := in.Save == nil || *in.Save
 	if in.ID != "" {
-		cfg := s.Store.Config()
-		for k := range cfg.Providers {
-			if cfg.Providers[k].ID != in.ID {
-				continue
+		// Read the stored credentials from the published snapshot, but only write
+		// through Mutate: the fetch below can take seconds, and the list can be
+		// edited by another request while it runs.
+		var p store.Provider
+		var found bool
+		for _, cand := range s.Store.Config().Providers {
+			if cand.ID == in.ID {
+				p, found = cand, true
+				break
 			}
-			p := &cfg.Providers[k]
-			models, err := relay.FetchModels(ctx, p.BaseURL, p.APIKey, p.Protocol)
-			if err != nil {
-				writeJSON(w, 200, map[string]any{"ok": false, "error": err.Error()})
-				return
-			}
-			if shouldSave {
-				// 刷新只修剪选择，不重新展开目录：已勾选的模型若仍在上游就保留，
-				// 上游已下架的移除，新模型不自动加入（要用「挑选模型」勾）。
-				keep := map[string]bool{}
-				for _, m := range p.Models {
-					keep[m] = true
-				}
-				var merged []string
-				for _, m := range cleanModels(models) {
-					if keep[m] {
-						merged = append(merged, m)
-					}
-				}
-				p.Models = merged
-				if err := s.Store.Save(); err != nil {
-					writeJSON(w, 500, map[string]any{"ok": false, "error": err.Error()})
-					return
-				}
-				if s.tagger != nil && len(p.Models) > 0 {
-					s.tagger.Enqueue(p.Models...)
-				}
-				s.logInfof("自定义供应商模型已刷新: %s (保留 %d 个勾选)", p.Name, len(p.Models))
-			}
-			writeJSON(w, 200, map[string]any{"ok": true, "models": models, "saved": shouldSave,
-				"recommended": relay.RecommendedModels("", p.BaseURL, models)})
+		}
+		if !found {
+			writeJSON(w, 404, map[string]any{"ok": false, "error": "供应商不存在: " + in.ID})
 			return
 		}
-		writeJSON(w, 404, map[string]any{"ok": false, "error": "供应商不存在: " + in.ID})
+		catalog, err := relay.FetchModelCatalog(ctx, p.BaseURL, p.APIKey, p.Protocol)
+		if err != nil {
+			writeJSON(w, 200, map[string]any{"ok": false, "error": err.Error()})
+			return
+		}
+		models := catalogIDs(catalog)
+		if shouldSave {
+			// 刷新只修剪选择，不重新展开目录：已勾选的模型若仍在上游就保留，
+			// 上游已下架的移除，新模型不自动加入（要用「挑选模型」勾）。
+			keep := map[string]bool{}
+			for _, m := range p.Models {
+				keep[m] = true
+			}
+			var merged []string
+			for _, m := range cleanModels(models) {
+				if keep[m] {
+					merged = append(merged, m)
+				}
+			}
+			var name string
+			var kept int
+			var applied bool
+			s.Store.Mutate(func(cfg *store.Config) {
+				for i := range cfg.Providers {
+					if cfg.Providers[i].ID != in.ID {
+						continue
+					}
+					cfg.Providers[i].Models = merged
+					mergeCatalog(&cfg.Providers[i], catalog)
+					name, kept, applied = cfg.Providers[i].Name, len(cfg.Providers[i].Models), true
+					return
+				}
+			})
+			if !applied {
+				writeJSON(w, 404, map[string]any{"ok": false, "error": "供应商不存在: " + in.ID})
+				return
+			}
+			if err := s.Store.Save(); err != nil {
+				writeJSON(w, 500, map[string]any{"ok": false, "error": err.Error()})
+				return
+			}
+			if s.tagger != nil && kept > 0 {
+				s.tagger.Enqueue(merged...)
+			}
+			s.logCat(logx.CatAdmin, "info", "自定义供应商模型已刷新: %s (保留 %d 个勾选)", name, kept)
+		}
+		writeJSON(w, 200, map[string]any{"ok": true, "models": models, "catalog": catalog,
+			"saved":       shouldSave,
+			"recommended": relay.RecommendedModels("", p.BaseURL, models)})
 		return
 	}
 	if err := in.normalize(); err != nil {
 		writeJSON(w, 400, map[string]any{"ok": false, "error": err.Error()})
 		return
 	}
-	models, err := relay.FetchModels(ctx, in.BaseURL, strings.TrimSpace(in.APIKey), in.Protocol)
+	catalog, err := relay.FetchModelCatalog(ctx, in.BaseURL, strings.TrimSpace(in.APIKey), in.Protocol)
 	if err != nil {
 		writeJSON(w, 200, map[string]any{"ok": false, "error": err.Error()})
 		return
 	}
-	writeJSON(w, 200, map[string]any{"ok": true, "models": models, "saved": false,
+	models := catalogIDs(catalog)
+	writeJSON(w, 200, map[string]any{"ok": true, "models": models, "catalog": catalog, "saved": false,
 		"recommended": relay.RecommendedModels("", in.BaseURL, models)})
 }
 
-// logInfof logs through the injected logger when present.
-func (s *Server) logInfof(format string, args ...any) {
+// logCat writes one classified line through the injected logger when present.
+func (s *Server) logCat(cat, level, format string, args ...any) {
 	if s.logger != nil {
-		s.logger.Infof(format, args...)
+		s.logger.Logf(cat, level, format, args...)
 	}
 }
 
@@ -582,23 +715,24 @@ func (s *Server) logInfof(format string, args ...any) {
 // models. One-time gate at schema v5; runs at boot from main. Returns the
 // number of providers whose list shrank.
 func MigrateProviderSelections(st *store.Store) int {
-	cfg := st.Config()
-	if cfg.SchemaVersion >= 5 {
+	if st.Config().SchemaVersion >= 5 {
 		return 0
 	}
-	cfg.SchemaVersion = 5
 	shrunk := 0
-	for i := range cfg.Providers {
-		p := &cfg.Providers[i]
-		if len(p.Models) == 0 {
-			continue
+	st.Mutate(func(cfg *store.Config) {
+		cfg.SchemaVersion = 5
+		for i := range cfg.Providers {
+			p := &cfg.Providers[i]
+			if len(p.Models) == 0 {
+				continue
+			}
+			before := len(p.Models)
+			p.Models = relay.RecommendedModels("", p.BaseURL, p.Models)
+			if len(p.Models) != before {
+				shrunk++
+			}
 		}
-		before := len(p.Models)
-		p.Models = relay.RecommendedModels("", p.BaseURL, p.Models)
-		if len(p.Models) != before {
-			shrunk++
-		}
-	}
+	})
 	_ = st.Save()
 	return shrunk
 }

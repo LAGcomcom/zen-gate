@@ -44,14 +44,14 @@ type Tagger struct {
 	store *store.Store
 	logf  func(format string, args ...any)
 
-	mu          sync.Mutex
-	enabled     bool
-	pending     []string
-	queued      map[string]bool
-	lastFail    time.Time
-	failStreak  int
-	tagging     bool
-	kick        chan struct{}
+	mu         sync.Mutex
+	enabled    bool
+	pending    []string
+	queued     map[string]bool
+	lastFail   time.Time
+	failStreak int
+	tagging    bool
+	kick       chan struct{}
 }
 
 // New wires a tagger; logf may be nil. The tagger starts disabled — the
@@ -111,6 +111,7 @@ func (t *Tagger) Enqueue(ids ...string) {
 	default:
 	}
 }
+
 // Start runs the worker until ctx is cancelled: classify whatever is pending
 // whenever the lane is past its failure backoff.
 func (t *Tagger) Start(ctx context.Context) {
@@ -124,16 +125,16 @@ func (t *Tagger) Start(ctx context.Context) {
 			case <-t.kick:
 			case <-ticker.C:
 			}
-	t.mu.Lock()
-	ready := t.lastFail.IsZero() || time.Since(t.lastFail) >= failBackoff
-	streak := t.failStreak
-	t.mu.Unlock()
-	if !ready || streak >= maxConsecutiveFails {
-		continue
-	}
-	t.drain(ctx)
-}
-}()
+			t.mu.Lock()
+			ready := t.lastFail.IsZero() || time.Since(t.lastFail) >= failBackoff
+			streak := t.failStreak
+			t.mu.Unlock()
+			if !ready || streak >= maxConsecutiveFails {
+				continue
+			}
+			t.drain(ctx)
+		}
+	}()
 }
 
 // drain classifies pending ids in batches until the queue is empty or a
@@ -236,8 +237,8 @@ func (t *Tagger) classify(ctx context.Context, ids []string) (map[string]store.M
 	prompt := tagPrompt(ids)
 	var out strings.Builder
 	_, uerr := t.lane.Complete(ctx, lane.Request{
-		Model:  taggerModel,
-		Agent:  "autotag",
+		Model:     taggerModel,
+		Agent:     "autotag",
 		MaxTokens: taggerBudget,
 		Messages: []lane.Message{{Role: lane.RoleUser,
 			Parts: []lane.Part{lane.TextPart{Text: prompt}}}},
@@ -311,6 +312,9 @@ func parseTagJSON(text string, wanted []string) map[string]store.ModelTag {
 		}
 		if r.File != nil {
 			tag.File = *r.File
+		}
+		if r.Reasoning != nil {
+			tag.Reasoning = *r.Reasoning
 		}
 		out[id] = tag
 	}

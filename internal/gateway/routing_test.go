@@ -207,6 +207,73 @@ func TestModalityCapsMerging(t *testing.T) {
 	}
 }
 
+func TestModalityCapsCarriesReasoningAndDeclaredNumbers(t *testing.T) {
+	laneUp := laneUpstream429(t)
+	defer laneUp.Close()
+	s := newTestServer(t, laneUp)
+
+	// An AI verdict about reasoning must survive into the merged caps.
+	s.Store.SetModelTag("r1-lite", store.ModelTag{Reasoning: true, Source: store.TagSourceAI})
+	if caps := s.modalityCapsOf("r1-lite"); !caps.Reasoning {
+		t.Errorf("AI reasoning verdict dropped: %+v", caps)
+	}
+	// Name heuristics alone should still flag a reasoning family.
+	if caps := s.modalityCapsOf("deepseek-r1-distill"); !caps.Reasoning {
+		t.Errorf("heuristic reasoning dropped: %+v", caps)
+	}
+
+	cfg := s.Store.Config()
+	cfg.Providers = append(cfg.Providers, store.Provider{
+		ID: "nim", Name: "N", BaseURL: "http://n", Protocol: store.ProtocolOpenAI,
+		Enabled: true, Models: []string{"nvidia/m1"},
+		ModelMeta: map[string]store.ModelMeta{"nvidia/m1": {ContextWindow: 131072, MaxOutput: 4096}},
+	})
+	caps := s.modalityCapsOf("nvidia/m1")
+	if caps.ContextWindow != 131072 || caps.MaxOutput != 4096 {
+		t.Errorf("provider-declared capacities not merged: %+v", caps)
+	}
+	// Numbers merge per field: a probe that measured the window but not the
+	// output cap must not throw away the provider's stated output cap.
+	s.Store.SetModelTag("nvidia/m1", store.ModelTag{ContextWindow: 65536, Source: store.TagSourceProbe})
+	if caps := s.modalityCapsOf("nvidia/m1"); caps.ContextWindow != 65536 || caps.MaxOutput != 4096 {
+		t.Errorf("probe verdict must outrank the listing per field: %+v", caps)
+	}
+}
+
+func TestModalityCapsListingOutranksNameGuess(t *testing.T) {
+	laneUp := laneUpstream429(t)
+	defer laneUp.Close()
+	s := newTestServer(t, laneUp)
+	// `^glm-5` is in the vision heuristics; this provider states its model is
+	// text-in only, which is a better answer than a regex on the name.
+	cfg := s.Store.Config()
+	cfg.Providers = append(cfg.Providers, store.Provider{
+		ID: "intern", Name: "Intern", BaseURL: "http://i", Protocol: store.ProtocolAnthropic,
+		Enabled: true, Models: []string{"glm-5.3"},
+		ModelMeta: map[string]store.ModelMeta{"glm-5.3": {
+			Name: "GLM-5.3", ContextWindow: 1048576, Reasoning: true,
+			InputDeclared: true, OutputDeclared: true,
+		}},
+	})
+	caps := s.modalityCapsOf("glm-5.3")
+	if caps.Vision {
+		t.Errorf("the listing says text-only but the name heuristic still won: %+v", caps)
+	}
+	if !caps.Reasoning || !caps.Known || caps.Source != store.TagSourceListing {
+		t.Errorf("declared modalities not used: %+v", caps)
+	}
+	// A live probe still beats the provider's own claim.
+	s.Store.SetModelTag("glm-5.3", store.ModelTag{Vision: true, Source: store.TagSourceProbe})
+	if caps := s.modalityCapsOf("glm-5.3"); !caps.Vision || caps.Source != store.TagSourceProbe {
+		t.Errorf("probe verdict must outrank the listing: %+v", caps)
+	}
+	// An AI guess must not outrank it either.
+	s.Store.SetModelTag("glm-5.3", store.ModelTag{Vision: true, Source: store.TagSourceAI})
+	if caps := s.modalityCapsOf("glm-5.3"); caps.Vision || caps.Source != store.TagSourceListing {
+		t.Errorf("AI tag outranked the provider's own statement: %+v", caps)
+	}
+}
+
 func TestProviderFallbackPicks(t *testing.T) {
 	laneUp := laneUpstream429(t)
 	defer laneUp.Close()

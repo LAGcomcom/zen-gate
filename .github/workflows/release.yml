@@ -21,14 +21,25 @@ jobs:
 
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.23"
+          go-version: "1.26"
 
+      # master requires this job's status, so it has to fail when the suite
+      # fails — compiling alone would green-light a broken tree.
+      - name: Vet and test
+        shell: pwsh
+        run: |
+          go vet ./...
+          go test -count=1 ./...
+
+      # No -s -w: a Go exe with its symbol table stripped is deleted by 火绒
+      # within about a minute of landing on a Windows machine, which is exactly
+      # what the downloaded zip is unpacked into here.
       - name: Build
         shell: pwsh
         run: |
           $ver = "${{ github.ref_name }}" -replace '^v','' -replace '/','-'
-          go build -trimpath -ldflags "-s -w -H=windowsgui -X zen-gate/internal/gateway.Version=$ver -X zen-gate/internal/update.Current=$ver" -o dist/zen-gate.exe ./cmd/zen-gate
-          go build -trimpath -ldflags "-s -w" -o dist/zenstats.exe ./cmd/zenstats
+          go build -trimpath -ldflags "-H=windowsgui -X zen-gate/internal/gateway.Version=$ver -X zen-gate/internal/update.Current=$ver" -o dist/zen-gate.exe ./cmd/zen-gate
+          go build -trimpath -o dist/zenstats.exe ./cmd/zenstats
 
       - name: Package
         shell: pwsh
@@ -46,7 +57,18 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "${{ github.ref_name }}" dist/zen-gate.exe dist/zenstats.exe dist/*.zip --title "${{ github.ref_name }}" --generate-notes --latest
+          $tag = "${{ github.ref_name }}"
+          $ver = $tag -replace '^v','' -replace '/','-'
+          $assets = @("dist/zen-gate.exe", "dist/zenstats.exe", "dist/zen-gate-$ver.zip")
+          # A tag published once and re-run (a failed later step, a
+          # workflow_dispatch) already owns the release; gh release create exits
+          # non-zero there, so the binaries never got uploaded on the retry.
+          if (gh release view $tag 2>$null) {
+            gh release upload $tag $assets --clobber
+            gh release edit $tag --latest
+          } else {
+            gh release create $tag $assets --title $tag --generate-notes --latest
+          }
 
   # The Linux port ships for real: the AppImage bundles GTK3 plus
   # libayatana-appindicator, the .deb depends on the distro's libraries. The

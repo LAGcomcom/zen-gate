@@ -9,8 +9,8 @@ import (
 	"fmt"
 	io "io"
 	"net"
-	neturl "net/url"
 	"net/http"
+	neturl "net/url"
 	"regexp"
 	"strconv"
 	"strings"
@@ -20,8 +20,8 @@ import (
 )
 
 var (
-	regionRe  = regexp.MustCompile(`(?i)RegionError|not available in your country|region.?block`)
-	quotaRe   = regexp.MustCompile(`(?i)FreeUsageLimitError|usage limit|rate limit`)
+	regionRe   = regexp.MustCompile(`(?i)RegionError|not available in your country|region.?block`)
+	quotaRe    = regexp.MustCompile(`(?i)FreeUsageLimitError|usage limit|rate limit`)
 	modelErrRe = regexp.MustCompile(`(?i)ModelError|model is unavailable|model is not supported|not supported|Endpoint is unavailable`)
 	htmlPageRe = regexp.MustCompile(`(?i)^\s*<(!doctype|html[\s>])`)
 )
@@ -137,20 +137,56 @@ func SetProxy(mode, url string) {
 		t.Proxy = func(*http.Request) (*neturl.URL, error) { return SystemProxyURL(), nil }
 	case "rotate":
 		t.Proxy = nil
-		t.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
-			rotMu.RLock()
-			r := rotator
-			rotMu.RUnlock()
-			if r != nil {
-				return r.Dial(ctx, network, addr)
-			}
-			var d net.Dialer
-			return d.DialContext(ctx, network, addr)
-		}
+		// Free quota is counted per egress IP and DialContext only runs when a
+		// connection is established: with keep-alives on, every request reuses
+		// the first tunnel and rotation quietly pins the process to one IP.
+		t.DisableKeepAlives = true
+		t.DialContext = rotateDialContext
 	default:
 		t.Proxy = http.ProxyFromEnvironment
 	}
 	laneHTTP.Transport = t
+}
+
+// rotateDialContext sends one target out through the node pool, with two
+// exceptions that both end in a plain dial:
+//
+//   - Loopback never reaches a node. A subscription served from this machine
+//     (http://127.0.0.1:21000/sub) would otherwise be handed to a remote node
+//     that dials its own loopback, so the pool could never fill and rotate mode
+//     would lock itself out at every boot.
+//   - A pool that cannot dial falls back to the system egress. An empty node
+//     list is a reason to be slow, not a reason to answer 502 forever.
+func rotateDialContext(ctx context.Context, network, addr string) (net.Conn, error) {
+	if isLoopbackAddr(addr) {
+		var d net.Dialer
+		return d.DialContext(ctx, network, addr)
+	}
+	rotMu.RLock()
+	r := rotator
+	rotMu.RUnlock()
+	if r != nil {
+		if c, err := r.Dial(ctx, network, addr); err == nil {
+			return c, nil
+		} else if ctx.Err() != nil {
+			return nil, err
+		}
+	}
+	var d net.Dialer
+	return d.DialContext(ctx, network, addr)
+}
+
+// isLoopbackAddr reports whether host:port names this machine.
+func isLoopbackAddr(addr string) bool {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		host = addr
+	}
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(strings.Trim(host, "[]"))
+	return ip != nil && ip.IsLoopback()
 }
 
 // Client returns the shared upstream HTTP client (proxy-aware).
@@ -193,6 +229,7 @@ func PostStreamed(ctx context.Context, path string, body map[string]any, session
 	}
 	defer resp.Body.Close()
 
+	upstreamRID := headerRID(resp.Header)
 	retryAfter := 0
 	if ra := resp.Header.Get("retry-after"); ra != "" {
 		if n, perr := strconv.Atoi(ra); perr == nil && n > 0 && n < 3600 {
@@ -209,22 +246,22 @@ func PostStreamed(ctx context.Context, path string, body map[string]any, session
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		rest, _ := io.ReadAll(io.LimitReader(pump, 1<<20))
-		return nil, ClassifyFailure(resp.StatusCode, string(head)+string(rest), retryAfter)
+		return nil, withRID(ClassifyFailure(resp.StatusCode, string(head)+string(rest), retryAfter), upstreamRID)
 	}
 
 	switch sniffBody(head) {
 	case "empty":
-		return nil, &UpstreamError{Code: CodeEmpty, Message: "empty response body"}
+		return nil, &UpstreamError{Code: CodeEmpty, Message: "empty response body", UpstreamRID: upstreamRID}
 	case "json", "unknown":
 		rest, _ := io.ReadAll(io.LimitReader(pump, 8<<20))
 		full := string(head) + string(rest)
 		var parsed any
 		if jerr := json.Unmarshal([]byte(full), &parsed); jerr != nil {
-			return nil, &UpstreamError{Code: CodeServer, Message: truncate(full, 300)}
+			return nil, &UpstreamError{Code: CodeServer, Message: truncate(full, 300), UpstreamRID: upstreamRID}
 		}
 		if m, ok := parsed.(map[string]any); ok {
 			if _, has := m["error"]; has {
-				return nil, ClassifyFailure(resp.StatusCode, jsonString(m["error"]), retryAfter)
+				return nil, withRID(ClassifyFailure(resp.StatusCode, jsonString(m["error"]), retryAfter), upstreamRID)
 			}
 		}
 		if uerr := onData([]byte(full)); uerr != nil {
@@ -241,14 +278,32 @@ func PostStreamed(ctx context.Context, path string, body map[string]any, session
 	usage, err := readSSE(pump, onData)
 	if err != nil {
 		if ctx.Err() != nil {
-			return usage, &UpstreamError{Code: CodeAborted, Message: "cancelled"}
+			return usage, &UpstreamError{Code: CodeAborted, Message: "cancelled", UpstreamRID: upstreamRID}
 		}
 		if ue, ok := err.(*UpstreamError); ok {
-			return usage, ue
+			return usage, withRID(ue, upstreamRID)
 		}
-		return usage, &UpstreamError{Code: CodeTransport, Message: err.Error()}
+		return usage, &UpstreamError{Code: CodeTransport, Message: err.Error(), UpstreamRID: upstreamRID}
 	}
 	return usage, nil
+}
+
+// headerRID reads the provider's trace id under either spelling it uses.
+func headerRID(h http.Header) string {
+	for _, key := range []string{"X-Request-Id", "Request-Id"} {
+		if v := strings.TrimSpace(h.Get(key)); v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
+// withRID stamps the provider trace id onto an error unless it already has one.
+func withRID(e *UpstreamError, rid string) *UpstreamError {
+	if e != nil && e.UpstreamRID == "" {
+		e.UpstreamRID = rid
+	}
+	return e
 }
 
 // GetJSON performs a fingerprinted GET (model listing).
@@ -339,13 +394,19 @@ type streamReader struct {
 	src     io.Reader
 	closed  atomic.Bool
 	once    sync.Once
+	quit    chan struct{}
 	mu      sync.Mutex
 	pending []byte
 	idle    time.Duration
 }
 
 func newStreamReader(ctx context.Context, src io.Reader, idle time.Duration) *streamReader {
-	s := &streamReader{ch: make(chan streamChunk, 512), src: src, idle: idle}
+	s := &streamReader{
+		ch:   make(chan streamChunk, 512),
+		src:  src,
+		idle: idle,
+		quit: make(chan struct{}),
+	}
 	go func() {
 		buf := make([]byte, 32*1024)
 		for {
@@ -353,14 +414,12 @@ func newStreamReader(ctx context.Context, src io.Reader, idle time.Duration) *st
 			if k > 0 {
 				cp := make([]byte, k)
 				copy(cp, buf[:k])
-				s.ch <- streamChunk{cp, nil}
+				if !s.emit(streamChunk{cp, nil}) {
+					return
+				}
 			}
 			if err != nil {
-				if err == io.EOF {
-					s.ch <- streamChunk{nil, io.EOF}
-				} else {
-					s.ch <- streamChunk{nil, err}
-				}
+				s.emit(streamChunk{nil, err})
 				return
 			}
 			if s.closed.Load() {
@@ -368,16 +427,37 @@ func newStreamReader(ctx context.Context, src io.Reader, idle time.Duration) *st
 			}
 		}
 	}()
-	go func() {
-		<-ctx.Done()
-		s.Close()
-	}()
+	// The cancel watcher has to die with the stream: the probe path hands this
+	// function context.Background(), whose Done() is a nil channel, so a watcher
+	// waiting on it alone parked one goroutine — and the whole reader with its
+	// chunk buffer — per probe, forever.
+	if done := ctx.Done(); done != nil {
+		go func() {
+			select {
+			case <-done:
+				s.Close()
+			case <-s.quit:
+			}
+		}()
+	}
 	return s
+}
+
+// emit hands one chunk to the reader, and gives up once the stream is closed
+// instead of blocking on a full buffer forever.
+func (s *streamReader) emit(c streamChunk) bool {
+	select {
+	case s.ch <- c:
+		return true
+	case <-s.quit:
+		return false
+	}
 }
 
 func (s *streamReader) Close() {
 	s.once.Do(func() {
 		s.closed.Store(true)
+		close(s.quit)
 		if c, ok := s.src.(io.Closer); ok {
 			_ = c.Close()
 		}

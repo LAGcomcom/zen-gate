@@ -29,23 +29,23 @@ type openaiContentPart struct {
 }
 
 type openaiToolCall struct {
-	ID        string `json:"id"`
-	Type      string `json:"type"`
-	Function  struct {
+	ID       string `json:"id"`
+	Type     string `json:"type"`
+	Function struct {
 		Name      string `json:"name"`
 		Arguments string `json:"arguments"`
 	} `json:"function"`
 }
 
 type openaiMessage struct {
-	Role       string          `json:"role"`
-	Content    json.RawMessage `json:"content"`
+	Role       string           `json:"role"`
+	Content    json.RawMessage  `json:"content"`
 	ToolCalls  []openaiToolCall `json:"tool_calls"`
-	ToolCallID string          `json:"tool_call_id"`
+	ToolCallID string           `json:"tool_call_id"`
 }
 
 type openaiToolDef struct {
-	Type string `json:"type"`
+	Type     string `json:"type"`
 	Function *struct {
 		Name        string          `json:"name"`
 		Description string          `json:"description"`
@@ -57,14 +57,14 @@ type openaiToolDef struct {
 }
 
 type openaiChatRequest struct {
-	Model               string           `json:"model"`
-	Messages            []openaiMessage  `json:"messages"`
-	Tools               []openaiToolDef  `json:"tools"`
-	Stream              bool             `json:"stream"`
-	MaxTokens           int              `json:"max_tokens"`
-	MaxCompletionTokens int              `json:"max_completion_tokens"`
-	ReasoningEffort     string           `json:"reasoning_effort"`
-	User                string           `json:"user"`
+	Model               string          `json:"model"`
+	Messages            []openaiMessage `json:"messages"`
+	Tools               []openaiToolDef `json:"tools"`
+	Stream              bool            `json:"stream"`
+	MaxTokens           int             `json:"max_tokens"`
+	MaxCompletionTokens int             `json:"max_completion_tokens"`
+	ReasoningEffort     string          `json:"reasoning_effort"`
+	User                string          `json:"user"`
 	StreamOptions       *struct {
 		IncludeUsage bool `json:"include_usage"`
 	} `json:"stream_options"`
@@ -384,17 +384,20 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	sendChunk := func(delta map[string]any, finish any, usage any) {
-		choice := map[string]any{"index": 0, "delta": delta, "finish_reason": finish}
-		payload := map[string]any{
-			"id": id, "object": "chat.completion.chunk", "created": created,
-			"model": base, "choices": []any{choice},
+		if !sse.flushed {
+			// The role preamble commits the 200 the stream opens with, so it waits
+			// for the first byte of content: a lane that refuses before speaking
+			// must still be able to answer with a real 429 and Retry-After, which
+			// is what agents back off on.
+			sse.event(chunkPayload(id, created, base, map[string]any{"role": "assistant", "content": ""}, nil, nil))
 		}
-		if usage != nil {
-			payload["usage"] = usage
-		}
-		sse.event(payload)
+		sse.event(chunkPayload(id, created, base, delta, finish, usage))
 	}
-	sendChunk(map[string]any{"role": "assistant", "content": ""}, nil, nil)
+	inStreamFail := func(uerr *lane.UpstreamError) {
+		sse.event(map[string]any{"error": map[string]any{
+			"message": uerr.Message, "type": errorType(uerr), "code": uerr.Code}})
+		sse.done()
+	}
 
 	outcome, uerr := s.Lane.Complete(ctx, lane.Request{
 		Model: model, Effort: effort, Messages: unified,
@@ -436,6 +439,13 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
+		if sse.flushed {
+			// The fallback put bytes on the wire before it failed: the 200 is
+			// committed, so report inside the stream rather than promising a
+			// status the client can no longer read.
+			inStreamFail(uerr)
+			return
+		}
 		setRetryAfter(w, uerr)
 		body := openaiError(uerr.Message, errorType(uerr))
 		if uerr.Code == lane.CodeQuota {
@@ -446,9 +456,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 	if uerr != nil {
 		// mid-stream failure after content went out: report as an SSE error
-		sse.event(map[string]any{"error": map[string]any{
-			"message": uerr.Message, "type": errorType(uerr), "code": uerr.Code}})
-		sse.done()
+		inStreamFail(uerr)
 		return
 	}
 	finish := "stop"
@@ -512,6 +520,19 @@ type chatToolBuf struct {
 
 func (e *chatEmitter) hasAny() bool { return e.sawAny }
 
+// chunkPayload builds one chat.completion.chunk frame for the streaming paths
+// in openai.go and relay.go.
+func chunkPayload(id string, created int64, model string, delta map[string]any, finish any, usage any) map[string]any {
+	payload := map[string]any{
+		"id": id, "object": "chat.completion.chunk", "created": created,
+		"model": model, "choices": []any{map[string]any{"index": 0, "delta": delta, "finish_reason": finish}},
+	}
+	if usage != nil {
+		payload["usage"] = usage
+	}
+	return payload
+}
+
 func (e *chatEmitter) consume(c lane.Chunk, text, reasoning *strings.Builder, toolCalls *[]map[string]any) {
 	e.sawAny = true
 	switch c.Kind {
@@ -548,8 +569,8 @@ func (e *chatEmitter) consume(c lane.Chunk, text, reasoning *strings.Builder, to
 			delete(e.openTool, c.Index)
 			if !buf.suppressed {
 				*toolCalls = append(*toolCalls, map[string]any{
-					"id":   buf.id,
-					"type": "function",
+					"id":       buf.id,
+					"type":     "function",
 					"function": map[string]any{"name": buf.name, "arguments": buf.args},
 				})
 			}
@@ -689,13 +710,13 @@ type responsesRequest struct {
 }
 
 type responsesItem struct {
-	Type    string          `json:"type"`
-	Role    string          `json:"role,omitempty"`
-	Content json.RawMessage `json:"content,omitempty"`
-	CallID  string          `json:"call_id,omitempty"`
-	Name    string          `json:"name,omitempty"`
-	Arguments string        `json:"arguments,omitempty"`
-	Output  string          `json:"output,omitempty"`
+	Type      string          `json:"type"`
+	Role      string          `json:"role,omitempty"`
+	Content   json.RawMessage `json:"content,omitempty"`
+	CallID    string          `json:"call_id,omitempty"`
+	Name      string          `json:"name,omitempty"`
+	Arguments string          `json:"arguments,omitempty"`
+	Output    string          `json:"output,omitempty"`
 }
 
 func convertResponsesInput(raw json.RawMessage, instructions string) []lane.Message {
@@ -777,7 +798,7 @@ func (s *Server) handleResponses(w http.ResponseWriter, r *http.Request) {
 		Model: model, Effort: effort, Messages: unified,
 		Tools: convertOpenAITools(req.Tools), MaxTokens: req.MaxOutputTokens,
 		SessionSeed: seed, TurnSeed: turn,
-			Agent:       agent, Needs: needs,
+		Agent: agent, Needs: needs,
 	}, collector.consume)
 	served := servedModel(outcome, base)
 	if uerr != nil && !collector.hasAnything() {

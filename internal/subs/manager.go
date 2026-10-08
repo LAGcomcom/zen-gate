@@ -209,7 +209,7 @@ func (m *Manager) Refresh(ctx context.Context) error {
 	if exe == "" {
 		return fmt.Errorf("没有 sing-box.exe——请在设置里填写路径或点「下载」")
 	}
-	if err := m.startProcess(exe, configPath); err != nil {
+	if err := m.startProcess(exe, configPath, len(nodes)); err != nil {
 		return err
 	}
 	m.mu.Lock()
@@ -236,16 +236,24 @@ func displayName(s store.Subscription) string {
 }
 
 // startProcess (re)launches sing-box; the supervisor goroutine restarts it on
-// abnormal exit with capped backoff until Stop.
-func (m *Manager) startProcess(exe, configPath string) error {
+// abnormal exit with capped backoff until Stop. nodeCount is how many inbounds
+// the config binds — the restart guard has to cover all of them, so it is
+// passed in rather than read from a field the caller has not published yet.
+func (m *Manager) startProcess(exe, configPath string, nodeCount int) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.stopping {
 		return fmt.Errorf("管理器已停止")
 	}
+	addrs := inboundPorts(nodeCount)
 	if m.cmd != nil {
-		_ = m.cmd.Process.Kill()
+		_ = stopAndWait(m.cmd.Process, addrs, restartWait)
 		m.cmd = nil
+	}
+	// A sidecar left by an earlier zen-gate owns these ports and nothing here
+	// can signal it. Starting anyway would bind-fail, exit, and restart forever.
+	if err := reapOrphan(addrs, restartWait); err != nil {
+		return err
 	}
 	if err := checkConfig(exe, configPath); err != nil {
 		return err
@@ -262,6 +270,14 @@ func (m *Manager) startProcess(exe, configPath string) error {
 		logf.Close()
 		return fmt.Errorf("启动 sing-box 失败: %w", err)
 	}
+	// The kill job is what makes an orphan impossible from now on; the pid file
+	// is how the next run recognises this one.
+	if err := tieToParent(cmd.Process); err != nil {
+		m.log("侧车没有并入回收作业: %v", err)
+	}
+	if err := writePidfileAt(cmd.Process.Pid, cmd.Path); err != nil {
+		m.log("写入 sing-box.pid 失败: %v", err)
+	}
 	if m.logFile != nil {
 		m.logFile.Close()
 	}
@@ -271,6 +287,11 @@ func (m *Manager) startProcess(exe, configPath string) error {
 	go m.supervise(cmd)
 	return nil
 }
+
+// restartWait bounds how long a restart waits for the old sidecar's sockets to
+// come back. sing-box closes its listeners immediately on terminate, so this
+// only has to cover the OS's own teardown.
+const restartWait = 3 * time.Second
 
 // checkConfig validates the generated config with `sing-box check` so a
 // schema mistake surfaces as a message instead of a crash-looping child.
@@ -319,11 +340,12 @@ func (m *Manager) supervise(cmd *exec.Cmd) {
 	time.Sleep(5 * time.Second)
 	m.mu.Lock()
 	exe, configPath := m.BinaryPath(), filepath.Join(store.SubsDir(), "sing-box.json")
+	nodeCount := len(m.nodes)
 	m.mu.Unlock()
 	if exe == "" {
 		return
 	}
-	_ = m.startProcess(exe, configPath)
+	_ = m.startProcess(exe, configPath, nodeCount)
 }
 
 // Stop kills the sidecar; called from every app shutdown path (the tray-quit
@@ -332,11 +354,13 @@ func (m *Manager) Stop() {
 	m.mu.Lock()
 	m.stopping = true
 	cmd := m.cmd
+	nodeCount := len(m.nodes)
 	m.cmd = nil
 	m.mu.Unlock()
 	if cmd != nil && cmd.Process != nil {
-		_ = cmd.Process.Kill()
+		_ = stopAndWait(cmd.Process, inboundPorts(nodeCount), restartWait)
 	}
+	_ = removePidfile()
 }
 
 // Apply toggles the feature on: enable in config, run a full refresh cycle.
@@ -357,15 +381,16 @@ func (m *Manager) SetPath(path string) error {
 		}
 	}
 	m.mu.Lock()
-	m.st.Config().SingBoxPath = path
+	m.st.Mutate(func(cfg *store.Config) { cfg.SingBoxPath = path })
 	_ = m.st.Save()
 	wasRunning := m.cmd != nil
+	nodeCount := len(m.nodes)
 	m.mu.Unlock()
 	if wasRunning {
 		configPath := filepath.Join(store.SubsDir(), "sing-box.json")
 		if _, err := os.Stat(configPath); err == nil {
 			if exe := m.BinaryPath(); exe != "" {
-				return m.startProcess(exe, configPath)
+				return m.startProcess(exe, configPath, nodeCount)
 			}
 		}
 	}

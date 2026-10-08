@@ -52,6 +52,38 @@ func TestFetchModelsAnthropic(t *testing.T) {
 	}
 }
 
+func TestFetchModelCatalogKeepsDeclaredCapacities(t *testing.T) {
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"object":"list","data":[
+			{"id":"nvidia/m1","max_input_tokens":131072,"max_output_tokens":4096},
+			{"id":"nvidia/m2"}]}`)
+	}))
+	defer up.Close()
+	rows, err := FetchModelCatalog(context.Background(), up.URL+"/v1", "sk-abc", "openai")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("rows = %v", rows)
+	}
+	if rows[0].ContextWindow != 131072 || rows[0].MaxOutput != 4096 {
+		t.Errorf("declared capacities dropped: %+v", rows[0])
+	}
+	if rows[1].ID != "nvidia/m2" || rows[1].ContextWindow != 0 || rows[1].MaxOutput != 0 {
+		t.Errorf("a model without numbers must still come back, unnumbered: %+v", rows[1])
+	}
+}
+
+func TestFetchModelCatalogRejectsEmptyListing(t *testing.T) {
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"object":"list","data":[]}`)
+	}))
+	defer up.Close()
+	if _, err := FetchModelCatalog(context.Background(), up.URL+"/v1", "sk-abc", "openai"); err == nil {
+		t.Fatal("an empty listing must error — it means the Base URL or Key is wrong")
+	}
+}
+
 func TestRecommendedModelsNVIDIA(t *testing.T) {
 	// Real NVIDIA NIM catalog subset (Oct 2026) incl. junk and small models.
 	cat := []string{
@@ -64,7 +96,7 @@ func TestRecommendedModelsNVIDIA(t *testing.T) {
 	}
 	rec := RecommendedModels("", "https://integrate.api.nvidia.com/v1", cat)
 	want := map[string]bool{
-		"deepseek-ai/deepseek-v4.1-flash": true,
+		"deepseek-ai/deepseek-v4.1-flash":   true,
 		"nvidia/nemotron-3-super-120b-a12b": true,
 		"nvidia/nemotron-3-ultra-550b-a55b": true,
 	}

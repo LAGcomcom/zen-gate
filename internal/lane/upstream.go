@@ -203,14 +203,14 @@ func GatewayHeaders(session, requestID string, stream bool, accept string) map[s
 		}
 	}
 	return map[string]string{
-		"content-type":        "application/json",
-		"authorization":       "Bearer public",
-		"user-agent":          ClientUA,
-		"x-opencode-client":   "desktop",
-		"x-opencode-session":  session,
-		"x-opencode-request":  requestID,
-		"x-opencode-project":  "global",
-		"accept":              accept,
+		"content-type":       "application/json",
+		"authorization":      "Bearer public",
+		"user-agent":         ClientUA,
+		"x-opencode-client":  "desktop",
+		"x-opencode-session": session,
+		"x-opencode-request": requestID,
+		"x-opencode-project": "global",
+		"accept":             accept,
 	}
 }
 

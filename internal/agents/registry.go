@@ -123,7 +123,12 @@ func (r *Registry) Enable(id string) error {
 	if err := a.Enable(r.options()); err != nil {
 		return err
 	}
-	r.st.Config().EnabledAgents[id] = true
+	r.st.Mutate(func(cfg *store.Config) {
+		if cfg.EnabledAgents == nil {
+			cfg.EnabledAgents = map[string]bool{}
+		}
+		cfg.EnabledAgents[id] = true
+	})
 	_ = r.st.Save()
 	return nil
 }
@@ -135,7 +140,12 @@ func (r *Registry) Disable(id string) error {
 		return fmt.Errorf("unknown agent %q", id)
 	}
 	err := a.Disable()
-	r.st.Config().EnabledAgents[id] = false
+	r.st.Mutate(func(cfg *store.Config) {
+		if cfg.EnabledAgents == nil {
+			cfg.EnabledAgents = map[string]bool{}
+		}
+		cfg.EnabledAgents[id] = false
+	})
 	_ = r.st.Save()
 	return err
 }

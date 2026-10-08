@@ -28,8 +28,8 @@ type ThrottleNote struct {
 }
 
 const (
-	throttleCooldownDefault = 60 * 1000        // 1 min when upstream gave no Retry-After
-	throttleCooldownMax     = 2 * 3600 * 1000  // 2 h cap — probes will re-verify
+	throttleCooldownDefault = 60 * 1000       // 1 min when upstream gave no Retry-After
+	throttleCooldownMax     = 2 * 3600 * 1000 // 2 h cap — probes will re-verify
 	throttleEpisodeTTL      = 14 * 24 * 3600 * 1000
 	throttleMaxEpisodes     = 12
 )

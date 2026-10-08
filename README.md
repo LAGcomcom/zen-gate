@@ -11,7 +11,7 @@
 
 [![release](https://img.shields.io/github/v/release/LAGcomcom/zen-gate?style=flat-square&label=%E7%89%88%E6%9C%AC)](https://github.com/LAGcomcom/zen-gate/releases/latest)
 [![downloads](https://img.shields.io/github/downloads/LAGcomcom/zen-gate/total?style=flat-square&label=%E4%B8%8B%E8%BD%BD)](https://github.com/LAGcomcom/zen-gate/releases)
-[![go](https://img.shields.io/badge/Go-1.23-00ADD8?style=flat-square&logo=go&logoColor=white)](https://go.dev)
+[![go](https://img.shields.io/badge/Go-1.26-00ADD8?style=flat-square&logo=go&logoColor=white)](https://go.dev)
 [![platform](https://img.shields.io/badge/Windows-10%2F11%20%7C%20macOS%2013%2B%20%7C%20Linux-0078D6?style=flat-square&logo=windows11&logoColor=white)](https://github.com/LAGcomcom/zen-gate/releases)
 [![license](https://img.shields.io/github/license/LAGcomcom/zen-gate?style=flat-square)](LICENSE)
 
@@ -52,12 +52,13 @@ OpenCode Zen 提供了一批**免登录、免计费**的模型车道，但它们
 | 🔄 **限流自动切换** | 模型被限流时自动换下一个可用模型接住请求，响应头标注实际模型 |
 | 📢 **公告系统** | 编辑仓库根目录 `announcements.json` 即向所有用户发公告（info/warn/critical 分级、生效时段、已读跟踪），总览页每 6 小时同步 |
 | 🔌 **自定义 API** | 免费商预设一键填充 + 自动检索模型列表，自己的 Key 自己填，用量照常入账 |
+| 📖 **能力元数据进标准接口** | `GET /v1/models` 每条模型除 OpenAI 字段外附带 `context_window`、`max_output_tokens`、`input_modalities`、`reasoning`、`supported_reasoning_levels` 与 `capability_source`（实测 > 上游声明 > AI标注 > 规则 / 未标注）——一键实测的结论不用打开面板也能被 Agent、SDK 或任意脚本读到；重启后实测结论仍随 `tags.json` 生效 |
 | 🌐 **订阅轮询** | 粘贴代理订阅（vless / vmess / ss / trojan / hy2 / tuic），内嵌 sing-box 侧车转成本地 socks 池，**每个请求轮换一个健康出口**——免费车道额度按出口 IP 计，多节点就是多份额度；节点健康探测 + 拨号失败自动跳下一节点 |
 | 📊 **额度测算** | 无官方余额 API 也能估：限额时段追踪 + 恢复时间预估 + 日额度进度条 |
 | ⏱ **首字历史** | 每次探测的首字延迟入样本环，重启不丢，模型页直接看平均首字 |
 | 🌡 **GitHub 式热力图** | 365 天用量热力图 + 多模型趋势折线 + 每 / 周 / 累计三种视图 |
 | 🖥 **托盘常驻** | 关窗即进托盘/菜单栏、开机自启（注册表 / launchd）、系统通知、跟随系统代理（WinINET / `scutil --proxy`） |
-| 🛡 **只听本机** | 网关仅绑定 127.0.0.1，管理端有同源护栏，配置先备份再改 |
+| 🛡 **只听本机** | 网关默认仅绑定 127.0.0.1；设置里可放开局域网给同网段设备调用（接口仍必须带 API Key，管理端固定只接受本机），另有同源护栏、配置先备份再改 |
 
 ## 快速开始
 
@@ -104,8 +105,11 @@ zen-gate   # 或从应用菜单启动
 Windows：
 
 ```bash
-go build -trimpath -ldflags "-s -w -H=windowsgui -X zen-gate/internal/gateway.Version=1.2.1 -X zen-gate/internal/update.Current=1.2.1" -o dist/zen-gate.exe ./cmd/zen-gate
+go build -trimpath -ldflags "-H=windowsgui -X zen-gate/internal/gateway.Version=1.2.1 -X zen-gate/internal/update.Current=1.2.1" -o dist/zen-gate.exe ./cmd/zen-gate
 ```
+
+不要加 `-s -w`（剥符号表）：火绒一分钟内就会把这样产出、刚解压出来的
+`zen-gate.exe` 直接删掉，表现成"下载完文件就不见了"。
 
 macOS（需要 cgo 与 Xcode 命令行工具；脚本负责编出 arm64 + x86_64 双架构、
 打 .app 包、生成 .icns、做 ad-hoc 签名并压 zip）：

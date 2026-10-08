@@ -55,6 +55,7 @@ func main() {
 	}
 	logger := logx.New(st.Home)
 	defer logger.Close()
+	logger.SetStdout(*noTray)
 
 	window.SetAppUserModelID("zen-gate.gateway")
 
@@ -68,7 +69,11 @@ func main() {
 
 	cfg := st.Config()
 	if *port > 0 {
-		cfg.Port = *port
+		// Publish the override through Mutate and re-read, rather than writing
+		// into the snapshot: everything below (and the gateway's own bind) reads
+		// the port back through Config().
+		st.Mutate(func(c *store.Config) { c.Port = *port })
+		cfg = st.Config()
 	}
 	// v5: providers saved before model selection existed hold full catalog
 	// dumps — trim them to the recommended picks so the 模型 page shows only
@@ -130,10 +135,6 @@ func main() {
 		}()
 	}
 	notify.SetEnabled(cfg.Notifications)
-	ln.OnCall = func(rec lane.CallRecord) {
-		st.Record(rec)
-		_ = st.FlushStats()
-	}
 	// Probe first-token samples feed the persisted per-model average.
 	ln.OnProbeResult = func(r lane.ProbeResult) {
 		st.AddTTFTSample(r.Model, r.TTFTMs)
@@ -143,6 +144,7 @@ func main() {
 	gw.SetAgents(reg)
 	gw.SetSubs(mgr)
 	gw.SetLogger(logger)
+	gw.ApplyLogSettings(cfg)
 	// AI capability tagger: classifies provider model ids (and fills the lane
 	// catalog's unverified audio/file fields) using the free lane itself.
 	tagger := autotag.New(ln, st, logger.Infof)
@@ -171,7 +173,7 @@ func main() {
 
 	stateText := func(s string) string {
 		return map[string]string{lane.StateAvailable: "可用", lane.StateUnknown: "未知",
-			lane.StateThrottled: "已限额", lane.StateRegionBlock: "地区受限",
+			lane.StateThrottled: "暂时限流·可重试", lane.StateRegionBlock: "地区受限",
 			lane.StateUnavailable: "不可用"}[s]
 	}
 	ln.OnProbeEdge = func(model, from, to string) {
@@ -197,12 +199,15 @@ func main() {
 	syncEndpoints()
 
 	if err := gw.Start(); err != nil {
-		logger.Errorf("listen on 127.0.0.1:%d: %v", cfg.Port, err)
+		logger.Errorf("listen on port %d: %v", cfg.Port, err)
 		fmt.Println("listen error:", err)
 		os.Exit(1)
 	}
 	dashURL := strings.TrimSuffix(gw.BaseURL(), "/v1")
 	logger.Infof("dashboard ready at %s", dashURL)
+	if lan := gw.LANBaseURL(); lan != "" {
+		logger.Infof("局域网 API 可用: %s", lan)
+	}
 
 	// periodic stats flush
 	go func() {
@@ -240,7 +245,7 @@ func main() {
 			if windowHidden {
 				notify.Toast("Zen Gate 有新版本 "+ver, "当前 "+gateway.Version+" · 打开管理页查看下载链接")
 			}
-			st.Config().LastVersion = ver
+			st.Mutate(func(c *store.Config) { c.LastVersion = ver })
 			_ = st.Save()
 			syncEndpoints()
 		}
@@ -436,8 +441,9 @@ func saveWindowState(st *store.Store) {
 	if r-x < 400 || b-y < 300 {
 		return // collapsed or garbage rect — keep the last good state
 	}
-	cfg := st.Config()
-	cfg.Window = store.WindowState{X: x, Y: y, W: r - x, H: b - y, Maximized: window.IsMaximized(mainHwnd)}
+	st.Mutate(func(c *store.Config) {
+		c.Window = store.WindowState{X: x, Y: y, W: r - x, H: b - y, Maximized: window.IsMaximized(mainHwnd)}
+	})
 	_ = st.Save()
 }
 

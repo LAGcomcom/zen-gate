@@ -12,20 +12,20 @@ import (
 // Anthropic /v1/messages, for Claude-protocol clients (Claude Code and kin).
 
 type anthropicContentBlock struct {
-	Type string `json:"type"`
-	Text string `json:"text"`
-	Title string `json:"title"`
+	Type   string `json:"type"`
+	Text   string `json:"text"`
+	Title  string `json:"title"`
 	Source *struct {
 		Type      string `json:"type"`
 		MediaType string `json:"media_type"`
 		Data      string `json:"data"`
 	} `json:"source"`
-	ID      string          `json:"id"`
-	Name    string          `json:"name"`
-	Input   json.RawMessage `json:"input"`
-	ToolUseID string        `json:"tool_use_id"`
-	Content json.RawMessage `json:"content"`
-	IsError bool            `json:"is_error"`
+	ID        string          `json:"id"`
+	Name      string          `json:"name"`
+	Input     json.RawMessage `json:"input"`
+	ToolUseID string          `json:"tool_use_id"`
+	Content   json.RawMessage `json:"content"`
+	IsError   bool            `json:"is_error"`
 }
 
 type anthropicMessage struct {
@@ -40,17 +40,17 @@ type anthropicToolDef struct {
 }
 
 type anthropicRequest struct {
-	Model     string               `json:"model"`
-	MaxTokens int                  `json:"max_tokens"`
-	System    json.RawMessage      `json:"system"`
-	Messages  []anthropicMessage   `json:"messages"`
-	Tools     []anthropicToolDef   `json:"tools"`
-	Stream    bool                 `json:"stream"`
+	Model     string             `json:"model"`
+	MaxTokens int                `json:"max_tokens"`
+	System    json.RawMessage    `json:"system"`
+	Messages  []anthropicMessage `json:"messages"`
+	Tools     []anthropicToolDef `json:"tools"`
+	Stream    bool               `json:"stream"`
 	Thinking  *struct {
 		Type         string `json:"type"`
 		BudgetTokens int    `json:"budget_tokens"`
 	} `json:"thinking"`
-	Metadata  *struct {
+	Metadata *struct {
 		UserID string `json:"user_id"`
 	} `json:"metadata"`
 }
@@ -237,16 +237,28 @@ func (s *Server) handleAnthropicMessages(w http.ResponseWriter, r *http.Request)
 	}
 	st.sse = sse
 	msgID := randomID("msg_")
-	sse.event(map[string]any{"type": "message_start", "message": map[string]any{
-		"id": msgID, "type": "message", "role": "assistant", "model": base,
-		"content": []any{}, "stop_sequence": nil, "stop_reason": nil,
-		"usage": map[string]any{"input_tokens": 0, "output_tokens": 0}}})
+	// message_start commits the 200 and the event-stream type, so it waits for
+	// the first chunk: a lane that refuses before speaking can then still answer
+	// with the status and Retry-After agents back off on.
+	begin := func() {
+		if sse.flushed {
+			return
+		}
+		sse.event(map[string]any{"type": "message_start", "message": map[string]any{
+			"id": msgID, "type": "message", "role": "assistant", "model": base,
+			"content": []any{}, "stop_sequence": nil, "stop_reason": nil,
+			"usage": map[string]any{"input_tokens": 0, "output_tokens": 0}}})
+	}
+	feed := func(c lane.Chunk) {
+		begin()
+		st.consume(c)
+	}
 
 	outcome, uerr := s.Lane.Complete(ctx, lane.Request{
 		Model: model, Effort: effort, Messages: unified, Tools: tools,
 		MaxTokens: req.MaxTokens, SessionSeed: seed, TurnSeed: turn,
-			Agent: agent, Needs: needs,
-	}, st.consume)
+		Agent: agent, Needs: needs,
+	}, feed)
 	stop := "end_turn"
 	switch {
 	case outcome.Finish == lane.FinishToolCalls:
@@ -262,7 +274,7 @@ func (s *Server) handleAnthropicMessages(w http.ResponseWriter, r *http.Request)
 			}
 			if usage, finish, _, _, ok := s.providerFallback(ctx,
 				s.providerFallbackPicks(needs, base), unified, tools,
-				fbMaxTok, agent, st.consume); ok {
+				fbMaxTok, agent, feed); ok {
 				stop := "end_turn"
 				switch {
 				case finish == lane.FinishToolCalls:
@@ -270,6 +282,7 @@ func (s *Server) handleAnthropicMessages(w http.ResponseWriter, r *http.Request)
 				case finish == lane.FinishMaxTokens || finish == "":
 					stop = "max_tokens"
 				}
+				begin()
 				sse.event(map[string]any{"type": "message_delta",
 					"delta": map[string]any{"stop_reason": stop, "stop_sequence": nil},
 					"usage": map[string]any{"output_tokens": usage.Output}})
@@ -277,9 +290,17 @@ func (s *Server) handleAnthropicMessages(w http.ResponseWriter, r *http.Request)
 				return
 			}
 		}
-		sse.event(map[string]any{"type": "error", "error": map[string]any{"type": errorType(uerr), "message": uerr.Message}})
+		if sse.flushed {
+			// Content (or a started fallback) already went on the wire, so the 200
+			// is committed: the refusal travels as an in-stream error event.
+			sse.event(map[string]any{"type": "error", "error": map[string]any{"type": errorType(uerr), "message": uerr.Message}})
+			return
+		}
+		setRetryAfter(w, uerr)
+		writeJSON(w, errorStatus(uerr), map[string]any{"type": "error", "error": map[string]any{"type": errorType(uerr), "message": uerr.Message}})
 		return
 	}
+	begin()
 	sse.event(map[string]any{"type": "message_delta",
 		"delta": map[string]any{"stop_reason": stop, "stop_sequence": nil},
 		"usage": map[string]any{"output_tokens": outcome.Usage.Output}})
@@ -345,7 +366,7 @@ func anthropicResponse(id, model string, c *responsesCollector, outcome lane.Out
 	}
 	return map[string]any{
 		"id": id, "type": "message", "role": "assistant", "model": model,
-		"content":    content,
+		"content":     content,
 		"stop_reason": stop, "stop_sequence": nil,
 		"usage": map[string]any{
 			"input_tokens":  outcome.Usage.Input + outcome.Usage.CacheRead,

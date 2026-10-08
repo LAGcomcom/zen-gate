@@ -145,6 +145,8 @@ func ParseURI(raw string) (Node, error) {
 		return parseUserinfoURI(raw, proto)
 	case "trojan":
 		return parseUserinfoURI(raw, proto)
+	case "anytls":
+		return parseUserinfoURI(raw, proto)
 	case "ss":
 		return parseSS(raw)
 	case "hy2", "hysteria2":
@@ -159,8 +161,8 @@ func ParseURI(raw string) (Node, error) {
 }
 
 // parseUserinfoURI handles the URL-shaped schemes sharing
-// `<proto>://userinfo@host:port?<query>#<name>`: vless, trojan, hy2, tuic,
-// socks. Protocol-specific quirks are applied by the per-proto builders.
+// `<proto>://userinfo@host:port?<query>#<name>`: vless, trojan, anytls, hy2,
+// tuic, socks. Protocol-specific quirks are applied by the per-proto builders.
 func parseUserinfoURI(raw, proto string) (Node, error) {
 	u, err := url.Parse(raw)
 	if err != nil {
@@ -195,6 +197,16 @@ func parseUserinfoURI(raw, proto string) (Node, error) {
 		}
 		ob["tls"] = tlsBlock(q, true)
 		attachTransport(ob, q)
+	case "anytls":
+		// Same userinfo shape as trojan, TLS always on. No transport object:
+		// sing-box speaks AnyTLS over plain TCP only.
+		ob["type"] = "anytls"
+		if pw, ok := u.User.Password(); ok {
+			ob["password"] = pw
+		} else {
+			ob["password"] = u.User.Username()
+		}
+		ob["tls"] = tlsBlock(q, true)
 	case "hy2":
 		ob["type"] = "hysteria2"
 		if pw, ok := u.User.Password(); ok {

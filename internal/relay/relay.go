@@ -53,10 +53,11 @@ func endpointOf(p *store.Provider) string {
 	return base + "/chat/completions"
 }
 
-// FetchModels pulls the model listing from a provider endpoint. Both protocol
-// families answer GET {base}/models with {"data":[{"id":…}]}, so one parse
-// path covers them; lane.ParseListing also tolerates bare arrays.
-func FetchModels(ctx context.Context, baseURL, apiKey, protocol string) ([]string, error) {
+// FetchModelCatalog pulls the model listing from a provider endpoint and keeps
+// the token capacities the provider declares alongside each id. Both protocol
+// families answer GET {base}/models with {"data":[{"id":…}]}, so one parse path
+// covers them; lane.ParseListingMeta also tolerates bare arrays.
+func FetchModelCatalog(ctx context.Context, baseURL, apiKey, protocol string) ([]lane.ListingMeta, error) {
 	base := NormalizeBaseURL(baseURL)
 	if base == "" {
 		return nil, errors.New("Base URL 不能为空")
@@ -85,9 +86,22 @@ func FetchModels(ctx context.Context, baseURL, apiKey, protocol string) ([]strin
 	if err := json.Unmarshal(data, &payload); err != nil {
 		return nil, fmt.Errorf("响应不是 JSON 对象: %v", err)
 	}
-	ids := lane.ParseListing(payload)
-	if len(ids) == 0 {
+	rows := lane.ParseListingMeta(payload)
+	if len(rows) == 0 {
 		return nil, errors.New("模型列表为空（检查 Base URL 与 Key）")
+	}
+	return rows, nil
+}
+
+// FetchModels returns just the ids of a provider's listing.
+func FetchModels(ctx context.Context, baseURL, apiKey, protocol string) ([]string, error) {
+	rows, err := FetchModelCatalog(ctx, baseURL, apiKey, protocol)
+	if err != nil {
+		return nil, err
+	}
+	ids := make([]string, 0, len(rows))
+	for _, r := range rows {
+		ids = append(ids, r.ID)
 	}
 	return ids, nil
 }
@@ -265,9 +279,15 @@ func elapsedMS(t time.Time) int64 {
 // ProbeModel pings one provider model with the smallest streaming completion
 // and classifies the verdict like the free-lane prober does. It returns as
 // soon as the first `data:` frame arrives — availability and first-token
-// latency are the only things a probe needs.
-func ProbeModel(ctx context.Context, p *store.Provider, model string) lane.ProbeResult {
-	res := lane.ProbeResult{Model: model, State: lane.StateUnknown, At: time.Now().UnixMilli()}
+// latency are the only things a probe needs. The three phases (request out,
+// answer started, verdict) also go to the context sink, because a queued
+// private endpoint can take tens of seconds and the dashboard has to say so.
+func ProbeModel(ctx context.Context, p *store.Provider, model string) (res lane.ProbeResult) {
+	res = lane.ProbeResult{Model: model, State: lane.StateUnknown, At: time.Now().UnixMilli()}
+	lane.EmitProbeStep(ctx, lane.PhaseRequest, lane.StepRunning, 0, lane.SafeEndpoint(endpointOf(p))+" · "+model)
+	defer func() {
+		lane.EmitProbeStep(ctx, lane.PhaseVerdict, lane.StatusForProbeState(res.State), res.LatencyMs, res.Detail)
+	}()
 	// max_tokens + messages is the minimal shape both protocol families accept.
 	body := map[string]any{"model": model, "stream": true, "max_tokens": 16,
 		"messages": []map[string]any{{"role": "user", "content": "ping"}}}
@@ -320,6 +340,7 @@ func ProbeModel(ctx context.Context, p *store.Provider, model string) lane.Probe
 		}
 		if res.TTFTMs == 0 {
 			res.TTFTMs = elapsedMS(start)
+			lane.EmitProbeStep(ctx, lane.PhaseFirstByte, lane.StepOK, res.TTFTMs, "")
 		}
 		frameText := strings.TrimSpace(strings.TrimPrefix(trimmed, "data:"))
 		if frameText == "" || frameText == "[DONE]" {

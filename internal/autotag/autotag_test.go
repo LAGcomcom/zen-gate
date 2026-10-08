@@ -58,6 +58,20 @@ func TestParseTagJSONPartialFields(t *testing.T) {
 	}
 }
 
+func TestParseTagJSONKeepsReasoning(t *testing.T) {
+	// The 思考 badge on a user-added model is the tagger's verdict; dropping it
+	// here leaves the card silent even though the answer carried it.
+	in := `[{"id":"m-one","reasoning":true,"maxOutput":4096}]`
+	tags := parseTagJSON(in, []string{"m-one"})
+	got := tags["m-one"]
+	if !got.Reasoning {
+		t.Errorf("reasoning verdict dropped: %+v", got)
+	}
+	if got.MaxOutput != 4096 {
+		t.Errorf("maxOutput = %d, want 4096", got.MaxOutput)
+	}
+}
+
 func TestTagPromptListsEveryModel(t *testing.T) {
 	p := tagPrompt([]string{"a-model", "b-model"})
 	for _, id := range []string{"a-model", "b-model", "vision", "audio", "file"} {
