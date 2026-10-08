@@ -130,7 +130,7 @@ type candidateKey struct {
 
 func (l *Lane) candidateKey(m ModelInfo, idx int, av ProbeResult, strategy string, ttftFn TTFTSource) candidateKey {
 	key := candidateKey{avail: 1, known: 1, catalogIdx: idx}
-	if av.State == StateAvailable {
+	if FreshState(av) == StateAvailable {
 		key.avail = 0
 	}
 	if strategy == StrategyLatency {

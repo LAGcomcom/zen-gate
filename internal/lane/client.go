@@ -60,6 +60,7 @@ type Lane struct {
 	mu               sync.RWMutex
 	catalog          []ModelInfo
 	availability     map[string]ProbeResult
+	realOK           map[string]int64 // model -> unix-milli until which live traffic vouches for it
 	egress           Egress
 	defaultMaxTokens int
 	exposeRegion     bool
@@ -105,6 +106,7 @@ func NewLane() *Lane {
 	return &Lane{
 		catalog:          BuildCatalog(FallbackCatalogIDs),
 		availability:     map[string]ProbeResult{},
+		realOK:           map[string]int64{},
 		defaultMaxTokens: 32768,
 		exposeRegion:     true,
 		failoverEnabled:  true,
@@ -149,16 +151,57 @@ func (l *Lane) MarkThrottled(model string, retryAfterSec int) {
 	l.fireChange()
 }
 
-// MarkOK clears a model's throttle state after a successful call or probe.
-func (l *Lane) MarkOK(model string) {
-	l.throttle.MarkOK(model)
+// realSuccessProtect is how long live traffic outranks the probe scheduler.
+const realSuccessProtect = 10 * time.Minute
+
+// NoteRealSuccess is the correction from live traffic: a call that answered
+// proves the model works, so it flips the panel to available straight away and
+// holds a probe's negative verdict down for a window. Without the window the
+// next round writes the throttle verdict back over a model that is
+// demonstrably answering, which is how the panel and the truth drifted apart.
+//
+// vouchedFor is only ever called with l.mu already held, so there is no
+// re-entrant acquisition to deadlock on.
+func (l *Lane) NoteRealSuccess(model string) {
 	l.mu.Lock()
-	if prev, ok := l.availability[model]; ok && prev.State == StateThrottled {
-		l.availability[model] = ProbeResult{Model: model, State: StateAvailable,
-			At: time.Now().UnixMilli(), Detail: "恢复（实测成功）"}
+	now := time.Now()
+	l.realOK[model] = now.Add(realSuccessProtect).UnixMilli()
+	prev, known := l.availability[model]
+	if known && prev.State == StateAvailable {
+		l.mu.Unlock()
+		return
+	}
+	l.availability[model] = ProbeResult{Model: model, State: StateAvailable,
+		At: now.UnixMilli(), Detail: "真实请求成功（实测可用）"}
+	l.mu.Unlock()
+	l.throttle.MarkOK(model)
+	l.fireChange()
+}
+
+// vouchedFor reports whether live traffic still speaks for the model. Callers
+// must hold l.mu.
+func (l *Lane) vouchedFor(model string) bool {
+	until, ok := l.realOK[model]
+	return ok && time.Now().UnixMilli() < until
+}
+
+// applyVerdict publishes one probe conclusion, unless live traffic vouches for
+// the model. It reports the conclusion that landed and whether anything changed.
+func (l *Lane) applyVerdict(model string, r ProbeResult) (ProbeResult, bool) {
+	l.mu.Lock()
+	prev, known := l.availability[model]
+	blocked := l.vouchedFor(model)
+	if !blocked {
+		l.availability[model] = r
 	}
 	l.mu.Unlock()
-	l.fireChange()
+	if blocked {
+		return prev, false
+	}
+	if known && l.OnProbeEdge != nil && prev.State != r.State && prev.State != "" && r.State != "" {
+		go l.OnProbeEdge(model, prev.State, r.State)
+	}
+	return r, true
 }
 
 func (l *Lane) fireChange() {
@@ -213,10 +256,11 @@ func (l *Lane) Snapshot() ([]ModelInfo, map[string]ProbeResult, Egress) {
 	return cat, av, l.egress
 }
 
-// ServableModels lists models a client picker may show: everything not
-// explicitly refused by the gateway. Region-blocked ids are kept only when
-// exposeRegion is set (they surface in the dashboard, never silently vanish).
-// The list never comes back empty while any model is known.
+// ServableModels lists models a client picker may show. A probe verdict is not
+// a filter here: it is one exit sampled once, and deleting the id from
+// GET /v1/models is how a working model becomes unselectable for every client.
+// Only the model's own nature removes it — a decision model answers on a
+// different wire and would 500 — plus the user's exposeRegion switch.
 func (l *Lane) ServableModels() []ModelInfo {
 	cat, av, _ := l.Snapshot()
 	out := []ModelInfo{}
@@ -226,13 +270,8 @@ func (l *Lane) ServableModels() []ModelInfo {
 			// chat requests — listing them in a chat picker would only 500.
 			continue
 		}
-		switch av[m.ID].State {
-		case StateUnavailable:
+		if FreshState(av[m.ID]) == StateRegionBlock && !l.exposeRegion {
 			continue
-		case StateRegionBlock:
-			if !l.exposeRegion {
-				continue
-			}
 		}
 		out = append(out, m)
 	}
@@ -285,22 +324,15 @@ func (l *Lane) ProbeRound(ctx context.Context, manual bool) {
 		l.mu.Unlock()
 		l.notify()
 
-		r := ProbeModel(ctx, m)
+		r := recheckNegative(ctx, m, ProbeModel(ctx, m))
 
-		l.mu.Lock()
-		if l.OnProbeEdge != nil {
-			if prev, ok := l.availability[m.ID]; ok && prev.State != r.State && prev.State != "" && r.State != "" {
-				go l.OnProbeEdge(m.ID, prev.State, r.State)
-			}
-		}
-		l.availability[m.ID] = r
-		if r.State != StateThrottled {
+		effective, _ := l.applyVerdict(m.ID, r)
+		if effective.State != StateThrottled {
 			allThrottled = false
 		}
-		l.mu.Unlock()
 		// Probe verdicts feed the throttle ledger too: a throttled verdict
 		// opens/extends an episode, a usable one closes it.
-		switch r.State {
+		switch effective.State {
 		case StateThrottled:
 			l.throttle.MarkThrottled(m.ID, 0)
 		case StateAvailable:
@@ -364,14 +396,10 @@ func (l *Lane) ProbeOneCtx(ctx context.Context, model string) ProbeResult {
 		return ProbeResult{Model: model, State: StateUnknown, At: time.Now().UnixMilli()}
 	}
 
-	r := ProbeModel(ctx, entry)
-
-	l.mu.Lock()
-	if prev, ok := l.availability[model]; ok && l.OnProbeEdge != nil && prev.State != r.State && prev.State != "" && r.State != "" {
-		go l.OnProbeEdge(model, prev.State, r.State)
-	}
-	l.availability[model] = r
-	l.mu.Unlock()
+	// The button asks "can this model answer right now", so the raw verdict is
+	// what the caller sees; the stored state is still guarded by live traffic.
+	r := recheckNegative(ctx, entry, ProbeModel(ctx, entry))
+	l.applyVerdict(model, r)
 	switch r.State {
 	case StateThrottled:
 		l.throttle.MarkThrottled(model, 0)
@@ -448,6 +476,11 @@ func (l *Lane) notify() {
 	}
 }
 
+// quotaEgressRetries caps the extra exits one request tries after a 429 while
+// rotation is live. Each retry costs one upstream round-trip and no quota (a
+// refused request never consumed any).
+const quotaEgressRetries = 3
+
 // Complete runs one logical turn: effort budgeting, wire encoding, the
 // fingerprint gate, streaming decode, and — for a cut pure-reasoning turn —
 // one bounded checkpoint recovery request.
@@ -470,6 +503,7 @@ func (l *Lane) Complete(ctx context.Context, req Request, emit func(Chunk)) (Out
 
 	model := requested
 	failovers := 0
+	egressTries := 0
 	tried := map[string]bool{requested: true}
 	for {
 		out, uerr, sawAny := l.attemptModel(ctx, req, model, effort, emit)
@@ -477,6 +511,17 @@ func (l *Lane) Complete(ctx context.Context, req Request, emit func(Chunk)) (Out
 		out.Failovers = failovers
 		if uerr == nil {
 			return out, nil
+		}
+		// Under rotation a 429 is one exit's answer, not the model's: quota is
+		// counted per egress IP and a funded exit may be two hops away, so ask
+		// the pool a few times before believing it. Every retry is a fresh dial
+		// (rotate disables keep-alives) and the node round-robin moves on.
+		if uerr.Code == CodeQuota && !sawAny && RotationActive() && egressTries < quotaEgressRetries {
+			egressTries++
+			continue
+		}
+		if uerr.Code == CodeQuota {
+			l.MarkThrottled(model, uerr.RetryAfter)
 		}
 		// No switch after content reached the caller (it would duplicate
 		// output), on egress-wide failures, or when the caller's own model
@@ -557,7 +602,7 @@ func (l *Lane) nextCandidate(needs Needs, tried map[string]bool) string {
 		if tried[m.ID] || l.throttle.Throttled(m.ID) {
 			continue
 		}
-		switch av[m.ID].State {
+		switch FreshState(av[m.ID]) {
 		case StateUnavailable, StateRegionBlock:
 			continue
 		}
@@ -667,14 +712,12 @@ func (l *Lane) attemptModel(ctx context.Context, req Request, model, effort stri
 
 	if err != nil {
 		l.record(ctx, CallRecord{Model: base, Ok: false, Effort: effort, Agent: req.Agent, At: time.Now().UnixMilli()}, result, err, firstAt)
-		uerr := asUpstream(err)
-		if uerr.Code == CodeQuota {
-			l.MarkThrottled(base, uerr.RetryAfter)
-		}
-		return Outcome{Finish: result.Finish}, uerr, sawAny
+		// The caller decides what a 429 means: under rotation it re-asks the
+		// pool before the model gets a throttle episode.
+		return Outcome{Finish: result.Finish}, asUpstream(err), sawAny
 	}
 	if result.SawFinish {
-		l.MarkOK(base)
+		l.NoteRealSuccess(base)
 		l.record(ctx, CallRecord{Model: base, Ok: true, Effort: effort, Agent: req.Agent, At: time.Now().UnixMilli()}, result, nil, firstAt)
 		return Outcome{Usage: result.Usage, Finish: result.Finish}, nil, true
 	}
@@ -716,7 +759,7 @@ func (l *Lane) attemptModel(ctx context.Context, req Request, model, effort stri
 	}
 	if rerr == nil && recResult.SawFinish && recResult.Finish == FinishStop && recResult.SawText {
 		recResult.Usage.Merge(&result.Usage)
-		l.MarkOK(base)
+		l.NoteRealSuccess(base)
 		l.record(ctx, CallRecord{Model: base, Ok: true, Recovered: true, Effort: effort, Agent: req.Agent, At: time.Now().UnixMilli()}, recResult, nil, firstAt)
 		return Outcome{Usage: recResult.Usage, Finish: recResult.Finish, Recovered: true}, nil, true
 	}

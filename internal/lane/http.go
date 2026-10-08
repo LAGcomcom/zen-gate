@@ -105,20 +105,56 @@ func SetProxy(mode, url string) {
 		t.Proxy = func(*http.Request) (*neturl.URL, error) { return SystemProxyURL(), nil }
 	case "rotate":
 		t.Proxy = nil
-		t.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
-			rotMu.RLock()
-			r := rotator
-			rotMu.RUnlock()
-			if r != nil {
-				return r.Dial(ctx, network, addr)
-			}
-			var d net.Dialer
-			return d.DialContext(ctx, network, addr)
-		}
+		// Free quota is counted per egress IP and DialContext only runs when a
+		// connection is established: with keep-alives on, every request reuses
+		// the first tunnel and rotation quietly pins the process to one IP.
+		t.DisableKeepAlives = true
+		t.DialContext = rotateDialContext
 	default:
 		t.Proxy = http.ProxyFromEnvironment
 	}
 	laneHTTP.Transport = t
+}
+
+// rotateDialContext sends one target out through the node pool, with two
+// exceptions that both end in a plain dial:
+//
+//   - Loopback never reaches a node. A subscription served from this machine
+//     (http://127.0.0.1:21000/sub) would otherwise be handed to a remote node
+//     that dials its own loopback, so the pool could never fill and rotate mode
+//     would lock itself out at every boot.
+//   - A pool that cannot dial falls back to the system egress. An empty node
+//     list is a reason to be slow, not a reason to answer 502 forever.
+func rotateDialContext(ctx context.Context, network, addr string) (net.Conn, error) {
+	if isLoopbackAddr(addr) {
+		var d net.Dialer
+		return d.DialContext(ctx, network, addr)
+	}
+	rotMu.RLock()
+	r := rotator
+	rotMu.RUnlock()
+	if r != nil {
+		if c, err := r.Dial(ctx, network, addr); err == nil {
+			return c, nil
+		} else if ctx.Err() != nil {
+			return nil, err
+		}
+	}
+	var d net.Dialer
+	return d.DialContext(ctx, network, addr)
+}
+
+// isLoopbackAddr reports whether host:port names this machine.
+func isLoopbackAddr(addr string) bool {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		host = addr
+	}
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(strings.Trim(host, "[]"))
+	return ip != nil && ip.IsLoopback()
 }
 
 // Client returns the shared upstream HTTP client (proxy-aware).
@@ -326,13 +362,19 @@ type streamReader struct {
 	src     io.Reader
 	closed  atomic.Bool
 	once    sync.Once
+	quit    chan struct{}
 	mu      sync.Mutex
 	pending []byte
 	idle    time.Duration
 }
 
 func newStreamReader(ctx context.Context, src io.Reader, idle time.Duration) *streamReader {
-	s := &streamReader{ch: make(chan streamChunk, 512), src: src, idle: idle}
+	s := &streamReader{
+		ch:   make(chan streamChunk, 512),
+		src:  src,
+		idle: idle,
+		quit: make(chan struct{}),
+	}
 	go func() {
 		buf := make([]byte, 32*1024)
 		for {
@@ -340,14 +382,12 @@ func newStreamReader(ctx context.Context, src io.Reader, idle time.Duration) *st
 			if k > 0 {
 				cp := make([]byte, k)
 				copy(cp, buf[:k])
-				s.ch <- streamChunk{cp, nil}
+				if !s.emit(streamChunk{cp, nil}) {
+					return
+				}
 			}
 			if err != nil {
-				if err == io.EOF {
-					s.ch <- streamChunk{nil, io.EOF}
-				} else {
-					s.ch <- streamChunk{nil, err}
-				}
+				s.emit(streamChunk{nil, err})
 				return
 			}
 			if s.closed.Load() {
@@ -355,16 +395,37 @@ func newStreamReader(ctx context.Context, src io.Reader, idle time.Duration) *st
 			}
 		}
 	}()
-	go func() {
-		<-ctx.Done()
-		s.Close()
-	}()
+	// The cancel watcher has to die with the stream: the probe path hands this
+	// function context.Background(), whose Done() is a nil channel, so a watcher
+	// waiting on it alone parked one goroutine — and the whole reader with its
+	// chunk buffer — per probe, forever.
+	if done := ctx.Done(); done != nil {
+		go func() {
+			select {
+			case <-done:
+				s.Close()
+			case <-s.quit:
+			}
+		}()
+	}
 	return s
+}
+
+// emit hands one chunk to the reader, and gives up once the stream is closed
+// instead of blocking on a full buffer forever.
+func (s *streamReader) emit(c streamChunk) bool {
+	select {
+	case s.ch <- c:
+		return true
+	case <-s.quit:
+		return false
+	}
 }
 
 func (s *streamReader) Close() {
 	s.once.Do(func() {
 		s.closed.Store(true)
+		close(s.quit)
 		if c, ok := s.src.(io.Closer); ok {
 			_ = c.Close()
 		}
