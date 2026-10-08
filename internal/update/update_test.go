@@ -1,14 +1,20 @@
 package update
 
-import "testing"
+import (
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+	"time"
+)
 
 func TestNewerComparesSemverCorrectly(t *testing.T) {
 	cases := []struct {
 		remote, current string
 		want            bool
 	}{
-		{"1.5.0", "1.4.11", true},  // minor beats patch depth
-		{"1.4.11", "1.4.2", true},  // numeric, not string compare ("11" < "2")
+		{"1.5.0", "1.4.11", true}, // minor beats patch depth
+		{"1.4.11", "1.4.2", true}, // numeric, not string compare ("11" < "2")
 		{"1.4.11", "1.4.11", false},
 		{"1.4.0", "1.4.11", false},
 		{"v1.6.0", "1.5.0", true}, // tag prefix tolerated
@@ -30,5 +36,45 @@ func TestCheckAnswersWithoutFeed(t *testing.T) {
 	}
 	if FeedURL == "" {
 		t.Fatal("FeedURL default must not be empty: the update check would never look anywhere")
+	}
+}
+
+func TestGetRetriesWithoutProxyOnRateLimit(t *testing.T) {
+	n := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n++
+		if n == 1 {
+			w.WriteHeader(403)
+			return
+		}
+		w.Write([]byte(`{"version":"1.6.1"}`))
+	}))
+	defer srv.Close()
+	h := HTTP{Timeout: 5 * time.Second, Client: srv.Client()}
+	data, err := h.Get(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "1.6.1") {
+		t.Fatalf("fallback did not fetch the feed: %s", data)
+	}
+	if n != 2 {
+		t.Fatalf("expected a fallback retry after 403, got %d requests", n)
+	}
+}
+
+func TestGetDoesNotRetryOtherStatuses(t *testing.T) {
+	n := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n++
+		w.WriteHeader(500)
+	}))
+	defer srv.Close()
+	h := HTTP{Timeout: 5 * time.Second, Client: srv.Client()}
+	if _, err := h.Get(srv.URL); err == nil {
+		t.Fatal("a 500 must surface as an error")
+	}
+	if n != 1 {
+		t.Fatalf("non-rate-limit statuses must not be retried, got %d requests", n)
 	}
 }
