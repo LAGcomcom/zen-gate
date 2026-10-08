@@ -86,13 +86,20 @@ func BudgetFor(level string, m ModelInfo, requested, fallback int) int {
 }
 
 // BudgetLadder is the whole ladder as it applies to one model right now.
-func BudgetLadder(m ModelInfo, requested, fallback int) []LevelBudget {
+// defaultLevel marks the rung the user actually configured; an empty value
+// falls back to the package default. Without it the ladder's asterisk stays
+// on balanced even after the user picks deep — requests do follow the
+// setting, only the marker lied.
+func BudgetLadder(m ModelInfo, requested, fallback int, defaultLevel string) []LevelBudget {
+	if defaultLevel == "" {
+		defaultLevel = DefaultLevel
+	}
 	out := []LevelBudget{}
 	for _, lvl := range Levels {
 		out = append(out, LevelBudget{
 			ID: lvl.ID, Name: lvl.Name, ZH: lvl.ZH,
 			Tokens:    BudgetFor(lvl.ID, m, requested, fallback),
-			IsDefault: lvl.ID == DefaultLevel,
+			IsDefault: lvl.ID == defaultLevel,
 		})
 	}
 	return out
@@ -109,11 +116,11 @@ type LevelBudget struct {
 
 // EffortsFor is the declared effort list for one model, descriptions generated
 // from the same BudgetFor call that will decide the request.
-func EffortsFor(m ModelInfo, requested, fallback int) []LevelBudget {
+func EffortsFor(m ModelInfo, requested, fallback int, defaultLevel string) []LevelBudget {
 	if !SupportsEffort(m) {
 		return nil
 	}
-	return BudgetLadder(m, requested, fallback)
+	return BudgetLadder(m, requested, fallback, defaultLevel)
 }
 
 // Kilos formats 16384 → "16K".

@@ -565,7 +565,7 @@ func (s *Server) modelCard(floor lane.ModelInfo, id, ownedBy string, cfg *store.
 		entry["max_output_tokens"] = maxOutput
 	}
 	if reasoning && freeLane {
-		if levels := lane.EffortsFor(floor, 0, cfg.DefaultMaxTokens); len(levels) > 0 {
+		if levels := lane.EffortsFor(floor, 0, cfg.DefaultMaxTokens, cfg.DefaultEffort); len(levels) > 0 {
 			ids := make([]string, 0, len(levels))
 			for _, l := range levels {
 				ids = append(ids, l.ID)

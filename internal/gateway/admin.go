@@ -235,7 +235,7 @@ func (s *Server) adminState(w http.ResponseWriter) {
 			Reasoning:     m.Reasoning,
 			SystemOne:     m.SystemOne,
 			ContextWindow: m.ContextWindow, MaxOutput: m.MaxOutput,
-			Efforts: lane.EffortsFor(m, 0, cfg.DefaultMaxTokens),
+			Efforts: lane.EffortsFor(m, 0, cfg.DefaultMaxTokens, cfg.DefaultEffort),
 			Hidden:  hidden[m.ID],
 		}
 		if tag, ok := s.Store.ModelTagOf(m.ID); ok {
