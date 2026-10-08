@@ -35,8 +35,9 @@ jobs:
         run: |
           $ver = "${{ github.ref_name }}" -replace '^v','' -replace '/','-'
           Copy-Item README.md dist/README.md
+          Copy-Item LICENSE dist/LICENSE
           if (-not (Test-Path dist/zen-gate.exe)) { throw "zen-gate.exe missing" }
-          tar -a -c -f "dist/zen-gate-$ver.zip" -C dist zen-gate.exe README.md
+          tar -a -c -f "dist/zen-gate-$ver.zip" -C dist zen-gate.exe README.md LICENSE
           Get-ChildItem dist
 
       - name: Release
