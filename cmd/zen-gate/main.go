@@ -69,7 +69,11 @@ func main() {
 
 	cfg := st.Config()
 	if *port > 0 {
-		cfg.Port = *port
+		// Publish the override through Mutate and re-read, rather than writing
+		// into the snapshot: everything below (and the gateway's own bind) reads
+		// the port back through Config().
+		st.Mutate(func(c *store.Config) { c.Port = *port })
+		cfg = st.Config()
 	}
 	// v5: providers saved before model selection existed hold full catalog
 	// dumps — trim them to the recommended picks so the 模型 page shows only
@@ -169,7 +173,7 @@ func main() {
 
 	stateText := func(s string) string {
 		return map[string]string{lane.StateAvailable: "可用", lane.StateUnknown: "未知",
-			lane.StateThrottled: "已限额", lane.StateRegionBlock: "地区受限",
+			lane.StateThrottled: "暂时限流·可重试", lane.StateRegionBlock: "地区受限",
 			lane.StateUnavailable: "不可用"}[s]
 	}
 	ln.OnProbeEdge = func(model, from, to string) {
@@ -241,7 +245,7 @@ func main() {
 			if windowHidden {
 				notify.Toast("Zen Gate 有新版本 "+ver, "当前 "+gateway.Version+" · 打开管理页查看下载链接")
 			}
-			st.Config().LastVersion = ver
+			st.Mutate(func(c *store.Config) { c.LastVersion = ver })
 			_ = st.Save()
 			syncEndpoints()
 		}
@@ -437,8 +441,9 @@ func saveWindowState(st *store.Store) {
 	if r-x < 400 || b-y < 300 {
 		return // collapsed or garbage rect — keep the last good state
 	}
-	cfg := st.Config()
-	cfg.Window = store.WindowState{X: x, Y: y, W: r - x, H: b - y, Maximized: window.IsMaximized(mainHwnd)}
+	st.Mutate(func(c *store.Config) {
+		c.Window = store.WindowState{X: x, Y: y, W: r - x, H: b - y, Maximized: window.IsMaximized(mainHwnd)}
+	})
 	_ = st.Save()
 }
 

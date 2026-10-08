@@ -71,7 +71,8 @@ func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request, rest string
 		has, ver := s.updateCheck()
 		writeJSON(w, 200, map[string]any{"ok": true, "has": has, "version": ver})
 	case rest == "key/rotate" && r.Method == http.MethodPost:
-		s.Store.Config().MainKey = store.GenerateKey("")
+		key := store.GenerateKey("")
+		s.Store.Mutate(func(cfg *store.Config) { cfg.MainKey = key })
 		_ = s.Store.Save()
 		writeJSON(w, 200, map[string]any{"ok": true, "key": s.Store.Config().MainKey})
 	case rest == "proxy-test" && r.Method == http.MethodPost:
@@ -362,10 +363,7 @@ func (s *Server) adminState(w http.ResponseWriter) {
 }
 
 func stateOrDefault(p lane.ProbeResult) string {
-	if p.State == "" {
-		return lane.StateUnknown
-	}
-	return p.State
+	return lane.FreshState(p)
 }
 
 // estimateDailyQuota approximates a model's daily free-quota ceiling from
@@ -431,7 +429,11 @@ func (s *Server) adminSettings(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 400, map[string]any{"error": err.Error()})
 		return
 	}
-	cfg := s.Store.Config()
+	// Validate against the published snapshot but write into a local copy: the
+	// settings this handler owns are published in one Mutate at the end, so a
+	// request goroutine never reads a half-written config and a concurrent
+	// provider edit is not rolled back.
+	cfg := *s.Store.Config()
 	changed := false
 	lanChanged := false
 	if in.Port != nil && *in.Port > 0 && *in.Port < 65536 && *in.Port != cfg.Port {
@@ -465,7 +467,7 @@ func (s *Server) adminSettings(w http.ResponseWriter, r *http.Request) {
 	}
 	if in.ProxyMode != nil {
 		switch *in.ProxyMode {
-		case "env", "direct", "custom", "system":
+		case "env", "direct", "custom", "system", "rotate":
 			if *in.ProxyMode == "custom" && (in.ProxyURL == nil || strings.TrimSpace(*in.ProxyURL) == "") && strings.TrimSpace(cfg.ProxyURL) == "" {
 				writeJSON(w, 400, map[string]any{"ok": false, "error": "自定义代理需要填写代理地址"})
 				return
@@ -478,6 +480,11 @@ func (s *Server) adminSettings(w http.ResponseWriter, r *http.Request) {
 				lane.SetProxy(cfg.ProxyMode, cfg.ProxyURL)
 				changed = true
 			}
+		default:
+			// An unrecognised mode used to fall through silently: the panel
+			// said 已保存 and the egress never moved.
+			writeJSON(w, 400, map[string]any{"ok": false, "error": "未知代理模式：" + *in.ProxyMode})
+			return
 		}
 	}
 	if in.ProxyURL != nil && in.ProxyMode == nil {
@@ -562,9 +569,10 @@ func (s *Server) adminSettings(w http.ResponseWriter, r *http.Request) {
 		logChanged = true
 	}
 	if logChanged {
-		s.ApplyLogSettings(cfg)
+		s.ApplyLogSettings(&cfg)
 	}
 	if changed {
+		s.commitSettings(&cfg)
 		_ = s.Store.Save()
 	}
 	if lanChanged {
@@ -582,6 +590,38 @@ func (s *Server) adminSettings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, 200, map[string]any{"ok": true, "changed": changed})
+}
+
+// commitSettings publishes the settings fields this handler owns. It lists them
+// instead of replacing the whole config, so a Providers edit that landed while
+// this request was validating survives it.
+func (s *Server) commitSettings(next *store.Config) {
+	s.Store.Mutate(func(c *store.Config) {
+		c.Port = next.Port
+		c.DefaultMaxTokens = next.DefaultMaxTokens
+		c.DefaultEffort = next.DefaultEffort
+		c.ProbeIntervalMinutes = next.ProbeIntervalMinutes
+		c.CloseToTray = next.CloseToTray
+		c.Notifications = next.Notifications
+		c.UpdateFeed = next.UpdateFeed
+		c.AnnouncementFeed = next.AnnouncementFeed
+		c.StatsServerURL = next.StatsServerURL
+		c.ExposeRegion = next.ExposeRegion
+		c.ProxyMode = next.ProxyMode
+		c.ProxyURL = next.ProxyURL
+		c.SubsEnabled = next.SubsEnabled
+		c.SingBoxPath = next.SingBoxPath
+		c.FailoverEnabled = next.FailoverEnabled
+		c.FailoverMax = next.FailoverMax
+		c.SmartRouting = next.SmartRouting
+		c.RoutingStrategy = next.RoutingStrategy
+		c.LaneFallbackToProviders = next.LaneFallbackToProviders
+		c.AutoTagEnabled = next.AutoTagEnabled
+		c.AllowLan = next.AllowLan
+		c.LogCategories = next.LogCategories
+		c.LogLevel = next.LogLevel
+		c.LogKeepDays = next.LogKeepDays
+	})
 }
 
 // adminModelVisibility updates which models appear in agent pickers and
@@ -605,9 +645,9 @@ func (s *Server) adminModelVisibility(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 400, map[string]any{"ok": false, "error": "missing id"})
 		return
 	}
-	cfg := s.Store.Config()
+	cur := s.Store.Config()
 	set := map[string]bool{}
-	for _, h := range cfg.HiddenModels {
+	for _, h := range cur.HiddenModels {
 		set[h] = true
 	}
 	changed := 0
@@ -627,7 +667,7 @@ func (s *Server) adminModelVisibility(w http.ResponseWriter, r *http.Request) {
 	}
 	if changed > 0 {
 		out := make([]string, 0, len(set))
-		for _, h := range cfg.HiddenModels {
+		for _, h := range cur.HiddenModels {
 			if set[h] {
 				out = append(out, h)
 				delete(set, h)
@@ -636,7 +676,7 @@ func (s *Server) adminModelVisibility(w http.ResponseWriter, r *http.Request) {
 		for h := range set {
 			out = append(out, h)
 		}
-		cfg.HiddenModels = out
+		s.Store.Mutate(func(cfg *store.Config) { cfg.HiddenModels = out })
 		if err := s.Store.Save(); err != nil {
 			writeJSON(w, 500, map[string]any{"ok": false, "error": err.Error()})
 			return
@@ -681,10 +721,13 @@ func (s *Server) adminAnnouncementRead(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	cfg.SeenAnnouncements = append(cfg.SeenAnnouncements, in.ID)
-	if n := len(cfg.SeenAnnouncements); n > 100 {
-		cfg.SeenAnnouncements = cfg.SeenAnnouncements[n-100:]
+	// Copy rather than append: append can write into the snapshot's backing
+	// array, which other goroutines may still be reading.
+	next := append(append([]string{}, cfg.SeenAnnouncements...), in.ID)
+	if n := len(next); n > 100 {
+		next = next[n-100:]
 	}
+	s.Store.Mutate(func(c *store.Config) { c.SeenAnnouncements = next })
 	if err := s.Store.Save(); err != nil {
 		writeJSON(w, 500, map[string]any{"ok": false, "error": err.Error()})
 		return
@@ -828,17 +871,18 @@ func (s *Server) adminSubsSave(w http.ResponseWriter, r *http.Request) {
 		}
 		clean = append(clean, it)
 	}
-	cfg := s.Store.Config()
-	cfg.SubsEnabled = in.Enabled
-	cfg.Subscriptions = clean
+	s.Store.Mutate(func(cfg *store.Config) {
+		cfg.SubsEnabled = in.Enabled
+		cfg.Subscriptions = clean
+	})
 	_ = s.Store.Save()
 	if s.logger != nil {
 		s.logger.Infof("订阅轮询 = %v (%d 个订阅)", in.Enabled, len(clean))
 	}
 	if !in.Enabled {
 		s.subs.Stop()
-		if cfg.ProxyMode == "rotate" {
-			cfg.ProxyMode = "env"
+		if s.Store.Config().ProxyMode == "rotate" {
+			s.Store.Mutate(func(cfg *store.Config) { cfg.ProxyMode = "env" })
 			_ = s.Store.Save()
 			lane.SetProxy("env", "")
 			lane.SetRotator(nil)
@@ -1042,9 +1086,15 @@ func (s *Server) adminUsageCSV(w http.ResponseWriter, r *http.Request) {
 	cw.Flush()
 }
 
-// adminExport downloads config.json.
+// adminExport downloads config.json. Keys are masked unless the caller asks
+// for ?secrets=1, because this file is the one people attach to a bug report —
+// migrating to another machine is the only case that needs the real ones.
 func (s *Server) adminExport(w http.ResponseWriter, r *http.Request) {
-	data, err := json.MarshalIndent(s.Store.Config(), "", "  ")
+	src := s.Store.Masked()
+	if r.URL.Query().Get("secrets") == "1" {
+		src = s.Store.Config()
+	}
+	data, err := json.MarshalIndent(src, "", "  ")
 	if err != nil {
 		writeJSON(w, 500, map[string]any{"error": err.Error()})
 		return
@@ -1070,6 +1120,28 @@ func (s *Server) adminImport(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 400, map[string]any{"ok": false, "error": "配置缺少 MainKey 或端口不合法"})
 		return
 	}
+	// Restoring a masked export (what 导出配置 produces by default) is the
+	// ordinary case, so its placeholders must not land as credentials: keep this
+	// machine's gateway key and leave the others unconfigured rather than
+	// importing a string that would fail as a key.
+	if incoming.MainKey == store.MaskedValue {
+		incoming.MainKey = s.Store.Config().MainKey
+	}
+	for k, v := range incoming.AgentKeys {
+		if v == store.MaskedValue {
+			incoming.AgentKeys[k] = ""
+		}
+	}
+	for i := range incoming.Providers {
+		if incoming.Providers[i].APIKey == store.MaskedValue {
+			incoming.Providers[i].APIKey = ""
+		}
+	}
+	for i := range incoming.Subscriptions {
+		if incoming.Subscriptions[i].URL == store.MaskedValue {
+			incoming.Subscriptions[i].URL = ""
+		}
+	}
 	port := s.Store.Config().Port
 	incoming.Port = port
 	if incoming.AgentKeys == nil {
@@ -1090,7 +1162,7 @@ func (s *Server) adminImport(w http.ResponseWriter, r *http.Request) {
 	if incoming.ProxyMode == "" {
 		incoming.ProxyMode = "env"
 	}
-	*s.Store.Config() = incoming
+	s.Store.Replace(incoming)
 	_ = s.Store.Save()
 	if s.logger != nil {
 		s.logger.Infof("config imported; %d agent keys", len(incoming.AgentKeys))
