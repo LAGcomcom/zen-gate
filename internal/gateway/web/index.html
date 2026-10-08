@@ -480,8 +480,20 @@ let STATE = null;
 function toast(m){ const t=$("#toast"); t.textContent=m; t.style.display="block";
   t.style.animation="none"; void t.offsetWidth; t.style.animation="";
   clearTimeout(t._h); t._h=setTimeout(()=>t.style.display="none",2400); }
-function esc(s){ return (s||"").replace(/[<>&]/g,c=>({"<":"&lt;",">":"&gt;","&":"&amp;"}[c])); }
+function esc(s){ return (s||"").replace(/[<>&"']/g,c=>({"<":"&lt;",">":"&gt;","&":"&amp;",'"':"&#34;","'":"&#39;"}[c])); }
+/* 详情/发布页/申请 Key links point outside the app, and the announcement feed
+   is not ours: a javascript: href survives escaping and runs in the admin page. */
+function safeHref(u){ const s=String(u==null?"":u); return /^https?:\/\/\S/.test(s)?s:"#"; }
 function fmtN(n){ return n>=1e6?(n/1e6).toFixed(1)+"M":n>=1e3?(n/1e3).toFixed(0)+"K":String(n||0); }
+/* 系统信息 shows one label per proxy mode — an unmapped mode used to print its
+   raw key ("system", "rotate") where 设置 has Chinese names for it. */
+function proxyLabel(mode,url){ if(mode==="custom") return url||"自定义 URL（未填）"; return {system:"跟随系统代理",env:"跟随环境变量",direct:"直连",rotate:"订阅轮询 (sing-box)"}[mode]||mode||"未知"; }
+/* The 10-second state refresh must never overwrite the field the user is
+   typing in. */
+function fill(el,v){ if(el&&document.activeElement!==el) el.value=(v==null?"":String(v)); }
+/* 日志 auto-refresh follows the visible page: opening it from the overview (or
+   booting straight into it) used to leave a static list. */
+function syncLogTimer(t){ if(cur==="logs") return t||setInterval(()=>{ if(cur==="logs") renderLogs(); },5000); if(t) clearInterval(t); return null; }
 function fmtK(n){ return n>=1e6?(n/1e6).toFixed(1)+"M":n>=1e3?(n/1e3).toFixed(0)+"K":String(n||0); }
 /* Providers publish capacities both ways: 128000 (decimal, "128K") and 131072
    (binary, also "128K"). Read the number the way the vendor wrote it. */
@@ -499,7 +511,7 @@ async function api(path,body){
   return j;
 }
 function statePill(st){ const c={available:"ok",unknown:"unknown","region-blocked":"warn",throttled:"warn",unavailable:"bad",custom:"custom"}[st]||"unknown";
-  const t={available:"可用",unknown:"未探测","region-blocked":"地区受限",throttled:"已限额",unavailable:"不可用",custom:"自定义"}[st]||st;
+  const t={available:"可用",unknown:"未探测","region-blocked":"地区受限",throttled:"暂时限流·可重试",unavailable:"不可用",custom:"自定义"}[st]||st;
   return `<span class="pill ${c}">${t}</span>`; }
 const cssVar = (n,f) => (getComputedStyle(document.documentElement).getPropertyValue(n)||f).trim();
 
@@ -582,10 +594,7 @@ function nav(){
       `<button data-p="${id}" title="${label}" class="${id===cur?"on":""}">${icon(ic)}<span class="lbl">${label}</span></button>`).join("");
   }
   $("#nav").innerHTML = html;
-  $("#nav").querySelectorAll("button").forEach(b=>b.onclick=()=>{ cur=b.dataset.p; localStorage.setItem("zengate.page",cur); nav(); render();
-    if (cur==="logs") { renderLogs(); if(logTimer) clearInterval(logTimer); logTimer = setInterval(()=>{ if(cur==="logs") renderLogs(); }, 5000); }
-    else if (logTimer) { clearInterval(logTimer); logTimer = null; }
-  });
+  $("#nav").querySelectorAll("button").forEach(b=>b.onclick=()=>{ cur=b.dataset.p; localStorage.setItem("zengate.page",cur); nav(); render(); logTimer = syncLogTimer(logTimer); });
 
   // 侧栏伸缩（记忆状态）
   const side = document.getElementById("side");
@@ -617,6 +626,7 @@ function render(){ if(!STATE) return; const s=STATE;
   $("#egress-foot").textContent = s.egress&&s.egress.ip ? `${s.egress.ip} (${s.egress.country||"?"})` : "出口未知";
   renderDash(s); renderAgents(s); renderModels(s); renderProviders(s); renderAccess(s); renderUsage(s); renderSettings(s);
   if (cur === "logs") renderLogs();
+  logTimer = syncLogTimer(logTimer);
   renderDashExtras(s);
 }
 
@@ -633,7 +643,7 @@ function renderDash(s){
   const banner = s.settings.updateAvailable ? `
     <div class="card" style="border-color:var(--accent); display:flex; justify-content:space-between; align-items:center; gap:10px; padding:10px 16px; margin-bottom:12px">
       <span>发现新版本 <b>${esc(s.settings.updateVersion)}</b>（当前 ${esc(s.version)}）</span>
-      <span style="display:flex; gap:8px; align-items:center">${updAct}<a href="${esc(s.settings.updateURL||"#")}" target="_blank" style="font-size:13px">发布页 →</a></span>
+      <span style="display:flex; gap:8px; align-items:center">${updAct}<a href="${esc(safeHref(s.settings.updateURL))}" target="_blank" style="font-size:13px">发布页 →</a></span>
     </div>` : "";
   // 公告卡常驻总览：critical/warn/info 分级着色，未读高亮 + 可标记已读；
   // 卡片只显示最新 2 条，「过往公告」弹窗里看全部（含已结束归档）。
@@ -649,7 +659,7 @@ function renderDash(s){
           ${a.start?`<span class="muted" style="font-size:11px; margin-left:6px">${esc(a.start)}${a.end?" ~ "+esc(a.end):""}</span>`:""}
         </span>
         <span style="display:flex; gap:8px; align-items:center">
-          ${a.url?`<a href="${esc(a.url)}" target="_blank" style="font-size:12px; color:var(--accent)">详情 →</a>`:""}
+          ${a.url?`<a href="${esc(safeHref(a.url))}" target="_blank" style="font-size:12px; color:var(--accent)">详情 →</a>`:""}
           ${a.unread&&!ended?`<button class="ghost ann-read" data-id="${esc(a.id)}" style="padding:2px 10px; font-size:11.5px">知道了</button>`:""}
         </span>
       </div>
@@ -726,7 +736,7 @@ function renderDash(s){
         <div class="kv"><span class="k">已运行</span><span class="v" id="uptime-val">${s.uptimeSec!=null ? fmtUptime(s.uptimeSec) : esc(s.uptime)}</span></div>
         <div class="kv"><span class="k">数据目录</span><span class="v mono" style="font-size:11px">${esc(s.dataDir)}</span></div>
         <div class="kv"><span class="k">出口</span><span class="v mono">${esc(s.egress&&s.egress.ip ? s.egress.ip+" ("+(s.egress.country||"?")+")" : "未知")}</span></div>
-        <div class="kv"><span class="k">代理</span><span class="v">${esc(s.settings.proxyMode==="custom" ? s.settings.proxyURL : {env:"跟随环境变量",direct:"直连"}[s.settings.proxyMode]||s.settings.proxyMode)}</span></div>
+        <div class="kv"><span class="k">代理</span><span class="v">${esc(proxyLabel(s.settings.proxyMode, s.settings.proxyURL))}</span></div>
         <div class="kv"><span class="k">托盘 / 通知</span><span class="v">${s.settings.closeToTray?"开":"关"} / ${s.settings.notifications?"开":"关"}</span></div>
       </div>
     </div>`;
@@ -1026,7 +1036,7 @@ function renderModels(s){
       if(m.throttledAt){
         const since = fmtUptime(Math.max(1,(Date.now()-m.throttledAt)/1000));
         const eta = m.recoverEta ? ` · 预计 ${new Date(m.recoverEta).toTimeString().slice(0,5)} 恢复` : "";
-        parts.push(`<div class="qtext warn2">已限额 ${since}${eta}</div>`);
+        parts.push(`<div class="qtext warn2">暂时限流 ${since}${eta}</div>`);
       }
       if(parts.length) quotaRow = `<div class="mquota">${parts.join("")}</div>`;
     }
@@ -1068,7 +1078,7 @@ function renderModels(s){
         const r = j.result;
         const sec = r.ttftMs ? "首字 " + (r.ttftMs/1000).toFixed(1) + "s" : "";
         if(r.state==="available") toast("✓ 可用" + (sec?" · "+sec:""));
-        else if(r.state==="throttled") toast("已限额 —— 请求在生成前就被拒绝，没有首字数据" + (r.detail?" · "+String(r.detail).slice(0,80):""));
+        else if(r.state==="throttled") toast("暂时限流·可重试 —— 请求在生成前就被拒绝，没有首字数据" + (r.detail?" · "+String(r.detail).slice(0,80):""));
         else if(r.state==="unavailable") toast("不可用 · " + (r.detail||""));
         else toast("探测未成功 · " + (r.detail||"上游无响应，稍后再试"));
       }
@@ -1243,7 +1253,7 @@ function renderProviders(s){
           [["openai","OpenAI 兼容"],["anthropic","Anthropic 兼容"]], p.protocol||"openai", null);
         el.querySelector("#pv-preset-hint").innerHTML =
           esc(p.name) + "：" + esc(p.note||"") +
-          (p.keyUrl ? ` · <a href="${esc(p.keyUrl)}" target="_blank" style="color:var(--accent)">申请 Key →</a>` : "");
+          (p.keyUrl ? ` · <a href="${esc(safeHref(p.keyUrl))}" target="_blank" style="color:var(--accent)">申请 Key →</a>` : "");
         pvRenderPicker();
         el.querySelector("#pv-name").scrollIntoView({behavior:"smooth", block:"center"});
       };
@@ -1385,7 +1395,7 @@ function renderAccess(s){
         ["ChatWise","设置 → 提供商 → + 自定义（OpenAI 兼容 / Anthropic 兼容均可）"],
         ["Cline / Roo Code","VS Code 扩展设置里选 OpenAI Compatible，填 Base URL 与 Key（需手动）"],
         ["Claude Code","环境变量 ANTHROPIC_BASE_URL=" + s.baseURL.replace(/\/v1$/,"") + "，ANTHROPIC_AUTH_TOKEN=主 Key"],
-        ["OpenAI SDK / 任意语言","base_url 指向 Base URL，鉴权用 Bearer 主 Key，模型列表见 /v1/models"],
+        ["OpenAI SDK / 任意语言","base_url 指向 Base URL，鉴权用 Bearer 主 Key；/v1/models 除模型名还带上下文 / 输出上限 / 输入模态 / 思考档位与 capability_source（实测 > 上游声明 > AI标注 > 规则）"],
       ].map(([n,d])=>`<div class="ccard"><div class="cn">${esc(n)}</div><div class="cd">${esc(d)}</div>
         <button class="ghost" data-copy="${s.baseURL}">复制 Base URL</button></div>`).join("")}
     </div>
@@ -1894,7 +1904,7 @@ function renderSettings(s){
         </div>
         <div class="row" style="margin-top:10px">
           <div style="flex:1">
-            <div class="dim" style="font-size:12px;margin-bottom:4px">订阅 URL（一行一个，支持 vless / vmess / ss / trojan / hy2 / tuic 节点）</div>
+            <div class="dim" style="font-size:12px;margin-bottom:4px">订阅 URL（一行一个，支持 vless / vmess / ss / trojan / anytls / hy2 / tuic 节点）</div>
             <textarea id="subs-urls" rows="3" style="width:100%;background:var(--panel-2);border:1px solid var(--hairline);color:var(--ink);border-radius:6px;padding:6px 9px;font-family:var(--mono);font-size:12px" placeholder="https://example.com/api/v1/client/subscribe?token=..."></textarea>
           </div>
         </div>
@@ -1911,7 +1921,8 @@ function renderSettings(s){
       <div class="card">
         <h3>数据</h3>
         <div class="row">
-          <button class="ghost" id="btn-export">导出配置 (JSON)</button>
+          <button class="ghost" id="btn-export" title="密钥、供应商 Key 与订阅链接一律写成占位符，适合贴给他人排查">导出配置 (隐去密钥)</button>
+          <button class="ghost" id="btn-export-keys" title="含明文密钥，仅用于换机迁移">导出含密钥</button>
           <button class="ghost" id="btn-import">导入配置</button>
           <input type="file" id="import-file" accept=".json" style="display:none">
           <button class="ghost" id="btn-csv">导出用量 (CSV)</button>
@@ -1965,6 +1976,7 @@ function renderSettings(s){
       }
     };
     el.querySelector("#btn-export").onclick = ()=>{ window.location.href = "/admin/api/export"; };
+    el.querySelector("#btn-export-keys").onclick = ()=>{ if(confirm("这份文件包含全部明文密钥与订阅链接，请只通过安全渠道传输。")) window.location.href = "/admin/api/export?secrets=1"; };
     el.querySelector("#btn-csv").onclick = ()=>{ window.location.href = "/admin/api/usage.csv"; };
     el.querySelector("#btn-import").onclick = ()=>{ el.querySelector("#import-file").click(); };
     el.querySelector("#import-file").onchange = async e => {
@@ -1972,7 +1984,7 @@ function renderSettings(s){
       const text = await file.text();
       let body; try { body = JSON.parse(text); } catch(err){ toast("不是合法 JSON"); return; }
       const j = await api("/import", body);
-      if(j){ toast("配置已导入（端口保持不变）"); refresh(); }
+      if(j){ toast("配置已导入（端口保持不变；隐去密钥的导出会保留本机密钥）"); refresh(); }
       e.target.value = "";
     };
     el.querySelector("#btn-proxy-test").onclick = async () => {
@@ -2034,15 +2046,15 @@ function renderSettings(s){
     };
     el.dataset.rendered = "1";
   }
-  el.querySelector("#set-max").value = s.settings.defaultMaxTokens;
-  el.querySelector("#set-probe").value = s.settings.probeIntervalMinutes;
+  fill(el.querySelector("#set-max"), s.settings.defaultMaxTokens);
+  fill(el.querySelector("#set-probe"), s.settings.probeIntervalMinutes);
   makeDropdown(el.querySelector("#set-effort"),
     [["light","Light · 精简 (2K)"],["balanced","Balanced · 均衡 (8K)"],["deep","Deep · 深思 (模型上限)"]],
     s.settings.defaultEffort || "balanced", null);
   makeDropdown(el.querySelector("#set-proxy"),
     [["system","跟随系统代理"],["env","跟随环境变量"],["direct","直连"],["custom","自定义 URL"],["rotate","订阅轮询 (sing-box)"]],
     s.settings.proxyMode || "env", null);
-  el.querySelector("#set-proxy-url").value = s.settings.proxyURL || "";
+  fill(el.querySelector("#set-proxy-url"), s.settings.proxyURL);
   // --- 订阅轮询状态同步（每次刷新重绘节点表） ---
   const sub = s.subscriptions || {items:[], singbox:{}};
   const ta = el.querySelector("#subs-urls");
