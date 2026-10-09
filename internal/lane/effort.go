@@ -28,6 +28,11 @@ const DefaultLevel = "balanced"
 // MinBudget is the floor no level may go below.
 const MinBudget = 512
 
+// defaultUnknownCapacity is the deep-rung ceiling for a model whose output
+// limit nothing states — conservative, and only a default: an explicit
+// request.max_tokens outranks it (see BudgetFor).
+const defaultUnknownCapacity = 32768
+
 // AlwaysThinkingFactor widens every rung for models whose thinking cannot be
 // switched off — thinking and the visible answer share one ceiling.
 const AlwaysThinkingFactor = 2
@@ -61,17 +66,21 @@ func usableTokens(v int) int {
 }
 
 // BudgetFor resolves the generation ceiling for one level against one model.
-// The level ceiling controls; model capacity and caller request can only
-// lower it, never raise it.
+// The level ceiling (light/balanced) always controls. Below it, the model's
+// capacity is the deep-rung ceiling — but it is a curated local guess, so a
+// caller that states max_tokens outright overrides it rather than being
+// silently clamped back to a guessed 32768 (issue #27: a real 128K deep-think
+// request never reached the upstream). With no explicit request, the
+// defaultMaxTokens fallback still caps the guess from above ("只压低不抬高" —
+// the intended semantics, see #23).
 func BudgetFor(level string, m ModelInfo, requested, fallback int) int {
 	capacity := m.MaxOutput
-	if m.MaxOutput <= 0 {
-		capacity = 32768
+	if capacity <= 0 {
+		capacity = defaultUnknownCapacity
 	}
-	if r := usableTokens(requested); r < capacity {
-		capacity = r
-	}
-	if f := usableTokens(fallback); f < capacity {
+	if requested > 0 {
+		capacity = requested
+	} else if f := usableTokens(fallback); f < capacity {
 		capacity = f
 	}
 	lvl := ResolveLevel(level, m)

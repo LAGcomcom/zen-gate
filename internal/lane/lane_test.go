@@ -424,6 +424,33 @@ func TestBudgetForAlwaysThinkingDoubled(t *testing.T) {
 	}
 }
 
+// TestBudgetForExplicitRequestWins pins the issue #27 semantics: a client that
+// states max_tokens outright is not silently clamped to the local guess table
+// (the old code capped a 128K request at the 32768 fallback and the user's
+// setting looked inert). An explicit request may exceed m.MaxOutput — the
+// upstream is the authority on rejection — while the ladder rungs below deep
+// keep controlling, and with no explicit request defaultMaxTokens still caps
+// from above ("只压低不抬高", #23).
+func TestBudgetForExplicitRequestWins(t *testing.T) {
+	guessed := ModelInfo{MaxOutput: 32768, Reasoning: true, CanDisableThinking: true}
+	if got := BudgetFor("deep", guessed, 128000, 32768); got != 128000 {
+		t.Fatalf("explicit 128K must survive a 32K guessed table, got %d", got)
+	}
+	// light/balanced rungs still cap below an oversized explicit request.
+	if got := BudgetFor("balanced", guessed, 128000, 32768); got != 8192 {
+		t.Fatalf("balanced must stay 8192 despite the request, got %d", got)
+	}
+	// No explicit request: the fallback caps the table value from above.
+	table := ModelInfo{MaxOutput: 131072, Reasoning: true, CanDisableThinking: true}
+	if got := BudgetFor("deep", table, 0, 32768); got != 32768 {
+		t.Fatalf("fallback must cap an unset request, got %d", got)
+	}
+	// Unknown table (MaxOutput 0) + no request: conservative default stands.
+	if got := BudgetFor("deep", ModelInfo{Reasoning: true}, 0, 0); got != defaultUnknownCapacity {
+		t.Fatalf("unknown capacity must inherit the default, got %d", got)
+	}
+}
+
 // --- catalog -----------------------------------------------------------------
 
 func TestBuildCatalogFiltersAndDedupes(t *testing.T) {

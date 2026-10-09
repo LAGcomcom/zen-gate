@@ -158,19 +158,31 @@ func (z *zcode) Enable(o Options) error {
 		kept = append(kept, existing)
 	}
 	for _, m := range o.Models {
-		entry := map[string]any{
+		cfgMap := map[string]any{
+			"properties": map[string]any{"contextWindow": m.ContextWindow},
+		}
+		// Write the whole optionSpecs, not just the thought selector: whatever
+		// key we omit, ZCode fills from its own built-in metadata, and the
+		// mixed rule contradicts itself (issue #27) — the picker shows ZCode's
+		// [disabled,enabled,max] ladder while the gateway honours
+		// [light,balanced,deep], and an unset maxOutputTokens pins every model
+		// to ZCode's 128K default: too high for a 32K model, unreachable for a
+		// 943K one.
+		specs := map[string]any{}
+		if m.Reasoning {
+			specs["reasoningLevel"] = reasoningLevelSpec()
+		}
+		if m.MaxOutput > 0 {
+			specs["maxOutputTokens"] = map[string]any{"max": m.MaxOutput}
+		}
+		if len(specs) > 0 {
+			cfgMap["optionSpecs"] = specs
+		}
+		kept = append(kept, map[string]any{
 			"modelId":    m.ID,
 			"providerId": stableProviderID,
-			"config": map[string]any{
-				"properties": map[string]any{"contextWindow": m.ContextWindow},
-			},
-		}
-		if m.Reasoning {
-			entry["config"].(map[string]any)["optionSpecs"] = map[string]any{
-				"reasoningLevel": reasoningLevelSpec(),
-			}
-		}
-		kept = append(kept, entry)
+			"config":     cfgMap,
+		})
 	}
 	mcr["providerModelRules"] = kept
 	// ZCode's zod schema demands this key be an array, and an empty one is
