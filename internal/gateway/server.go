@@ -32,6 +32,13 @@ import (
 // Version is the running build; overridable via -ldflags.
 var Version = "1.1.0"
 
+// maxRequestBody bounds one chat/responses/messages request body. The old
+// 8MB cap rejected normal vision traffic — a handful of base64 screenshots
+// (4/3 inflation) plus conversation history sail past it and the client just
+// sees "invalid request body: http: request body too large" (issue #30).
+// 64MB stays a sane ceiling for pasted images without inviting memory abuse.
+const maxRequestBody = 64 << 20
+
 //go:embed web/favicon.png
 var faviconPNG []byte
 

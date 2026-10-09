@@ -153,7 +153,7 @@ type anthropicStreamState struct {
 
 func (s *Server) handleAnthropicMessages(w http.ResponseWriter, r *http.Request) {
 	var req anthropicRequest
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 8<<20)).Decode(&req); err != nil {
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxRequestBody)).Decode(&req); err != nil {
 		writeJSON(w, 400, map[string]any{"type": "error", "error": map[string]any{"type": "invalid_request_error", "message": err.Error()}})
 		return
 	}

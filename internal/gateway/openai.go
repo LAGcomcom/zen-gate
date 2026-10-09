@@ -265,7 +265,7 @@ func convertOpenAITools(in []openaiToolDef) []lane.ToolDef {
 
 func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	var req openaiChatRequest
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 8<<20)).Decode(&req); err != nil {
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxRequestBody)).Decode(&req); err != nil {
 		writeJSON(w, 400, openaiError("invalid request body: "+err.Error(), "invalid_request_error"))
 		return
 	}
@@ -586,7 +586,15 @@ func (e *chatEmitter) stream(c lane.Chunk) []struct{ delta map[string]any } {
 	case lane.ChunkTextDelta:
 		out = append(out, struct{ delta map[string]any }{map[string]any{"content": c.Delta}})
 	case lane.ChunkReasonDelta:
-		out = append(out, struct{ delta map[string]any }{map[string]any{"reasoning": c.Delta}})
+		// Both spellings, always: non-streaming responses carry the thinking
+		// under reasoning_content (the DeepSeek/GLM-family de facto standard
+		// ZCode-class clients parse), while "reasoning" is what OpenRouter-
+		// family clients read. Sending only one silently loses the thinking
+		// process on the other half of the ecosystem (issue #31).
+		out = append(out, struct{ delta map[string]any }{map[string]any{
+			"reasoning":         c.Delta,
+			"reasoning_content": c.Delta,
+		}})
 	case lane.ChunkBlockStart:
 		if c.BlockType == "tool-call" {
 			if e.openTool == nil {
@@ -762,7 +770,7 @@ func convertResponsesInput(raw json.RawMessage, instructions string) []lane.Mess
 
 func (s *Server) handleResponses(w http.ResponseWriter, r *http.Request) {
 	var req responsesRequest
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 8<<20)).Decode(&req); err != nil {
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxRequestBody)).Decode(&req); err != nil {
 		writeJSON(w, 400, openaiError("invalid request body: "+err.Error(), "invalid_request_error"))
 		return
 	}
