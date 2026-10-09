@@ -2,7 +2,8 @@ MIT License
 
 Copyright (c) 2026 LAGcomcom
 Portions of the lane protocol (internal/lane) are derived from
-dsh-our-free-model by zouyuxuan122 (MIT).
+dsh-our-free-model by zouyuxuan122 (MIT). The embedded QoderCN gateway
+(internal/qoderhub) is derived from qodercn-gateway by Tiancheng Lu (MIT).
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal

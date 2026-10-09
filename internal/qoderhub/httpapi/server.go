@@ -1,0 +1,2482 @@
+package httpapi
+
+import (
+	"bytes"
+	"context"
+	"crypto/subtle"
+	"encoding/base64"
+	"encoding/json"
+	"fmt"
+	"image"
+	_ "image/gif"
+	"image/jpeg"
+	_ "image/png"
+	"net/http"
+	"os"
+	"strconv"
+	"strings"
+	"time"
+
+	"zen-gate/internal/qoderhub/remote"
+	"zen-gate/internal/qoderhub/service"
+	"zen-gate/internal/qoderhub/tooltypes"
+	"zen-gate/internal/qoderhub/version"
+)
+
+type Server struct {
+	svc  *service.Service
+	http *http.Server
+	sem  chan struct{}
+	// authKeys, when non-empty, gates every request behind an Authorization:
+	// Bearer or x-api-key match. Empty (the default) means open access.
+	authKeys map[string]struct{}
+}
+
+type anthropicRequest struct {
+	Model         string         `json:"model"`
+	MaxTokens     int            `json:"max_tokens,omitempty"`
+	System        any            `json:"system,omitempty"`
+	Messages      []rawMessage   `json:"messages"`
+	Stream        bool           `json:"stream,omitempty"`
+	Tools         any            `json:"tools,omitempty"`
+	ToolChoice    any            `json:"tool_choice,omitempty"`
+	Temperature   *float64       `json:"temperature,omitempty"`
+	TopP          *float64       `json:"top_p,omitempty"`
+	TopK          int            `json:"top_k,omitempty"`
+	StopSequences []string       `json:"stop_sequences,omitempty"`
+	Metadata      map[string]any `json:"metadata,omitempty"`
+	Thinking      any            `json:"thinking,omitempty"`
+	// OutputConfig carries newer Claude Code fields; effort is read from
+	// output_config.effort. Effort is the top-level fallback location.
+	OutputConfig map[string]any `json:"output_config,omitempty"`
+	Effort       string         `json:"effort,omitempty"`
+}
+
+type openAIChatRequest struct {
+	Model               string         `json:"model"`
+	Messages            []rawMessage   `json:"messages"`
+	Stream              bool           `json:"stream,omitempty"`
+	StreamOptions       *streamOptions `json:"stream_options,omitempty"`
+	MaxTokens           int            `json:"max_tokens,omitempty"`
+	MaxCompletionTokens int            `json:"max_completion_tokens,omitempty"`
+	Tools               any            `json:"tools,omitempty"`
+	ToolChoice          any            `json:"tool_choice,omitempty"`
+	ParallelToolCalls   *bool          `json:"parallel_tool_calls,omitempty"`
+	Temperature         *float64       `json:"temperature,omitempty"`
+	TopP                *float64       `json:"top_p,omitempty"`
+	Stop                any            `json:"stop,omitempty"`
+	PresencePenalty     float64        `json:"presence_penalty,omitempty"`
+	FrequencyPenalty    float64        `json:"frequency_penalty,omitempty"`
+	Logprobs            bool           `json:"logprobs,omitempty"`
+	TopLogprobs         int            `json:"top_logprobs,omitempty"`
+	ResponseFormat      any            `json:"response_format,omitempty"`
+	Seed                int            `json:"seed,omitempty"`
+	User                string         `json:"user,omitempty"`
+	ReasoningEffort     string         `json:"reasoning_effort,omitempty"`
+}
+
+// streamOptions mirrors OpenAI's stream_options. We suppress the trailing usage
+// chunk only on an explicit include_usage=false, so clients that omit it still
+// get real token counts.
+type streamOptions struct {
+	IncludeUsage bool `json:"include_usage"`
+}
+
+type rawMessage struct {
+	Role             string `json:"role"`
+	Content          any    `json:"content"`
+	ToolCalls        []any  `json:"tool_calls,omitempty"`
+	ToolCallID       string `json:"tool_call_id,omitempty"`
+	ReasoningContent string `json:"reasoning_content,omitempty"`
+}
+
+func NewServer(addr string, svc *service.Service) *Server {
+	s := &Server{
+		svc: svc,
+		sem: make(chan struct{}, maxConcurrentRequests()),
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", s.handleRoot)
+	mux.HandleFunc("/health", s.handleRoot)
+	mux.HandleFunc("/v1/models", s.handleModels)
+	mux.HandleFunc("/version", s.handleVersion)
+	mux.HandleFunc("/quota", s.handleQuota)
+	mux.HandleFunc("/v1/quota", s.handleQuota)
+	mux.HandleFunc("/v1/images/search", s.handleImageSearch)
+	mux.HandleFunc("/v1/images/generations", s.handleImageGenerations)
+	mux.HandleFunc("/v1/messages", s.handleAnthropicMessages)
+	mux.HandleFunc("/v1/chat/completions", s.handleOpenAIChatCompletions)
+	mux.HandleFunc("/api/v1/chat/completions", s.handleOpenAIChatCompletions)
+
+	s.http = &http.Server{
+		Addr: addr,
+		// Auth wraps the mux directly: unauthenticated requests are dropped before
+		// their body is read/parsed (keeps the silent drop cheap).
+		Handler:           withCORS(s.withAuth(mux)),
+		ReadHeaderTimeout: 10 * time.Second,
+	}
+	return s
+}
+
+func (s *Server) ListenAndServe() error {
+	return s.http.ListenAndServe()
+}
+
+func (s *Server) Shutdown(ctx context.Context) error {
+	err := s.http.Shutdown(ctx)
+	if err != nil {
+		if forceErr := s.http.Close(); forceErr != nil {
+			err = fmt.Errorf("%w; force close failed: %v", err, forceErr)
+		} else {
+			err = nil
+		}
+	}
+	closeErr := s.svc.Close()
+	if err != nil {
+		return err
+	}
+	return closeErr
+}
+
+func (s *Server) SetDefaultModel(model string) {
+	s.svc.SetDefaultModel(model)
+}
+
+func (s *Server) applyDefaultModel(req *service.ChatRequest) {
+	if strings.TrimSpace(req.Model) == "" {
+		req.Model = s.svc.DefaultModel()
+	}
+	// Diagnostic switch: QODERCN_DISABLE_THINKING forces reasoning off for every
+	// request, for clients (e.g. Claude Code) that cannot disable extended
+	// thinking themselves. "none" propagates to the gateway (enable_thinking=false)
+	// and makes reasoningEffortEnabled() drop any stray thinking deltas, so the
+	// client receives a text-only response.
+	if truthyEnv("QODERCN_DISABLE_THINKING") {
+		req.ReasoningEffort = "none"
+	}
+}
+
+func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path != "/" && r.URL.Path != "/health" {
+		writeOpenAIError(w, http.StatusNotFound, "not_found_error", "not found")
+		return
+	}
+	if r.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	if r.Method == http.MethodHead {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+	if r.Method != http.MethodGet {
+		writeOpenAIError(w, http.StatusMethodNotAllowed, "invalid_request_error", "method not allowed")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":      true,
+		"service": "zen-gate",
+		"state":   s.svc.State(),
+	})
+}
+
+func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	if r.Method != http.MethodGet {
+		writeOpenAIError(w, http.StatusMethodNotAllowed, "invalid_request_error", "method not allowed")
+		return
+	}
+
+	models, err := s.svc.ListModels(r.Context())
+	if err != nil {
+		writeOpenAIError(w, http.StatusInternalServerError, "api_error", err.Error())
+		return
+	}
+
+	data := make([]map[string]any, 0, len(models))
+	created := time.Now().Unix()
+	for _, model := range models {
+		data = append(data, modelObject(model, created))
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"object": "list",
+		"data":   data,
+	})
+}
+
+// modelObject merges the full upstream model object (model.Raw) with the
+// canonical OpenAI fields (id/name/gateway_key). Raw is empty for non-remote
+// backends, leaving only the canonical fields.
+func modelObject(model service.Model, created int64) map[string]any {
+	obj := make(map[string]any, len(model.Raw)+5)
+	for k, v := range model.Raw {
+		obj[k] = v
+	}
+	obj["id"] = model.ID
+	obj["object"] = "model"
+	obj["created"] = created
+	obj["owned_by"] = "lingma"
+	if model.Name != "" {
+		obj["name"] = model.Name
+	}
+	if model.InternalID != "" {
+		obj["gateway_key"] = model.InternalID
+	}
+	return obj
+}
+
+func (s *Server) handleQuota(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	if !s.acquire(r.Context()) {
+		writeJSON(w, http.StatusRequestTimeout, map[string]any{"error": "request was cancelled while waiting for a proxy execution slot"})
+		return
+	}
+	defer s.release()
+	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
+	defer cancel()
+	quota, err := s.svc.Quota(ctx)
+	if err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]any{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, quota)
+}
+
+// handleImageSearch exposes the gateway's imageSearch as GET /v1/images/search?q=&n=
+// or POST {query,count}. Returns {query, data:[{title,image_url,width,height}]}.
+func (s *Server) handleImageSearch(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	var query string
+	var count int
+	switch r.Method {
+	case http.MethodGet:
+		query = strings.TrimSpace(valueOrString(r.URL.Query().Get("q"), r.URL.Query().Get("query")))
+		count, _ = strconv.Atoi(strings.TrimSpace(r.URL.Query().Get("n")))
+	case http.MethodPost:
+		var body struct {
+			Query string `json:"query"`
+			Q     string `json:"q"`
+			Count int    `json:"count"`
+			N     int    `json:"n"`
+		}
+		if err := decodeJSON(r, &body); err != nil {
+			writeOpenAIError(w, http.StatusBadRequest, "invalid_request_error", err.Error())
+			return
+		}
+		query = strings.TrimSpace(valueOrString(body.Query, body.Q))
+		count = body.Count
+		if count == 0 {
+			count = body.N
+		}
+	default:
+		writeOpenAIError(w, http.StatusMethodNotAllowed, "invalid_request_error", "method not allowed")
+		return
+	}
+	if query == "" {
+		writeOpenAIError(w, http.StatusBadRequest, "invalid_request_error", "query is required")
+		return
+	}
+	if !s.acquire(r.Context()) {
+		writeOpenAIError(w, http.StatusRequestTimeout, "timeout_error", "request was cancelled while waiting for a proxy execution slot")
+		return
+	}
+	defer s.release()
+	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+	defer cancel()
+	results, err := s.svc.ImageSearch(ctx, query, count)
+	if err != nil {
+		writeOpenAIError(w, http.StatusBadGateway, "api_error", err.Error())
+		return
+	}
+	data := make([]map[string]any, 0, len(results))
+	for _, it := range results {
+		data = append(data, map[string]any{"title": it.Title, "image_url": it.ImageURL, "width": it.Width, "height": it.Height})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"query": query, "data": data})
+}
+
+// handleImageGenerations exposes the gateway's generateImage as the
+// OpenAI-compatible POST /v1/images/generations. Returns {created, data:[{b64_json|url}]}.
+func (s *Server) handleImageGenerations(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	if r.Method != http.MethodPost {
+		writeOpenAIError(w, http.StatusMethodNotAllowed, "invalid_request_error", "method not allowed")
+		return
+	}
+	var body struct {
+		Prompt         string `json:"prompt"`
+		Size           string `json:"size"`
+		Model          string `json:"model"`
+		ResponseFormat string `json:"response_format"`
+	}
+	if err := decodeJSON(r, &body); err != nil {
+		writeOpenAIError(w, http.StatusBadRequest, "invalid_request_error", err.Error())
+		return
+	}
+	if strings.TrimSpace(body.Prompt) == "" {
+		writeOpenAIError(w, http.StatusBadRequest, "invalid_request_error", "prompt is required")
+		return
+	}
+	if !s.acquire(r.Context()) {
+		writeOpenAIError(w, http.StatusRequestTimeout, "timeout_error", "request was cancelled while waiting for a proxy execution slot")
+		return
+	}
+	defer s.release()
+	ctx, cancel := context.WithTimeout(r.Context(), 120*time.Second)
+	defer cancel()
+	dataURL, err := s.svc.GenerateImage(ctx, body.Prompt, body.Size, body.Model)
+	if err != nil {
+		writeOpenAIError(w, http.StatusBadGateway, "api_error", err.Error())
+		return
+	}
+	item := map[string]any{}
+	if body.ResponseFormat == "url" {
+		item["url"] = dataURL
+	} else {
+		b64 := dataURL
+		if i := strings.Index(dataURL, "base64,"); i >= 0 {
+			b64 = dataURL[i+len("base64,"):]
+		}
+		item["b64_json"] = b64
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"created": time.Now().Unix(), "data": []map[string]any{item}})
+}
+
+func (s *Server) handleVersion(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	if r.Method != http.MethodGet {
+		writeOpenAIError(w, http.StatusMethodNotAllowed, "invalid_request_error", "method not allowed")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"version": version.Version,
+		"service": "zen-gate",
+	})
+}
+
+func (s *Server) handleAnthropicMessages(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	if r.Method != http.MethodPost {
+		writeAnthropicError(w, http.StatusMethodNotAllowed, "invalid_request_error", "method not allowed")
+		return
+	}
+	if !s.acquire(r.Context()) {
+		writeAnthropicError(w, http.StatusRequestTimeout, "timeout_error", "request was cancelled while waiting for a proxy execution slot")
+		return
+	}
+	defer s.release()
+
+	var req anthropicRequest
+	if err := decodeJSON(r, &req); err != nil {
+		writeAnthropicError(w, http.StatusBadRequest, "invalid_request_error", err.Error())
+		return
+	}
+
+	// Opt-in server-side tools (web_search / ImageSearch / TextPolish): the whole
+	// feature lives in servertools_*.go behind this single seam.
+	if s.maybeServeAnthropicServerTools(w, r, req) {
+		return
+	}
+
+	normalized, err := normalizeAnthropicRequest(req)
+	if err != nil {
+		writeAnthropicError(w, http.StatusBadRequest, "invalid_request_error", err.Error())
+		return
+	}
+	s.applyDefaultModel(&normalized)
+
+	if req.Stream {
+		s.handleAnthropicStream(w, r, normalized)
+		return
+	}
+
+	result, err := s.svc.Generate(r.Context(), normalized)
+	if err != nil {
+		writeAnthropicError(w, http.StatusInternalServerError, "api_error", err.Error())
+		return
+	}
+
+	content := make([]map[string]any, 0, 2+len(result.ToolCalls))
+	if shouldEmitAnthropicThinking(normalized, result) {
+		content = append(content, map[string]any{"type": "thinking", "thinking": result.ThoughtText})
+	}
+	if strings.TrimSpace(result.Text) != "" {
+		content = append(content, map[string]any{"type": "text", "text": result.Text})
+	}
+	for _, tc := range result.ToolCalls {
+		content = append(content, map[string]any{
+			"type":  "tool_use",
+			"id":    tc.ID,
+			"name":  tc.Name,
+			"input": tc.Arguments,
+		})
+	}
+	if len(content) == 0 {
+		// An Anthropic message must carry at least one content block.
+		content = append(content, map[string]any{"type": "text", "text": ""})
+	}
+	stopReason, stopSequence := anthropicStopReason(result)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"id":            fmt.Sprintf("msg_%d", time.Now().UnixNano()),
+		"type":          "message",
+		"role":          "assistant",
+		"content":       content,
+		"model":         result.Model,
+		"stop_reason":   stopReason,
+		"stop_sequence": stopSequence,
+		"usage":         anthropicFinalUsage(result),
+	})
+}
+
+func (s *Server) handleOpenAIChatCompletions(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	if r.Method != http.MethodPost {
+		writeOpenAIError(w, http.StatusMethodNotAllowed, "invalid_request_error", "method not allowed")
+		return
+	}
+	if !s.acquire(r.Context()) {
+		writeOpenAIError(w, http.StatusRequestTimeout, "timeout_error", "request was cancelled while waiting for a proxy execution slot")
+		return
+	}
+	defer s.release()
+
+	var req openAIChatRequest
+	if err := decodeJSON(r, &req); err != nil {
+		writeOpenAIError(w, http.StatusBadRequest, "invalid_request_error", err.Error())
+		return
+	}
+
+	normalized, err := normalizeOpenAIRequest(req)
+	if err != nil {
+		writeOpenAIError(w, http.StatusBadRequest, "invalid_request_error", err.Error())
+		return
+	}
+	s.applyDefaultModel(&normalized)
+
+	// Opt-in server-side tools (web_search / ImageSearch / TextPolish): the whole
+	// feature lives in servertools_*.go behind this single seam.
+	if s.maybeServeOpenAIServerTools(w, r, req, normalized) {
+		return
+	}
+
+	if req.Stream {
+		emitUsage := req.StreamOptions == nil || req.StreamOptions.IncludeUsage
+		s.handleOpenAIStream(w, r, normalized, emitUsage)
+		return
+	}
+
+	result, err := s.svc.Generate(r.Context(), normalized)
+	if err != nil {
+		writeOpenAIError(w, http.StatusInternalServerError, "api_error", err.Error())
+		return
+	}
+
+	writeOpenAIChatCompletion(w, result)
+}
+
+func (s *Server) handleAnthropicStream(w http.ResponseWriter, r *http.Request, req service.ChatRequest) {
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		writeAnthropicError(w, http.StatusInternalServerError, "api_error", "streaming is not supported by this server")
+		return
+	}
+
+	model := strings.TrimSpace(req.Model)
+	if model == "" {
+		model = "lingma"
+	}
+	msgID := fmt.Sprintf("msg_%d", time.Now().UnixNano())
+
+	if shouldAggregateToolStream(req) {
+		result, err := s.svc.Generate(r.Context(), req)
+		if err != nil {
+			writeAnthropicError(w, http.StatusInternalServerError, "api_error", err.Error())
+			return
+		}
+
+		streamingHeaders(w)
+		if err := writeSSEEvent(w, flusher, "message_start", map[string]any{
+			"type": "message_start",
+			"message": map[string]any{
+				"id":            msgID,
+				"type":          "message",
+				"role":          "assistant",
+				"content":       []any{},
+				"model":         model,
+				"stop_reason":   nil,
+				"stop_sequence": nil,
+				"usage":         anthropicInputUsage(result),
+			},
+		}); err != nil {
+			return
+		}
+
+		index := 0
+		if shouldEmitAnthropicThinking(req, result) {
+			if err := writeSSEEvent(w, flusher, "content_block_start", map[string]any{
+				"type":          "content_block_start",
+				"index":         index,
+				"content_block": map[string]any{"type": "thinking", "thinking": ""},
+			}); err != nil {
+				return
+			}
+			if err := writeSSEEvent(w, flusher, "content_block_delta", map[string]any{
+				"type":  "content_block_delta",
+				"index": index,
+				"delta": map[string]any{"type": "thinking_delta", "thinking": result.ThoughtText},
+			}); err != nil {
+				return
+			}
+			if err := writeSSEEvent(w, flusher, "content_block_stop", map[string]any{
+				"type":  "content_block_stop",
+				"index": index,
+			}); err != nil {
+				return
+			}
+			index++
+		}
+		if strings.TrimSpace(result.Text) != "" {
+			if err := writeSSEEvent(w, flusher, "content_block_start", map[string]any{
+				"type":          "content_block_start",
+				"index":         index,
+				"content_block": map[string]any{"type": "text", "text": ""},
+			}); err != nil {
+				return
+			}
+			if err := writeSSEEvent(w, flusher, "content_block_delta", map[string]any{
+				"type":  "content_block_delta",
+				"index": index,
+				"delta": map[string]any{"type": "text_delta", "text": result.Text},
+			}); err != nil {
+				return
+			}
+			if err := writeSSEEvent(w, flusher, "content_block_stop", map[string]any{
+				"type":  "content_block_stop",
+				"index": index,
+			}); err != nil {
+				return
+			}
+			index++
+		}
+
+		for _, tc := range result.ToolCalls {
+			if err := writeSSEEvent(w, flusher, "content_block_start", map[string]any{
+				"type":          "content_block_start",
+				"index":         index,
+				"content_block": map[string]any{"type": "tool_use", "id": tc.ID, "name": tc.Name, "input": map[string]any{}},
+			}); err != nil {
+				return
+			}
+			argsJSON, _ := json.Marshal(tc.Arguments)
+			if err := writeSSEEvent(w, flusher, "content_block_delta", map[string]any{
+				"type":  "content_block_delta",
+				"index": index,
+				"delta": map[string]any{"type": "input_json_delta", "partial_json": string(argsJSON)},
+			}); err != nil {
+				return
+			}
+			if err := writeSSEEvent(w, flusher, "content_block_stop", map[string]any{
+				"type":  "content_block_stop",
+				"index": index,
+			}); err != nil {
+				return
+			}
+			index++
+		}
+
+		stopReason, stopSequence := anthropicStopReason(result)
+		_ = writeSSEEvent(w, flusher, "message_delta", map[string]any{
+			"type": "message_delta",
+			"delta": map[string]any{
+				"stop_reason":   stopReason,
+				"stop_sequence": stopSequence,
+			},
+			// input_tokens already sent in message_start above; delta carries output only.
+			"usage": map[string]any{"output_tokens": result.OutputTokens},
+		})
+		_ = writeSSEEvent(w, flusher, "message_stop", map[string]any{"type": "message_stop"})
+		return
+	}
+
+	events, done, err := s.svc.GenerateStream(r.Context(), req)
+	if err != nil {
+		writeAnthropicError(w, http.StatusInternalServerError, "api_error", err.Error())
+		return
+	}
+
+	streamingHeaders(w)
+	if err := writeSSEEvent(w, flusher, "message_start", map[string]any{
+		"type": "message_start",
+		"message": map[string]any{
+			"id":            msgID,
+			"type":          "message",
+			"role":          "assistant",
+			"content":       []any{},
+			"model":         model,
+			"stop_reason":   nil,
+			"stop_sequence": nil,
+			"usage": map[string]any{
+				"input_tokens":  0,
+				"output_tokens": 0,
+			},
+		},
+	}); err != nil {
+		return
+	}
+
+	writeAnthropicStreamBody(r.Context(), w, flusher, req, events, done, s.svc.EmulatesTextTools(req))
+}
+
+// writeAnthropicStreamBody consumes the service stream and emits the Anthropic
+// SSE sequence after message_start (written by the caller).
+func writeAnthropicStreamBody(ctx context.Context, w http.ResponseWriter, flusher http.Flusher, req service.ChatRequest, events <-chan service.StreamEvent, done <-chan service.StreamResult, emulateTextTools bool) {
+	filter := newToolStreamFilter(emulateTextTools)
+	eventsCh := events
+	doneCh := done
+	var final *service.ChatResult
+	var finalErr error
+	thinkingEnabled := reasoningEffortEnabled(req.ReasoningEffort)
+	thinkingOpen := false
+	textOpen := false
+	textIndex := 0
+	if thinkingEnabled {
+		textIndex = 1
+	}
+
+	// Incremental tool_use streaming state (keyed by upstream tool-call index).
+	streamedTool := false
+	toolBlocks := map[int]*anthropicToolBlock{}
+	var toolOrder []int
+	nextToolBlockIndex := 0
+	openToolIndex := -1
+
+	// emitText closes any open thinking block, opens the text block if needed,
+	// and writes a text_delta. Shared by the streaming loop and the tail flush.
+	emitText := func(delta string) error {
+		if delta == "" {
+			return nil
+		}
+		if thinkingOpen {
+			if err := writeSSEEvent(w, flusher, "content_block_stop", map[string]any{
+				"type": "content_block_stop", "index": 0,
+			}); err != nil {
+				return err
+			}
+			thinkingOpen = false
+		}
+		if !textOpen {
+			if err := writeSSEEvent(w, flusher, "content_block_start", map[string]any{
+				"type":          "content_block_start",
+				"index":         textIndex,
+				"content_block": map[string]any{"type": "text", "text": ""},
+			}); err != nil {
+				return err
+			}
+			textOpen = true
+		}
+		return writeSSEEvent(w, flusher, "content_block_delta", map[string]any{
+			"type":  "content_block_delta",
+			"index": textIndex,
+			"delta": map[string]any{"type": "text_delta", "text": delta},
+		})
+	}
+
+	for eventsCh != nil || doneCh != nil {
+		select {
+		case <-ctx.Done():
+			return
+		case event, ok := <-eventsCh:
+			if !ok {
+				eventsCh = nil
+				continue
+			}
+			switch event.Type {
+			case service.StreamEventToolCall:
+				if event.ToolCall == nil {
+					continue
+				}
+				if !streamedTool {
+					// First tool fragment: flush the buffered text tail, then close
+					// open thinking/text blocks before allocating tool blocks.
+					for _, delta := range filter.Flush() {
+						if err := emitText(delta); err != nil {
+							return
+						}
+					}
+					// Start tool blocks after whatever was emitted; a tool-only
+					// response must start at index 0, not leave a hole there.
+					nextToolBlockIndex = 0
+					if thinkingOpen {
+						nextToolBlockIndex = 1
+					}
+					if textOpen {
+						nextToolBlockIndex = textIndex + 1
+					}
+					if thinkingOpen {
+						if err := writeSSEEvent(w, flusher, "content_block_stop", map[string]any{
+							"type": "content_block_stop", "index": 0,
+						}); err != nil {
+							return
+						}
+						thinkingOpen = false
+					}
+					if textOpen {
+						if err := writeSSEEvent(w, flusher, "content_block_stop", map[string]any{
+							"type": "content_block_stop", "index": textIndex,
+						}); err != nil {
+							return
+						}
+						textOpen = false
+					}
+					streamedTool = true
+				}
+				tc := event.ToolCall
+				state := toolBlocks[tc.Index]
+				if state == nil {
+					state = &anthropicToolBlock{anthropicIndex: nextToolBlockIndex}
+					nextToolBlockIndex++
+					toolBlocks[tc.Index] = state
+					toolOrder = append(toolOrder, tc.Index)
+				}
+				if tc.ID != "" {
+					state.id = tc.ID
+				}
+				if tc.Name != "" {
+					state.name = tc.Name
+				}
+				// Start the block once id+name are known; close the previous open
+				// tool block first (QoderCN streams tool calls contiguously by index).
+				if !state.started && state.id != "" && state.name != "" {
+					if openToolIndex >= 0 {
+						if err := writeSSEEvent(w, flusher, "content_block_stop", map[string]any{
+							"type": "content_block_stop", "index": openToolIndex,
+						}); err != nil {
+							return
+						}
+					}
+					if err := writeSSEEvent(w, flusher, "content_block_start", map[string]any{
+						"type":          "content_block_start",
+						"index":         state.anthropicIndex,
+						"content_block": map[string]any{"type": "tool_use", "id": state.id, "name": state.name, "input": map[string]any{}},
+					}); err != nil {
+						return
+					}
+					state.started = true
+					openToolIndex = state.anthropicIndex
+					if state.pendingArgs != "" {
+						if err := writeSSEEvent(w, flusher, "content_block_delta", map[string]any{
+							"type":  "content_block_delta",
+							"index": state.anthropicIndex,
+							"delta": map[string]any{"type": "input_json_delta", "partial_json": state.pendingArgs},
+						}); err != nil {
+							return
+						}
+						state.pendingArgs = ""
+					}
+				}
+				if tc.ArgsFragment != "" {
+					if state.started {
+						if err := writeSSEEvent(w, flusher, "content_block_delta", map[string]any{
+							"type":  "content_block_delta",
+							"index": state.anthropicIndex,
+							"delta": map[string]any{"type": "input_json_delta", "partial_json": tc.ArgsFragment},
+						}); err != nil {
+							return
+						}
+					} else {
+						state.pendingArgs += tc.ArgsFragment
+					}
+				}
+			case service.StreamEventThinking:
+				if !thinkingEnabled || streamedTool || strings.TrimSpace(event.Delta) == "" {
+					continue
+				}
+				if !thinkingOpen {
+					if err := writeSSEEvent(w, flusher, "content_block_start", map[string]any{
+						"type":          "content_block_start",
+						"index":         0,
+						"content_block": map[string]any{"type": "thinking", "thinking": ""},
+					}); err != nil {
+						return
+					}
+					thinkingOpen = true
+				}
+				if err := writeSSEEvent(w, flusher, "content_block_delta", map[string]any{
+					"type":  "content_block_delta",
+					"index": 0,
+					"delta": map[string]any{
+						"type":     "thinking_delta",
+						"thinking": event.Delta,
+					},
+				}); err != nil {
+					return
+				}
+			default:
+				if streamedTool {
+					// Anthropic blocks are strictly ordered; once a tool block is
+					// open we must not reopen earlier text/thinking indices (QoderCN
+					// ends the turn at the tool call anyway).
+					continue
+				}
+				for _, delta := range filter.Push(event.Delta) {
+					if err := emitText(delta); err != nil {
+						return
+					}
+				}
+			}
+		case result, ok := <-doneCh:
+			if !ok {
+				doneCh = nil
+				continue
+			}
+			final = result.Result
+			finalErr = result.Err
+			doneCh = nil
+		}
+	}
+
+	if finalErr != nil {
+		_ = writeSSEEvent(w, flusher, "error", map[string]any{
+			"type": "error",
+			"error": map[string]any{
+				"type":    "api_error",
+				"message": finalErr.Error(),
+			},
+		})
+		return
+	}
+	if final == nil {
+		_ = writeSSEEvent(w, flusher, "error", map[string]any{
+			"type": "error",
+			"error": map[string]any{
+				"type":    "api_error",
+				"message": "stream finished without a final result",
+			},
+		})
+		return
+	}
+	if len(final.ToolCalls) == 0 {
+		for _, delta := range filter.Flush() {
+			if err := emitText(delta); err != nil {
+				return
+			}
+		}
+	}
+	if thinkingOpen {
+		if err := writeSSEEvent(w, flusher, "content_block_stop", map[string]any{
+			"type":  "content_block_stop",
+			"index": 0,
+		}); err != nil {
+			return
+		}
+		thinkingOpen = false
+	}
+	if textOpen {
+		if err := writeSSEEvent(w, flusher, "content_block_stop", map[string]any{
+			"type":  "content_block_stop",
+			"index": textIndex,
+		}); err != nil {
+			return
+		}
+	}
+	if streamedTool {
+		// Incremental path already streamed the tool blocks. Late-start any block
+		// that never received id+name but has buffered args, then close all blocks.
+		for _, idx := range toolOrder {
+			state := toolBlocks[idx]
+			if state.started || (state.pendingArgs == "" && state.id == "" && state.name == "") {
+				continue
+			}
+			if openToolIndex >= 0 {
+				_ = writeSSEEvent(w, flusher, "content_block_stop", map[string]any{
+					"type": "content_block_stop", "index": openToolIndex,
+				})
+				openToolIndex = -1
+			}
+			id := state.id
+			if id == "" {
+				id = fmt.Sprintf("tool_call_%d", idx)
+			}
+			name := state.name
+			if name == "" {
+				name = "unknown_tool"
+			}
+			_ = writeSSEEvent(w, flusher, "content_block_start", map[string]any{
+				"type":          "content_block_start",
+				"index":         state.anthropicIndex,
+				"content_block": map[string]any{"type": "tool_use", "id": id, "name": name, "input": map[string]any{}},
+			})
+			state.started = true
+			if state.pendingArgs != "" {
+				_ = writeSSEEvent(w, flusher, "content_block_delta", map[string]any{
+					"type":  "content_block_delta",
+					"index": state.anthropicIndex,
+					"delta": map[string]any{"type": "input_json_delta", "partial_json": state.pendingArgs},
+				})
+			}
+			openToolIndex = state.anthropicIndex
+		}
+		if openToolIndex >= 0 {
+			_ = writeSSEEvent(w, flusher, "content_block_stop", map[string]any{
+				"type": "content_block_stop", "index": openToolIndex,
+			})
+			openToolIndex = -1
+		}
+	} else {
+		// Emulation / non-native path: no fragments streamed, emit aggregated blocks.
+		for i, tc := range final.ToolCalls {
+			blockIndex := i + 1
+			if textOpen {
+				blockIndex = textIndex + 1 + i
+			} else if thinkingEnabled {
+				blockIndex = 1 + i
+			}
+			_ = writeSSEEvent(w, flusher, "content_block_start", map[string]any{
+				"type":          "content_block_start",
+				"index":         blockIndex,
+				"content_block": map[string]any{"type": "tool_use", "id": tc.ID, "name": tc.Name, "input": map[string]any{}},
+			})
+			argsJSON, _ := json.Marshal(tc.Arguments)
+			_ = writeSSEEvent(w, flusher, "content_block_delta", map[string]any{
+				"type":  "content_block_delta",
+				"index": blockIndex,
+				"delta": map[string]any{"type": "input_json_delta", "partial_json": string(argsJSON)},
+			})
+			_ = writeSSEEvent(w, flusher, "content_block_stop", map[string]any{
+				"type":  "content_block_stop",
+				"index": blockIndex,
+			})
+		}
+	}
+	stopReason, stopSequence := anthropicStopReason(final)
+	if err := writeSSEEvent(w, flusher, "message_delta", map[string]any{
+		"type": "message_delta",
+		"delta": map[string]any{
+			"stop_reason":   stopReason,
+			"stop_sequence": stopSequence,
+		},
+		"usage": anthropicFinalUsage(final),
+	}); err != nil {
+		return
+	}
+	_ = writeSSEEvent(w, flusher, "message_stop", map[string]any{
+		"type": "message_stop",
+	})
+}
+
+func (s *Server) handleOpenAIStream(w http.ResponseWriter, r *http.Request, req service.ChatRequest, emitUsage bool) {
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		writeOpenAIError(w, http.StatusInternalServerError, "api_error", "streaming is not supported by this server")
+		return
+	}
+
+	model := strings.TrimSpace(req.Model)
+	if model == "" {
+		model = "lingma"
+	}
+	chatID := fmt.Sprintf("chatcmpl-%d", time.Now().UnixNano())
+	created := time.Now().Unix()
+
+	if shouldAggregateToolStream(req) {
+		result, err := s.svc.Generate(r.Context(), req)
+		if err != nil {
+			writeOpenAIError(w, http.StatusInternalServerError, "api_error", err.Error())
+			return
+		}
+		streamingHeaders(w)
+		_ = writeOpenAIChunk(w, flusher, map[string]any{
+			"id": chatID, "object": "chat.completion.chunk", "created": created, "model": model,
+			"choices": []map[string]any{{"index": 0, "delta": map[string]any{"role": "assistant"}, "finish_reason": nil}},
+		})
+		if strings.TrimSpace(result.ThoughtText) != "" {
+			// Surface reasoning (the aggregate branch previously dropped it).
+			_ = writeOpenAIChunk(w, flusher, map[string]any{
+				"id": chatID, "object": "chat.completion.chunk", "created": created, "model": model,
+				"choices": []map[string]any{{"index": 0, "delta": map[string]any{"reasoning_content": result.ThoughtText}, "finish_reason": nil}},
+			})
+		}
+		if result.Text != "" {
+			_ = writeOpenAIChunk(w, flusher, map[string]any{
+				"id": chatID, "object": "chat.completion.chunk", "created": created, "model": model,
+				"choices": []map[string]any{{"index": 0, "delta": map[string]any{"content": result.Text}, "finish_reason": nil}},
+			})
+		}
+		for i, tc := range result.ToolCalls {
+			argsJSON, _ := json.Marshal(tc.Arguments)
+			_ = writeOpenAIChunk(w, flusher, map[string]any{
+				"id": chatID, "object": "chat.completion.chunk", "created": created, "model": model,
+				"choices": []map[string]any{{
+					"index": 0,
+					"delta": map[string]any{
+						"tool_calls": []map[string]any{{
+							"index": i, "id": tc.ID, "type": "function",
+							"function": map[string]any{"name": tc.Name, "arguments": string(argsJSON)},
+						}},
+					},
+					"finish_reason": nil,
+				}},
+			})
+		}
+		finishReason := openAIFinishReason(result)
+		_ = writeOpenAIChunk(w, flusher, map[string]any{
+			"id": chatID, "object": "chat.completion.chunk", "created": created, "model": model,
+			"choices": []map[string]any{{"index": 0, "delta": map[string]any{}, "finish_reason": finishReason}},
+		})
+		_ = writeOpenAIChunk(w, flusher, map[string]any{
+			"id": chatID, "object": "chat.completion.chunk", "created": created, "model": model,
+			"choices": []map[string]any{},
+			"usage":   openAIUsageMap(result),
+		})
+		_, _ = fmt.Fprint(w, "data: [DONE]\n\n")
+		flusher.Flush()
+		return
+	}
+
+	events, done, err := s.svc.GenerateStream(r.Context(), req)
+	if err != nil {
+		writeOpenAIError(w, http.StatusInternalServerError, "api_error", err.Error())
+		return
+	}
+
+	streamingHeaders(w)
+	if err := writeOpenAIChunk(w, flusher, map[string]any{
+		"id":      chatID,
+		"object":  "chat.completion.chunk",
+		"created": created,
+		"model":   model,
+		"choices": []map[string]any{
+			{
+				"index": 0,
+				"delta": map[string]any{
+					"role": "assistant",
+				},
+				"finish_reason": nil,
+			},
+		},
+	}); err != nil {
+		return
+	}
+
+	filter := newToolStreamFilter(s.svc.EmulatesTextTools(req))
+	eventsCh := events
+	doneCh := done
+	var final *service.ChatResult
+	var finalErr error
+	streamedTool := false
+
+	for eventsCh != nil || doneCh != nil {
+		select {
+		case <-r.Context().Done():
+			return
+		case event, ok := <-eventsCh:
+			if !ok {
+				eventsCh = nil
+				continue
+			}
+			switch event.Type {
+			case service.StreamEventToolCall:
+				// Native tool-call fragments streamed straight through as
+				// OpenAI delta.tool_calls (near-identity with the upstream).
+				if event.ToolCall == nil {
+					continue
+				}
+				if !streamedTool {
+					// Flush buffered preamble text before the first tool-call delta;
+					// the end-of-stream flush is skipped on tool-call turns.
+					for _, delta := range filter.Flush() {
+						if delta == "" {
+							continue
+						}
+						if err := writeOpenAIChunk(w, flusher, map[string]any{
+							"id": chatID, "object": "chat.completion.chunk", "created": created, "model": model,
+							"choices": []map[string]any{{"index": 0, "delta": map[string]any{"content": delta}, "finish_reason": nil}},
+						}); err != nil {
+							return
+						}
+					}
+				}
+				streamedTool = true
+				fn := map[string]any{}
+				if event.ToolCall.Name != "" {
+					fn["name"] = event.ToolCall.Name
+				}
+				if event.ToolCall.ArgsFragment != "" {
+					fn["arguments"] = event.ToolCall.ArgsFragment
+				}
+				call := map[string]any{"index": event.ToolCall.Index}
+				if event.ToolCall.ID != "" {
+					call["id"] = event.ToolCall.ID
+					call["type"] = "function"
+				}
+				if len(fn) > 0 {
+					call["function"] = fn
+				}
+				if err := writeOpenAIChunk(w, flusher, map[string]any{
+					"id": chatID, "object": "chat.completion.chunk", "created": created, "model": model,
+					"choices": []map[string]any{{
+						"index":         0,
+						"delta":         map[string]any{"tool_calls": []map[string]any{call}},
+						"finish_reason": nil,
+					}},
+				}); err != nil {
+					return
+				}
+			case service.StreamEventThinking:
+				if event.Delta == "" {
+					continue
+				}
+				if err := writeOpenAIChunk(w, flusher, map[string]any{
+					"id": chatID, "object": "chat.completion.chunk", "created": created, "model": model,
+					"choices": []map[string]any{{
+						"index":         0,
+						"delta":         map[string]any{"reasoning_content": event.Delta},
+						"finish_reason": nil,
+					}},
+				}); err != nil {
+					return
+				}
+			default:
+				for _, delta := range filter.Push(event.Delta) {
+					if delta == "" {
+						continue
+					}
+					if err := writeOpenAIChunk(w, flusher, map[string]any{
+						"id":      chatID,
+						"object":  "chat.completion.chunk",
+						"created": created,
+						"model":   model,
+						"choices": []map[string]any{
+							{
+								"index": 0,
+								"delta": map[string]any{
+									"content": delta,
+								},
+								"finish_reason": nil,
+							},
+						},
+					}); err != nil {
+						return
+					}
+				}
+			}
+		case result, ok := <-doneCh:
+			if !ok {
+				doneCh = nil
+				continue
+			}
+			final = result.Result
+			finalErr = result.Err
+			doneCh = nil
+		}
+	}
+
+	if finalErr != nil {
+		_ = writeOpenAIChunk(w, flusher, map[string]any{
+			"error": map[string]any{
+				"message": finalErr.Error(),
+				"type":    "api_error",
+				"code":    nil,
+				"param":   nil,
+			},
+		})
+		_, _ = fmt.Fprint(w, "data: [DONE]\n\n")
+		flusher.Flush()
+		return
+	}
+	if final == nil {
+		_ = writeOpenAIChunk(w, flusher, map[string]any{
+			"error": map[string]any{
+				"message": "stream finished without a final result",
+				"type":    "api_error",
+				"code":    nil,
+				"param":   nil,
+			},
+		})
+		_, _ = fmt.Fprint(w, "data: [DONE]\n\n")
+		flusher.Flush()
+		return
+	}
+	if len(final.ToolCalls) == 0 {
+		for _, delta := range filter.Flush() {
+			if delta == "" {
+				continue
+			}
+			if err := writeOpenAIChunk(w, flusher, map[string]any{
+				"id":      chatID,
+				"object":  "chat.completion.chunk",
+				"created": created,
+				"model":   model,
+				"choices": []map[string]any{
+					{
+						"index": 0,
+						"delta": map[string]any{
+							"content": delta,
+						},
+						"finish_reason": nil,
+					},
+				},
+			}); err != nil {
+				return
+			}
+		}
+	}
+	// Emit tool calls here only if not already streamed incrementally (the
+	// emulation path surfaces them only in final.ToolCalls).
+	if !streamedTool {
+		for i, tc := range final.ToolCalls {
+			argsJSON, _ := json.Marshal(tc.Arguments)
+			_ = writeOpenAIChunk(w, flusher, map[string]any{
+				"id": chatID, "object": "chat.completion.chunk", "created": created, "model": model,
+				"choices": []map[string]any{{
+					"index": 0,
+					"delta": map[string]any{
+						"tool_calls": []map[string]any{{
+							"index": i, "id": tc.ID, "type": "function",
+							"function": map[string]any{"name": tc.Name, "arguments": string(argsJSON)},
+						}},
+					},
+					"finish_reason": nil,
+				}},
+			})
+		}
+	}
+	finishReason := openAIFinishReason(final)
+	if err := writeOpenAIChunk(w, flusher, map[string]any{
+		"id":      chatID,
+		"object":  "chat.completion.chunk",
+		"created": created,
+		"model":   model,
+		"choices": []map[string]any{
+			{
+				"index":         0,
+				"delta":         map[string]any{},
+				"finish_reason": finishReason,
+			},
+		},
+	}); err != nil {
+		return
+	}
+	// Trailing usage chunk (real upstream tokens); suppressed only on an explicit
+	// stream_options.include_usage=false per the OpenAI spec.
+	if emitUsage {
+		_ = writeOpenAIChunk(w, flusher, map[string]any{
+			"id":      chatID,
+			"object":  "chat.completion.chunk",
+			"created": created,
+			"model":   model,
+			"choices": []map[string]any{},
+			"usage":   openAIUsageMap(final),
+		})
+	}
+	_, _ = fmt.Fprint(w, "data: [DONE]\n\n")
+	flusher.Flush()
+}
+
+func shouldAggregateToolStream(req service.ChatRequest) bool {
+	return len(req.Tools) > 0 && truthyEnv("QODERCN_AGGREGATE_TOOL_STREAM")
+}
+
+type toolStreamFilter struct {
+	enabled bool
+	buffer  string
+	blocked bool
+}
+
+func newToolStreamFilter(enabled bool) *toolStreamFilter {
+	return &toolStreamFilter{enabled: enabled}
+}
+
+func (f *toolStreamFilter) Push(delta string) []string {
+	if delta == "" {
+		return nil
+	}
+	if !f.enabled {
+		return []string{delta}
+	}
+	f.buffer += delta
+	if f.blocked {
+		return nil
+	}
+	if idx := actionBlockStartIndex(f.buffer); idx >= 0 {
+		safe := f.buffer[:idx]
+		f.buffer = f.buffer[idx:]
+		f.blocked = true
+		if safe == "" {
+			return nil
+		}
+		return []string{safe}
+	}
+	if looksLikeActionPrefix(f.buffer) {
+		return nil
+	}
+	return f.flushSafeTail(96)
+}
+
+func (f *toolStreamFilter) Flush() []string {
+	if f.buffer == "" || f.blocked {
+		return nil
+	}
+	out := f.buffer
+	f.buffer = ""
+	return []string{out}
+}
+
+func (f *toolStreamFilter) flushSafeTail(tailRunes int) []string {
+	runes := []rune(f.buffer)
+	if len(runes) <= tailRunes {
+		return nil
+	}
+	safe := string(runes[:len(runes)-tailRunes])
+	f.buffer = string(runes[len(runes)-tailRunes:])
+	if safe == "" {
+		return nil
+	}
+	return []string{safe}
+}
+
+func actionBlockStartIndex(text string) int {
+	lower := strings.ToLower(text)
+	markers := []string{
+		"```json action",
+		"``` action",
+		"{\"tool\"",
+		"{\"name\"",
+	}
+	best := -1
+	for _, marker := range markers {
+		if idx := strings.Index(lower, marker); idx >= 0 && (best == -1 || idx < best) {
+			best = idx
+		}
+	}
+	return best
+}
+
+func looksLikeActionPrefix(text string) bool {
+	trimmed := strings.ToLower(strings.TrimLeft(text, " \t\r\n"))
+	if trimmed == "" {
+		return true
+	}
+	prefixes := []string{
+		"```json action",
+		"``` action",
+		"{\"tool\"",
+		"{\"name\"",
+	}
+	for _, prefix := range prefixes {
+		if strings.HasPrefix(prefix, trimmed) || strings.HasPrefix(trimmed, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+func truthyEnv(name string) bool {
+	value := strings.ToLower(strings.TrimSpace(os.Getenv(name)))
+	return value == "1" || value == "true" || value == "yes" || value == "on"
+}
+
+// falsyEnv reports whether name is explicitly set to a false-ish value, used for
+// flags that default ON (absent or unrecognized value => not disabled).
+func falsyEnv(name string) bool {
+	value := strings.ToLower(strings.TrimSpace(os.Getenv(name)))
+	return value == "0" || value == "false" || value == "no" || value == "off"
+}
+
+// replaceWebSearchEnabled reports whether to intercept a client's hosted
+// web_search and serve it via the gateway as native Anthropic server-tool blocks.
+// Defaults ON; set QODERCN_REPLACE_WEB_SEARCH to a false-ish value to disable
+// (the client's hosted web_search is then dropped and the model does not search).
+func replaceWebSearchEnabled() bool {
+	return !falsyEnv("QODERCN_REPLACE_WEB_SEARCH")
+}
+
+// stripAnthropicHostedWebSearchTool removes hosted web_search tool definitions
+// from the raw tools list, leaving client (function) tools intact.
+func stripAnthropicHostedWebSearchTool(raw any) any {
+	items, ok := raw.([]any)
+	if !ok {
+		return raw
+	}
+	kept := make([]any, 0, len(items))
+	for _, item := range items {
+		if m, ok := item.(map[string]any); ok &&
+			strings.TrimSpace(stringFromAny(m["name"])) == "web_search" &&
+			tooltypes.IsAnthropicHostedToolType(stringFromAny(m["type"])) {
+			continue
+		}
+		kept = append(kept, item)
+	}
+	if len(kept) == 0 {
+		return nil
+	}
+	return kept
+}
+
+// formatWebSearchResults renders search hits as a plain-text context block the
+// model can cite when answering.
+func formatWebSearchResults(query string, results []remote.SearchResult) string {
+	const maxResults = 5
+	const maxBodyRunes = 1500
+	var b strings.Builder
+	fmt.Fprintf(&b, "Web search results for %q (use these to answer the question above; cite the source links):\n", query)
+	for i, r := range results {
+		if i >= maxResults {
+			break
+		}
+		// Use the richest field the caller unlocked: full page text > markdown >
+		// AI summary > short snippet.
+		body := ""
+		for _, cand := range []string{r.MainText, r.MarkdownText, r.Summary, r.Snippet} {
+			if body = strings.TrimSpace(cand); body != "" {
+				break
+			}
+		}
+		if rs := []rune(body); len(rs) > maxBodyRunes {
+			body = string(rs[:maxBodyRunes]) + "…"
+		}
+		fmt.Fprintf(&b, "\n[%d] %s\n%s\n%s\n", i+1, strings.TrimSpace(r.Title), strings.TrimSpace(r.Link), body)
+	}
+	return b.String()
+}
+
+func estimateAnthropicInputTokens(req anthropicRequest) int {
+	// Estimate from TEXT only; counting image base64 rune-by-rune would wildly
+	// inflate the estimate and break clients that budget context off count_tokens.
+	var b strings.Builder
+	b.WriteString(req.Model)
+	b.WriteByte('\n')
+	b.WriteString(extractText(req.System))
+	images := 0
+	for _, m := range req.Messages {
+		b.WriteByte('\n')
+		b.WriteString(extractText(m.Content)) // ignores image blocks
+		images += countAnthropicImageBlocks(m.Content)
+	}
+	if meta, err := json.Marshal(map[string]any{"tools": req.Tools, "tool_choice": req.ToolChoice, "thinking": req.Thinking}); err == nil {
+		b.Write(meta)
+	}
+	tokens := (len([]rune(b.String())) + 2) / 3
+	tokens += images * 1600 // rough per-image cost (no dimensions available here)
+	if tokens < 1 {
+		return 1
+	}
+	return tokens
+}
+
+func hasAnthropicHostedWebSearchTool(raw any) bool {
+	items, ok := raw.([]any)
+	if !ok {
+		return false
+	}
+	for _, item := range items {
+		m, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		if strings.TrimSpace(stringFromAny(m["name"])) == "web_search" &&
+			tooltypes.IsAnthropicHostedToolType(stringFromAny(m["type"])) {
+			return true
+		}
+	}
+	return false
+}
+
+func normalizeAnthropicRequest(req anthropicRequest) (service.ChatRequest, error) {
+	messages := make([]service.ChatMessage, 0, len(req.Messages))
+	for _, message := range req.Messages {
+		role := strings.ToLower(strings.TrimSpace(message.Role))
+		switch role {
+		case "user":
+			text, toolResults := extractAnthropicUserContent(message.Content)
+			images := extractAnthropicImages(message.Content)
+			if text != "" || len(images) > 0 {
+				messages = append(messages, service.ChatMessage{Role: role, Text: text, Images: images})
+			}
+			for _, tr := range toolResults {
+				text := tr.Content
+				if tr.IsError {
+					// The gateway's tool message has no is_error field; mark the
+					// failure inline so it is not mistaken for a successful result.
+					if strings.TrimSpace(text) != "" {
+						text = "[tool_error] " + text
+					} else {
+						text = "[tool_error]"
+					}
+				}
+				if strings.TrimSpace(text) == "" && len(tr.Images) == 0 {
+					text = "(no output)" // keep the tool turn paired with its tool_use
+				}
+				messages = append(messages, service.ChatMessage{Role: "tool", Text: text, ToolCallID: tr.ToolUseID, Images: tr.Images})
+			}
+		case "assistant":
+			text, reasoning, calls := extractAnthropicAssistantContent(message.Content)
+			if text != "" || len(calls) > 0 || reasoning != "" {
+				messages = append(messages, service.ChatMessage{Role: role, Text: text, ToolCalls: calls, ReasoningText: reasoning})
+			}
+		}
+	}
+	if len(messages) == 0 {
+		return service.ChatRequest{}, fmt.Errorf("no user or assistant messages found")
+	}
+
+	toolChoice := tooltypes.ToolChoice{Mode: "auto"}
+	if req.ToolChoice != nil {
+		toolChoice = tooltypes.ExtractAnthropicToolChoice(req.ToolChoice)
+	}
+
+	return service.ChatRequest{
+		Model:           strings.TrimSpace(req.Model),
+		System:          strings.TrimSpace(extractText(req.System)),
+		Messages:        messages,
+		Tools:           tooltypes.ExtractAnthropicTools(req.Tools),
+		ToolChoice:      toolChoice,
+		Temperature:     req.Temperature,
+		TopP:            req.TopP,
+		TopK:            req.TopK,
+		Stop:            req.StopSequences,
+		MaxTokens:       req.MaxTokens,
+		ReasoningEffort: resolveAnthropicEffort(req),
+	}, nil
+}
+
+func normalizeOpenAIRequest(req openAIChatRequest) (service.ChatRequest, error) {
+	messages := make([]service.ChatMessage, 0, len(req.Messages))
+	systemParts := make([]string, 0, 2)
+	for _, message := range req.Messages {
+		role := strings.ToLower(strings.TrimSpace(message.Role))
+		switch role {
+		case "system", "developer":
+			text := strings.TrimSpace(extractText(message.Content))
+			if text != "" {
+				systemParts = append(systemParts, text)
+			}
+		case "user":
+			text := strings.TrimSpace(extractText(message.Content))
+			images := extractOpenAIImages(message.Content)
+			if text != "" || len(images) > 0 {
+				messages = append(messages, service.ChatMessage{Role: role, Text: text, Images: images})
+			}
+		case "assistant":
+			text := strings.TrimSpace(extractText(message.Content))
+			calls := extractOpenAIToolCalls(message.ToolCalls)
+			reasoning := strings.TrimSpace(message.ReasoningContent)
+			if text != "" || len(calls) > 0 || reasoning != "" {
+				messages = append(messages, service.ChatMessage{Role: role, Text: text, ToolCalls: calls, ReasoningText: reasoning})
+			}
+		case "tool":
+			if message.ToolCallID == "" {
+				continue
+			}
+			// Forward even an empty tool result so the matching assistant
+			// tool_call is not orphaned (a placeholder keeps it through the pipeline).
+			output := strings.TrimSpace(extractText(message.Content))
+			if output == "" {
+				output = "(no output)"
+			}
+			messages = append(messages, service.ChatMessage{Role: "tool", Text: output, ToolCallID: message.ToolCallID})
+		}
+	}
+	if len(messages) == 0 {
+		return service.ChatRequest{}, fmt.Errorf("no user or assistant messages found")
+	}
+	return service.ChatRequest{
+		Model:             strings.TrimSpace(req.Model),
+		System:            strings.Join(systemParts, "\n\n"),
+		Messages:          messages,
+		Tools:             tooltypes.ExtractTools(req.Tools),
+		ToolChoice:        tooltypes.ExtractToolChoice(req.ToolChoice),
+		ParallelToolCalls: req.ParallelToolCalls,
+		Temperature:       req.Temperature,
+		TopP:              req.TopP,
+		Stop:              extractStop(req.Stop),
+		PresencePenalty:   req.PresencePenalty,
+		FrequencyPenalty:  req.FrequencyPenalty,
+		MaxTokens:         maxTokens(req.MaxTokens, req.MaxCompletionTokens),
+		Seed:              req.Seed,
+		User:              req.User,
+		ReasoningEffort:   req.ReasoningEffort,
+		ResponseFormat:    extractResponseFormat(req.ResponseFormat),
+	}, nil
+}
+
+func extractStop(stop any) []string {
+	if stop == nil {
+		return nil
+	}
+	switch typed := stop.(type) {
+	case string:
+		if typed != "" {
+			return []string{typed}
+		}
+	case []any:
+		out := make([]string, 0, len(typed))
+		for _, item := range typed {
+			if s := stringFromAny(item); s != "" {
+				out = append(out, s)
+			}
+		}
+		return out
+	case []string:
+		return typed
+	}
+	return nil
+}
+
+func extractResponseFormat(rf any) string {
+	if rf == nil {
+		return ""
+	}
+	m, ok := rf.(map[string]any)
+	if !ok {
+		return ""
+	}
+	if format, ok := m["format"].(map[string]any); ok {
+		return stringFromAny(format["type"])
+	}
+	return stringFromAny(m["type"])
+}
+
+// resolveAnthropicEffort picks the reasoning effort, preferring an explicit
+// string (forwarded verbatim so native levels like xhigh/max reach the gateway)
+// over a budget-derived bucket.
+func resolveAnthropicEffort(req anthropicRequest) string {
+	if e := anthropicThinkingEffortString(req.Thinking); e != "" {
+		return e
+	}
+	if e := strings.TrimSpace(stringFromAny(req.OutputConfig["effort"])); e != "" {
+		return e
+	}
+	if e := strings.TrimSpace(req.Effort); e != "" {
+		return e
+	}
+	return extractAnthropicReasoningEffort(req.Thinking)
+}
+
+// anthropicThinkingEffortString returns an explicit thinking.effort string, if any.
+func anthropicThinkingEffortString(thinking any) string {
+	m, ok := thinking.(map[string]any)
+	if !ok {
+		return ""
+	}
+	return strings.TrimSpace(stringFromAny(m["effort"]))
+}
+
+// reasoningEffortEnabled reports whether an effort value should turn thinking
+// on. Empty and explicit-off values ("none"/"off"/"disabled") mean disabled.
+func reasoningEffortEnabled(effort string) bool {
+	switch strings.ToLower(strings.TrimSpace(effort)) {
+	case "", "none", "off", "disabled":
+		return false
+	}
+	return true
+}
+
+func extractAnthropicReasoningEffort(thinking any) string {
+	m, ok := thinking.(map[string]any)
+	if !ok || len(m) == 0 {
+		return ""
+	}
+	if effort := strings.TrimSpace(stringFromAny(m["effort"])); effort != "" {
+		return effort
+	}
+	mode := strings.ToLower(strings.TrimSpace(stringFromAny(m["type"])))
+	switch mode {
+	case "", "enabled", "adaptive":
+		// treat adaptive as an enabled reasoning request with default effort
+	case "disabled":
+		// Explicitly turn thinking off (maps to enable_thinking:false downstream)
+		// so clients can stop a reasoning-default model spending its budget on it.
+		return "none"
+	default:
+		return ""
+	}
+	budget := parseReasoningBudget(m["budget_tokens"])
+	switch {
+	case budget >= 4096:
+		return "high"
+	case budget > 0 && budget < 1024:
+		return "low"
+	default:
+		return "medium"
+	}
+}
+
+func parseReasoningBudget(value any) int {
+	switch typed := value.(type) {
+	case int:
+		return typed
+	case int64:
+		return int(typed)
+	case float64:
+		return int(typed)
+	case json.Number:
+		if n, err := typed.Int64(); err == nil {
+			return int(n)
+		}
+	case string:
+		if typed == "" {
+			return 0
+		}
+		if n, err := strconv.Atoi(typed); err == nil {
+			return n
+		}
+	}
+	return 0
+}
+
+func maxTokens(a, b int) int {
+	if b > 0 {
+		return b
+	}
+	return a
+}
+
+func extractText(content any) string {
+	switch typed := content.(type) {
+	case nil:
+		return ""
+	case string:
+		return strings.TrimSpace(typed)
+	case []any:
+		parts := make([]string, 0, len(typed))
+		for _, item := range typed {
+			text := extractText(item)
+			if text != "" {
+				parts = append(parts, text)
+			}
+		}
+		return strings.Join(parts, "\n")
+	case map[string]any:
+		if text := stringFromAny(typed["text"]); text != "" {
+			return text
+		}
+		if text := stringFromAny(typed["input_text"]); text != "" {
+			return text
+		}
+		if nested := extractText(typed["content"]); nested != "" {
+			return nested
+		}
+		return ""
+	default:
+		return ""
+	}
+}
+
+func stringFromAny(value any) string {
+	if value == nil {
+		return ""
+	}
+	switch typed := value.(type) {
+	case string:
+		return strings.TrimSpace(typed)
+	default:
+		return ""
+	}
+}
+
+func valueOrString(primary, fallback string) string {
+	if strings.TrimSpace(primary) != "" {
+		return primary
+	}
+	return fallback
+}
+
+func decodeJSON(r *http.Request, out any) error {
+	defer r.Body.Close()
+	decoder := json.NewDecoder(r.Body)
+	decoder.UseNumber()
+	if err := decoder.Decode(out); err != nil {
+		return fmt.Errorf("invalid JSON body: %w", err)
+	}
+	return nil
+}
+
+func writeJSON(w http.ResponseWriter, status int, data any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(data)
+}
+
+// anthropicInputUsage builds the input side of an Anthropic usage object,
+// splitting cached prompt tokens out into cache_read_input_tokens (as Anthropic
+// reports them) and subtracting them from input_tokens.
+func anthropicInputUsage(result *service.ChatResult) map[string]any {
+	input := result.InputTokens
+	usage := map[string]any{"output_tokens": 0}
+	if result.CachedInputTokens > 0 {
+		cached := result.CachedInputTokens
+		if cached > input {
+			cached = input
+		}
+		usage["cache_read_input_tokens"] = cached
+		input -= cached
+	}
+	if result.CacheCreationInputTokens > 0 {
+		usage["cache_creation_input_tokens"] = result.CacheCreationInputTokens
+	}
+	usage["input_tokens"] = input
+	return usage
+}
+
+// anthropicFinalUsage is the complete usage object (input + cache + output),
+// emitted on the final message_delta / non-streaming response.
+func anthropicFinalUsage(result *service.ChatResult) map[string]any {
+	usage := anthropicInputUsage(result)
+	usage["output_tokens"] = result.OutputTokens
+	addCreditUsage(usage, result)
+	return usage
+}
+
+// addCreditUsage adds the gateway's real billing figures (non-standard fields
+// clients ignore) so tools like cc-switch can meter per request. Only added when
+// the gateway reported a charge; never estimated.
+func addCreditUsage(usage map[string]any, result *service.ChatResult) {
+	if result.Credits > 0 || result.OriginalCredits > 0 {
+		usage["credits"] = result.Credits
+		usage["original_credits"] = result.OriginalCredits
+		usage["billable"] = result.Billable
+	}
+}
+
+// openAIUsageMap builds an OpenAI-style usage object: unlike Anthropic,
+// prompt_tokens stays the full prompt count and cached tokens are a nested
+// subset detail.
+func openAIUsageMap(result *service.ChatResult) map[string]any {
+	total := result.UsedTokens
+	if total <= 0 {
+		total = result.InputTokens + result.OutputTokens
+	}
+	usage := map[string]any{
+		"prompt_tokens":     result.InputTokens,
+		"completion_tokens": result.OutputTokens,
+		"total_tokens":      total,
+	}
+	if result.CachedInputTokens > 0 {
+		usage["prompt_tokens_details"] = map[string]any{"cached_tokens": result.CachedInputTokens}
+	}
+	if result.ReasoningTokens > 0 {
+		usage["completion_tokens_details"] = map[string]any{"reasoning_tokens": result.ReasoningTokens}
+	}
+	addCreditUsage(usage, result)
+	return usage
+}
+
+func writeAnthropicError(w http.ResponseWriter, status int, kind string, message string) {
+	writeJSON(w, status, map[string]any{
+		"type": "error",
+		"error": map[string]any{
+			"type":    kind,
+			"message": message,
+		},
+	})
+}
+
+func writeOpenAIError(w http.ResponseWriter, status int, kind string, message string) {
+	writeJSON(w, status, map[string]any{
+		"error": map[string]any{
+			"message": message,
+			"type":    kind,
+			"code":    nil,
+			"param":   nil,
+		},
+	})
+}
+
+// openAIFinishReason resolves the OpenAI finish_reason, whitelisting only
+// tool_calls/length/content_filter/stop so backend-specific finish strings
+// never leak.
+func openAIFinishReason(result *service.ChatResult) string {
+	if len(result.ToolCalls) > 0 {
+		return "tool_calls"
+	}
+	switch strings.TrimSpace(result.FinishReason) {
+	case "length":
+		return "length"
+	case "content_filter":
+		return "content_filter"
+	}
+	return "stop"
+}
+
+// anthropicStopReason derives the Anthropic stop_reason/stop_sequence from the
+// canonical OpenAI-style FinishReason (set by upstream or the output limiter).
+func anthropicStopReason(result *service.ChatResult) (string, any) {
+	if len(result.ToolCalls) > 0 {
+		return "tool_use", nil
+	}
+	switch strings.TrimSpace(result.FinishReason) {
+	case "length":
+		return "max_tokens", nil
+	case "content_filter":
+		return "refusal", nil
+	case "stop":
+		// Any non-empty StopSequence is a real match; don't TrimSpace it, since
+		// whitespace-only stops ("\n\n", "\n") are legitimate sequences.
+		if result.StopSequence != "" {
+			return "stop_sequence", result.StopSequence
+		}
+		return "end_turn", nil
+	}
+	return "end_turn", nil
+}
+
+func writeOpenAIChatCompletion(w http.ResponseWriter, result *service.ChatResult) {
+	created := time.Now().Unix()
+	message := map[string]any{
+		"role":    "assistant",
+		"content": result.Text,
+	}
+	// Surface reasoning as the DeepSeek-style reasoning_content field, matching
+	// the streaming path (so OpenAI-compatible clients / converters see it).
+	if strings.TrimSpace(result.ThoughtText) != "" {
+		message["reasoning_content"] = result.ThoughtText
+	}
+	if len(result.ToolCalls) > 0 {
+		toolCalls := make([]map[string]any, 0, len(result.ToolCalls))
+		for _, tc := range result.ToolCalls {
+			argsJSON, _ := json.Marshal(tc.Arguments)
+			toolCalls = append(toolCalls, map[string]any{
+				"id":   tc.ID,
+				"type": "function",
+				"function": map[string]any{
+					"name":      tc.Name,
+					"arguments": string(argsJSON),
+				},
+			})
+		}
+		message["tool_calls"] = toolCalls
+	}
+	finishReason := openAIFinishReason(result)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"id":      fmt.Sprintf("chatcmpl-%d", time.Now().UnixNano()),
+		"object":  "chat.completion",
+		"created": created,
+		"model":   result.Model,
+		"choices": []map[string]any{{
+			"index":         0,
+			"message":       message,
+			"finish_reason": finishReason,
+		}},
+		"usage": openAIUsageMap(result),
+	})
+}
+
+func shouldEmitAnthropicThinking(req service.ChatRequest, result *service.ChatResult) bool {
+	return reasoningEffortEnabled(req.ReasoningEffort) && result != nil && strings.TrimSpace(result.ThoughtText) != ""
+}
+
+func streamingHeaders(w http.ResponseWriter) {
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("X-Accel-Buffering", "no")
+	w.WriteHeader(http.StatusOK)
+}
+
+func writeSSEEvent(w http.ResponseWriter, flusher http.Flusher, event string, payload any) error {
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintf(w, "event: %s\n", event); err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintf(w, "data: %s\n\n", body); err != nil {
+		return err
+	}
+	flusher.Flush()
+	return nil
+}
+
+func writeOpenAIChunk(w http.ResponseWriter, flusher http.Flusher, payload any) error {
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintf(w, "data: %s\n\n", body); err != nil {
+		return err
+	}
+	flusher.Flush()
+	return nil
+}
+
+// SetAuthKeys enables inbound API-key authentication (blank entries ignored; no
+// usable keys leaves access open). Must be called before ListenAndServe.
+func (s *Server) SetAuthKeys(keys []string) {
+	set := make(map[string]struct{}, len(keys))
+	for _, k := range keys {
+		if k = strings.TrimSpace(k); k != "" {
+			set[k] = struct{}{}
+		}
+	}
+	if len(set) == 0 {
+		s.authKeys = nil
+		return
+	}
+	s.authKeys = set
+}
+
+// withAuth gates requests behind the configured API keys (pass-through when
+// none are set). Unauthenticated requests panic with http.ErrAbortHandler so
+// net/http drops the connection silently rather than returning a 401 — a probe
+// cannot tell an auth-gated service is listening here.
+func (s *Server) withAuth(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if len(s.authKeys) == 0 || s.authorized(r) {
+			next.ServeHTTP(w, r)
+			return
+		}
+		panic(http.ErrAbortHandler)
+	})
+}
+
+// authorized reports whether the request carries a configured API key, comparing
+// every key in constant time so timing cannot leak which keys exist.
+func (s *Server) authorized(r *http.Request) bool {
+	presented := extractRequestKey(r)
+	if presented == "" {
+		return false
+	}
+	match := 0
+	for k := range s.authKeys {
+		match |= subtle.ConstantTimeCompare([]byte(presented), []byte(k))
+	}
+	return match == 1
+}
+
+// extractRequestKey pulls the client's key from the Anthropic x-api-key header
+// or an OpenAI-style Authorization header (Bearer scheme or a bare token).
+func extractRequestKey(r *http.Request) string {
+	if v := strings.TrimSpace(r.Header.Get("x-api-key")); v != "" {
+		return v
+	}
+	auth := strings.TrimSpace(r.Header.Get("Authorization"))
+	if auth == "" {
+		return ""
+	}
+	if len(auth) >= 7 && strings.EqualFold(auth[:7], "Bearer ") {
+		return strings.TrimSpace(auth[7:])
+	}
+	return auth
+}
+
+func withCORS(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, HEAD, POST, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, x-api-key, anthropic-version")
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+func maxConcurrentRequests() int {
+	raw := strings.TrimSpace(os.Getenv("QODERCN_GATEWAY_MAX_CONCURRENT"))
+	if raw == "" {
+		return 4
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil || n < 1 {
+		return 4
+	}
+	if n > 16 {
+		return 16
+	}
+	return n
+}
+
+func (s *Server) acquire(ctx context.Context) bool {
+	select {
+	case s.sem <- struct{}{}:
+		return true
+	case <-ctx.Done():
+		return false
+	}
+}
+
+func (s *Server) release() {
+	select {
+	case <-s.sem:
+	default:
+	}
+}
+
+func extractOpenAIToolCalls(raw []any) []tooltypes.ToolCall {
+	if len(raw) == 0 {
+		return nil
+	}
+	out := make([]tooltypes.ToolCall, 0, len(raw))
+	for _, item := range raw {
+		m, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		id := stringFromAny(m["id"])
+		fn, ok := m["function"].(map[string]any)
+		if !ok {
+			continue
+		}
+		name := stringFromAny(fn["name"])
+		if name == "" {
+			continue
+		}
+		argsRaw := stringFromAny(fn["arguments"])
+		var args map[string]any
+		if argsRaw != "" {
+			_ = json.Unmarshal([]byte(argsRaw), &args)
+		}
+		out = append(out, tooltypes.ToolCall{
+			ID:        id,
+			Name:      name,
+			Arguments: args,
+		})
+	}
+	return out
+}
+
+type anthropicToolResult struct {
+	ToolUseID string
+	Content   string
+	IsError   bool
+	Images    []service.Image
+}
+
+// anthropicToolBlock tracks one streaming tool_use content block (keyed by the
+// upstream tool-call index) while its id/name/argument fragments arrive.
+type anthropicToolBlock struct {
+	anthropicIndex int
+	id             string
+	name           string
+	started        bool
+	pendingArgs    string
+}
+
+func extractAnthropicUserContent(content any) (string, []anthropicToolResult) {
+	items, ok := content.([]any)
+	if !ok {
+		return extractText(content), nil
+	}
+	var results []anthropicToolResult
+	var textParts []string
+	for _, item := range items {
+		m, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		switch stringFromAny(m["type"]) {
+		case "text":
+			if t := stringFromAny(m["text"]); t != "" {
+				textParts = append(textParts, t)
+			}
+		case "thinking", "redacted_thinking":
+			// Skip thinking blocks in user messages
+			continue
+		case "tool_result":
+			toolUseID := stringFromAny(m["tool_use_id"])
+			resultText := extractText(m["content"])
+			isErr, _ := m["is_error"].(bool)
+			images := extractAnthropicImages(m["content"])
+			// Keep the result even when empty so the matching tool_use is not orphaned.
+			if toolUseID != "" {
+				results = append(results, anthropicToolResult{
+					ToolUseID: toolUseID,
+					Content:   resultText,
+					IsError:   isErr,
+					Images:    images,
+				})
+			}
+		}
+	}
+	text := ""
+	if len(textParts) > 0 {
+		text = strings.Join(textParts, "\n")
+	}
+	return text, results
+}
+
+func extractAnthropicAssistantContent(content any) (string, string, []tooltypes.ToolCall) {
+	items, ok := content.([]any)
+	if !ok {
+		return extractText(content), "", nil
+	}
+	calls := make([]tooltypes.ToolCall, 0, len(items))
+	var textParts []string
+	var reasoningParts []string
+	for _, item := range items {
+		m, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		switch stringFromAny(m["type"]) {
+		case "text":
+			if t := stringFromAny(m["text"]); t != "" {
+				textParts = append(textParts, t)
+			}
+		case "thinking":
+			// Preserve reasoning text so multi-turn extended thinking survives the
+			// round-trip (forwarded to the gateway as reasoning_content).
+			if t := stringFromAny(m["thinking"]); t != "" {
+				reasoningParts = append(reasoningParts, t)
+			}
+		case "redacted_thinking":
+			// Redacted thinking is opaque ciphertext with no usable plaintext and is
+			// meaningless to the gateway; drop it rather than forward a placeholder.
+			continue
+		case "tool_use":
+			id := stringFromAny(m["id"])
+			name := stringFromAny(m["name"])
+			if name == "" {
+				continue
+			}
+			var args map[string]any
+			if rawInput, ok := m["input"].(map[string]any); ok {
+				args = rawInput
+			} else if inputStr, ok := m["input"].(string); ok && inputStr != "" {
+				if err := json.Unmarshal([]byte(inputStr), &args); err != nil {
+					args = map[string]any{}
+				}
+			}
+			calls = append(calls, tooltypes.ToolCall{
+				ID:        id,
+				Name:      name,
+				Arguments: args,
+			})
+		}
+	}
+	text := ""
+	if len(textParts) > 0 {
+		text = strings.Join(textParts, "\n")
+	}
+	reasoning := ""
+	if len(reasoningParts) > 0 {
+		reasoning = strings.Join(reasoningParts, "\n")
+	}
+	return text, reasoning, calls
+}
+
+func extractOpenAIImages(content any) []service.Image {
+	items, ok := content.([]any)
+	if !ok {
+		return nil
+	}
+	var images []service.Image
+	for _, item := range items {
+		m, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		if stringFromAny(m["type"]) != "image_url" {
+			continue
+		}
+		imageURL, ok := m["image_url"].(map[string]any)
+		if !ok {
+			continue
+		}
+		url := stringFromAny(imageURL["url"])
+		if url == "" {
+			continue
+		}
+		img := parseImageURL(url)
+		if img != nil {
+			images = append(images, *img)
+		}
+	}
+	return images
+}
+
+// countAnthropicImageBlocks counts image content parts (any source type) for
+// token estimation without touching the (possibly huge) base64 payload.
+func countAnthropicImageBlocks(content any) int {
+	items, ok := content.([]any)
+	if !ok {
+		return 0
+	}
+	n := 0
+	for _, item := range items {
+		if m, ok := item.(map[string]any); ok && stringFromAny(m["type"]) == "image" {
+			n++
+		}
+	}
+	return n
+}
+
+func extractAnthropicImages(content any) []service.Image {
+	items, ok := content.([]any)
+	if !ok {
+		return nil
+	}
+	var images []service.Image
+	for _, item := range items {
+		m, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		if stringFromAny(m["type"]) != "image" {
+			continue
+		}
+		source, ok := m["source"].(map[string]any)
+		if !ok {
+			continue
+		}
+		switch stringFromAny(source["type"]) {
+		case "base64":
+			data := stringFromAny(source["data"])
+			if data == "" {
+				continue
+			}
+			// Resize like the OpenAI path so large Claude Code screenshots
+			// don't bloat / get rejected (normalizeImage passes through on failure).
+			if img := normalizeImage(&service.Image{MediaType: stringFromAny(source["media_type"]), Data: data}); img != nil {
+				images = append(images, *img)
+			}
+		case "url":
+			// Pass the URL through; the gateway fetches it (no proxy-side download).
+			if u := strings.TrimSpace(stringFromAny(source["url"])); u != "" {
+				images = append(images, service.Image{URL: u})
+			}
+		}
+	}
+	return images
+}
+
+func parseImageURL(url string) *service.Image {
+	if strings.HasPrefix(url, "data:") {
+		return normalizeImage(parseDataURL(url))
+	}
+	if u := strings.TrimSpace(url); strings.HasPrefix(u, "http://") || strings.HasPrefix(u, "https://") {
+		// Pass remote URLs through; the gateway fetches them itself. Avoids
+		// proxy-side SSRF / unbounded download / hang from arbitrary client URLs.
+		return &service.Image{URL: u}
+	}
+	// Reject anything else (file://, ~, local paths): the proxy must never read
+	// host-local files, or a caller could exfiltrate them via image_url.
+	return nil
+}
+
+func parseDataURL(url string) *service.Image {
+	const prefix = "data:"
+	if !strings.HasPrefix(url, prefix) {
+		return nil
+	}
+	rest := url[len(prefix):]
+	commaIdx := strings.Index(rest, ",")
+	if commaIdx < 0 {
+		return nil
+	}
+	meta := rest[:commaIdx]
+	data := rest[commaIdx+1:]
+
+	mediaType := ""
+	if strings.HasSuffix(meta, ";base64") {
+		mediaType = strings.TrimSuffix(meta, ";base64")
+	} else {
+		mediaType = meta
+	}
+
+	return &service.Image{
+		MediaType: mediaType,
+		Data:      data,
+	}
+}
+
+func normalizeImage(img *service.Image) *service.Image {
+	if img == nil || strings.TrimSpace(img.Data) == "" {
+		return img
+	}
+	data, err := base64.StdEncoding.DecodeString(img.Data)
+	if err != nil || len(data) == 0 {
+		return img
+	}
+	const maxImageBytes = 2 * 1024 * 1024
+	const maxImageSide = 1568
+	if len(data) <= maxImageBytes {
+		if cfg, _, err := image.DecodeConfig(bytes.NewReader(data)); err == nil {
+			if cfg.Width <= maxImageSide && cfg.Height <= maxImageSide {
+				return img
+			}
+		}
+	}
+
+	decoded, _, err := image.Decode(bytes.NewReader(data))
+	if err != nil {
+		return img
+	}
+	bounds := decoded.Bounds()
+	width := bounds.Dx()
+	height := bounds.Dy()
+	if width <= 0 || height <= 0 {
+		return img
+	}
+	targetWidth, targetHeight := scaledDimensions(width, height, maxImageSide)
+	dst := resizeNearest(decoded, targetWidth, targetHeight)
+
+	var buf bytes.Buffer
+	if err := jpeg.Encode(&buf, dst, &jpeg.Options{Quality: 85}); err != nil {
+		return img
+	}
+	img.MediaType = "image/jpeg"
+	img.Data = base64.StdEncoding.EncodeToString(buf.Bytes())
+	return img
+}
+
+func resizeNearest(src image.Image, width int, height int) *image.RGBA {
+	dst := image.NewRGBA(image.Rect(0, 0, width, height))
+	bounds := src.Bounds()
+	srcWidth := bounds.Dx()
+	srcHeight := bounds.Dy()
+	for y := 0; y < height; y++ {
+		sy := bounds.Min.Y + y*srcHeight/height
+		for x := 0; x < width; x++ {
+			sx := bounds.Min.X + x*srcWidth/width
+			dst.Set(x, y, src.At(sx, sy))
+		}
+	}
+	return dst
+}
+
+func scaledDimensions(width int, height int, maxSide int) (int, int) {
+	if width <= maxSide && height <= maxSide {
+		return width, height
+	}
+	if width >= height {
+		scaledHeight := height * maxSide / width
+		if scaledHeight < 1 {
+			scaledHeight = 1
+		}
+		return maxSide, scaledHeight
+	}
+	scaledWidth := width * maxSide / height
+	if scaledWidth < 1 {
+		scaledWidth = 1
+	}
+	return scaledWidth, maxSide
+}

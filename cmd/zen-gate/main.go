@@ -24,6 +24,7 @@ import (
 	"zen-gate/internal/lane"
 	"zen-gate/internal/logx"
 	"zen-gate/internal/notify"
+	"zen-gate/internal/qoderhub"
 	"zen-gate/internal/store"
 	"zen-gate/internal/subs"
 	"zen-gate/internal/tray"
@@ -223,6 +224,16 @@ func main() {
 	}
 	dashURL := strings.TrimSuffix(gw.BaseURL(), "/v1")
 	logger.Infof("dashboard ready at %s", dashURL)
+
+	// Embedded QoderCN gateway (Qoder 账号渠道): rides this process, serves
+	// 127.0.0.1:8095 for the managed provider. A busy port is not fatal — an
+	// external qodercn-gateway the user runs themselves keeps serving.
+	qoderHub, qoderHubErr := qoderhub.Start()
+	if qoderHubErr != nil {
+		logger.Infof("内置 Qoder 网关未启动: %v", qoderHubErr)
+	} else {
+		logger.Infof("内置 Qoder 网关就绪 (127.0.0.1:8095)")
+	}
 	if lan := gw.LANBaseURL(); lan != "" {
 		logger.Infof("局域网 API 可用: %s", lan)
 	}
@@ -367,6 +378,7 @@ func main() {
 		cancel()
 		gw.Stop()
 		mgr.Stop()
+		qoderHub.Stop()
 		_ = st.FlushStats()
 		return
 	}
@@ -388,6 +400,7 @@ func main() {
 				cancel()
 				gw.Stop()
 				mgr.Stop() // before os.Exit — the deferred path never runs here
+				qoderHub.Stop()
 				_ = st.FlushStats()
 				os.Exit(0)
 			},
@@ -428,6 +441,8 @@ func main() {
 	cancel()
 	gw.Stop()
 	mgr.Stop()
+	qoderHub.Stop()
+	qoderHub.Stop()
 	_ = st.FlushStats()
 	logger.Infof("zen-gate 已退出")
 }
