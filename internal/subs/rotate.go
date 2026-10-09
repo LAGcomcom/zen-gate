@@ -20,18 +20,39 @@ const probeTimeout = 12 * time.Second
 // coolDuration parks a node after a dial failure before it rejoins rotation.
 const coolDuration = time.Minute
 
+// probeNodeRoundtrips is how many tries one node gets before it is judged dead.
+// ProbeAll's verdict is a sample, and a sample is cheap to get wrong: transient
+// jitter, upstream rate limits and local port contention all read as "egress
+// empty" on the first try, and a false death drops a healthy node out of the
+// pool until the next probe. One re-try on a fresh connection clears those.
+const probeNodeRoundtrips = 2
+
 // ProbeAll health-checks every node concurrently: egress IP/country via the
 // node's local socks inbound, latency from the echo round-trip. Nodes that
 // fail lose their Alive flag and drop out of rotation until the next probe.
 func (m *Manager) ProbeAll(ctx context.Context) {
+	m.probeNodes(ctx, m.snapshotNodes(func(*NodeHealth) bool { return true }))
+}
+
+// ProbeDead re-checks only the nodes currently marked dead, so a node killed by
+// a transient failure rejoins rotation without waiting for a full refresh.
+func (m *Manager) ProbeDead(ctx context.Context) {
+	m.probeNodes(ctx, m.snapshotNodes(func(h *NodeHealth) bool { return !h.Alive }))
+}
+
+func (m *Manager) snapshotNodes(keep func(*NodeHealth) bool) []NodeHealth {
 	m.mu.Lock()
+	defer m.mu.Unlock()
 	nodes := make([]NodeHealth, 0, len(m.nodes))
 	for _, n := range m.nodes {
-		if h := m.health[n.ID]; h != nil {
+		if h := m.health[n.ID]; h != nil && keep(h) {
 			nodes = append(nodes, *h)
 		}
 	}
-	m.mu.Unlock()
+	return nodes
+}
+
+func (m *Manager) probeNodes(ctx context.Context, nodes []NodeHealth) {
 	if len(nodes) == 0 {
 		return
 	}
@@ -43,12 +64,7 @@ func (m *Manager) ProbeAll(ctx context.Context) {
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
-			pctx, cancel := context.WithTimeout(ctx, probeTimeout)
-			defer cancel()
-			client := nodeClient(h.Port)
-			start := time.Now()
-			eg := lane.DetectEgressVia(pctx, client)
-			lat := int(time.Since(start).Milliseconds())
+			eg, lat := m.probeOnce(ctx, h.Port)
 			m.mu.Lock()
 			defer m.mu.Unlock()
 			if cur := m.health[h.ID]; cur != nil {
@@ -61,11 +77,37 @@ func (m *Manager) ProbeAll(ctx context.Context) {
 					cur.Alive = true
 					cur.IP, cur.Country = eg.IP, eg.Country
 					cur.LatencyMs = lat
+					cur.CoolUntil = 0 // a live egress is proof enough to rejoin rotation now
 				}
 			}
 		}(h)
 	}
 	wg.Wait()
+}
+
+// probeOnce dials out through one node's socks inbound, re-trying the whole
+// round-trip before it reports an empty egress.
+func (m *Manager) probeOnce(ctx context.Context, port int) (lane.Egress, int) {
+	var eg lane.Egress
+	var lat int
+	for try := 0; try < probeNodeRoundtrips; try++ {
+		pctx, cancel := context.WithTimeout(ctx, probeTimeout)
+		client := nodeClient(port)
+		start := time.Now()
+		eg = lane.DetectEgressVia(pctx, client)
+		lat = int(time.Since(start).Milliseconds())
+		cancel()
+		if eg.IP != "" {
+			return eg, lat
+		}
+		if ctx.Err() != nil {
+			return eg, lat
+		}
+		if try+1 < probeNodeRoundtrips {
+			time.Sleep(500 * time.Millisecond)
+		}
+	}
+	return eg, lat
 }
 
 // nodeClient builds an HTTP client whose egress is one node's local socks

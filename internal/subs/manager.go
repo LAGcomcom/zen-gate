@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -41,6 +42,8 @@ type Manager struct {
 	lastSync time.Time
 	lastErr  string
 	version  string
+
+	deathCancel context.CancelFunc // bounds the dead-node recheck loop
 }
 
 // NodeHealth is one node's live state for the rotation pool and the UI.
@@ -224,8 +227,73 @@ func (m *Manager) Refresh(ctx context.Context) error {
 	if len(errs) > 0 {
 		m.log("部分订阅失败: %s", strings.Join(errs, "; "))
 	}
-	go m.ProbeAll(context.Background())
+	// Probing the moment startProcess returns kills the whole pool: sing-box
+	// has only just been exec'd, its inbounds are not listening yet, and one
+	// round of guaranteed-failure probes flips every node to Alive=false.
+	// Wait for the first socks port to accept before the health pass; the
+	// grace covers the remaining outbounds loading.
+	go func() {
+		waitPortReady(PortBase, portDialWait)
+		m.ProbeAll(context.Background())
+		m.startDeathLoop()
+	}()
 	return nil
+}
+
+// portDialWait bounds one port-readiness wait: 20 seconds covers sing-box's
+// cold start on slow disks; past that we probe anyway and let the death loop
+// recover false negatives.
+const portDialWait = 20 * time.Second
+
+// deathProbeInterval is how often a dead node gets another look. It exists
+// because ProbeAll's verdict is a sample: without this loop, nodes killed by
+// one unlucky round wait for the next full refresh (manual, or the hourly
+// one) while every client request fails on "没有健康节点".
+const deathProbeInterval = 2 * time.Minute
+
+// startDeathLoop re-probes dead nodes on a ticker for the process's life.
+// A repeat call replaces the previous loop instead of stacking. The loop
+// deliberately runs on its own context — binding it to a caller's timeout
+// (issue #29 defect 3) made it silently vanish while the pool stayed dead.
+func (m *Manager) startDeathLoop() {
+	m.mu.Lock()
+	if m.deathCancel != nil {
+		m.deathCancel()
+	}
+	pctx, pcancel := context.WithCancel(context.Background())
+	m.deathCancel = pcancel
+	m.mu.Unlock()
+	go func() {
+		t := time.NewTicker(deathProbeInterval)
+		defer t.Stop()
+		for {
+			select {
+			case <-pctx.Done():
+				return
+			case <-t.C:
+				m.ProbeDead(pctx)
+			}
+		}
+	}()
+}
+
+// waitPortReady blocks until sing-box's first socks inbound accepts a TCP
+// connection (inbounds bind in config order, so the base port going up means
+// the process finished booting), or until wait elapses.
+func waitPortReady(port int, wait time.Duration) {
+	deadline := time.Now().Add(wait)
+	for {
+		conn, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", port), time.Second)
+		if err == nil {
+			conn.Close()
+			time.Sleep(2 * time.Second) // let the remaining outbounds bind
+			return
+		}
+		if time.Now().After(deadline) {
+			return
+		}
+		time.Sleep(300 * time.Millisecond)
+	}
 }
 
 func displayName(s store.Subscription) string {
@@ -283,7 +351,9 @@ func (m *Manager) startProcess(exe, configPath string, nodeCount int) error {
 	}
 	m.logFile, m.cmd = logf, cmd
 	m.version = queryVersion(exe)
-	m.log("sing-box %s 已启动 (pid %d, %d 节点)", m.version, cmd.Process.Pid, len(m.nodes))
+	// nodeCount, not len(m.nodes): Refresh publishes the node list only after
+	// this returns, and the boot log printed "0 节点" even with 77 nodes bound.
+	m.log("sing-box %s 已启动 (pid %d, %d 节点)", m.version, cmd.Process.Pid, nodeCount)
 	go m.supervise(cmd)
 	return nil
 }
@@ -356,6 +426,10 @@ func (m *Manager) Stop() {
 	cmd := m.cmd
 	nodeCount := len(m.nodes)
 	m.cmd = nil
+	if m.deathCancel != nil {
+		m.deathCancel()
+		m.deathCancel = nil
+	}
 	m.mu.Unlock()
 	if cmd != nil && cmd.Process != nil {
 		_ = stopAndWait(cmd.Process, inboundPorts(nodeCount), restartWait)
