@@ -59,7 +59,9 @@ func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request, rest string
 	case rest == "settings" && r.Method == http.MethodPost:
 		s.adminSettings(w, r)
 	case rest == "reprobe" && r.Method == http.MethodPost:
-		go s.Lane.ProbeRound(r.Context(), true)
+		// r.Context() is cancelled the instant this handler returns; a detached
+		// background job must not ride it (same defect as subs/probe below).
+		go s.Lane.ProbeRound(context.Background(), true)
 		writeJSON(w, 200, map[string]any{"ok": true})
 	case rest == "update/apply" && r.Method == http.MethodPost:
 		s.adminUpdateApply(w)
@@ -141,7 +143,10 @@ func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request, rest string
 			writeJSON(w, 503, map[string]any{"ok": false, "error": "订阅轮询未就绪"})
 			return
 		}
-		go s.subs.ProbeAll(r.Context())
+		// r.Context() dies when this handler returns, killing a probe that has
+		// barely started — the dashboard's 重新探测 answered ok:true while
+		// doing nothing (issue #29). Run it detached.
+		go s.subs.ProbeAll(context.Background())
 		writeJSON(w, 200, map[string]any{"ok": true})
 	case rest == "subs/singbox" && r.Method == http.MethodPost:
 		s.adminSubsSingBox(w, r)
@@ -692,6 +697,13 @@ func (s *Server) adminModelVisibility(w http.ResponseWriter, r *http.Request) {
 		}
 		if s.registry != nil {
 			time.AfterFunc(1500*time.Millisecond, func() {
+				// ResyncEnabled reads the Registry's cached model set: refresh
+				// the cache first, or the reinjection writes with the pre-
+				// visibility-change roster and the hidden model stays in the
+				// picker (qoder.go follows the same order for this reason).
+				if s.modelsSync != nil {
+					s.modelsSync()
+				}
 				if n := s.registry.ResyncEnabled(); n > 0 && s.logger != nil {
 					s.logger.Infof("可见性变化，已重新注入 %d 个已开启 Agent 的配置", n)
 				}

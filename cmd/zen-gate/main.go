@@ -211,6 +211,18 @@ func main() {
 	syncEndpoints := func() {
 		reg.SetEndpoints(gw.BaseURL(), gw.InjectableModels())
 		tray.SetStatus(trayStatus(st, ln))
+		// Issue #26: the in-memory refresh alone never touched agent config
+		// files, so a model joining the catalog stayed invisible to every
+		// agent until the user manually toggled visibility. ResyncEnabled
+		// writes only when the roster/capability fingerprint changed since
+		// its last successful pass (each needless rewrite stacks another
+		// timestamped backup — backups are never pruned), so firing this on
+		// every probe round is cheap. It also injects once at boot, which
+		// propagates rule-shape fixes (issue #27's fuller ZCode specs) to
+		// agents enabled under an earlier build.
+		if n := reg.ResyncEnabled(); n > 0 {
+			logger.Infof("模型清单更新，已重新注入 %d 个已开启 Agent 的配置", n)
+		}
 	}
 	ln.OnChange = syncEndpoints
 	gw.SetModelsSync(syncEndpoints)
