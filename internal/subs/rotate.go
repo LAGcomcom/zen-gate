@@ -30,8 +30,17 @@ const probeNodeRoundtrips = 2
 // ProbeAll health-checks every node concurrently: egress IP/country via the
 // node's local socks inbound, latency from the echo round-trip. Nodes that
 // fail lose their Alive flag and drop out of rotation until the next probe.
+// realTrafficTrust is how long a real success keeps a node out of the probe
+// rotation. A probe is a sample that can be wrong in both directions; a served
+// request is proof, so re-sampling that node spends probe budget to risk
+// overwriting a better verdict. The lane already applies this idea per model
+// (Lane.realOK); this is the per-node counterpart it needs to pick an exit.
+const realTrafficTrust = 5 * time.Minute
+
 func (m *Manager) ProbeAll(ctx context.Context) {
-	m.probeNodes(ctx, m.snapshotNodes(func(*NodeHealth) bool { return true }))
+	m.probeNodes(ctx, m.snapshotNodes(func(h *NodeHealth) bool {
+		return !(h.LastOKMs > 0 && time.Since(time.UnixMilli(h.LastOKMs)) < realTrafficTrust)
+	}))
 }
 
 // ProbeDead re-checks only the nodes currently marked dead, so a node killed by

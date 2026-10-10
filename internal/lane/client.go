@@ -71,6 +71,11 @@ type CallRecord struct {
 	DecodeTok int    `json:"decodeTokens,omitempty"`
 	Effort    string `json:"effort,omitempty"`
 	At        int64  `json:"at"`
+	// Exit records which egress actually served this physical request. Under
+	// concurrency the first question asked is always whether these requests
+	// went out through the same exit; without it you can only guess. Empty
+	// means the direct fallback was used.
+	Exit string `json:"exit,omitempty"`
 	// Trace is the gateway correlation id of the client request this attempt
 	// served; empty for calls made outside a request.
 	Trace string `json:"trace,omitempty"`
@@ -739,6 +744,18 @@ func (l *Lane) attemptModel(ctx context.Context, req Request, model, effort stri
 	wire := entry.Wire
 	style := mapWireStyle(wire)
 
+	// Choose the exit before the request is built, then derive the upstream
+	// session from the exit's stable identity. Doing it in this order is what
+	// makes one conversation one exit: the same prompt prefix keeps landing on
+	// the same egress, so the upstream has a chance to reuse its prompt cache
+	// instead of re-prefilling the whole conversation on every turn.
+	plan := ExitPlan{Model: base}
+	if r := CurrentRotator(); r != nil {
+		plan.NodeID = r.Pick(req.SessionSeed, base)
+		plan.ExitKey = r.ExitKey(plan.NodeID)
+	}
+	ctx = WithExitPlan(ctx, plan)
+
 	// The Zen lane fingerprints tools and mints session/request ids; the Kilo
 	// pool has no tool-name gate and no session concept — its models see the
 	// caller's tools exactly as declared, and a plain POST per turn.
@@ -788,7 +805,7 @@ func (l *Lane) attemptModel(ctx context.Context, req Request, model, effort stri
 	// The Zen lane fingerprints tools and mints session/request ids; the Kilo
 	// pool has no tool-name gate and no session concept — its models see the
 	// caller's tools exactly as declared, and a plain POST per turn.
-	session := SessionForConversation(req.SessionSeed)
+	session := SessionForExit(req.SessionSeed, plan.ExitKey)
 	requestID := RequestIdFor(session, req.TurnSeed)
 	post := func(cctx context.Context, body map[string]any, onData func(payload []byte) error) (*Usage, error) {
 		if kilo {
@@ -819,7 +836,19 @@ func (l *Lane) attemptModel(ctx context.Context, req Request, model, effort stri
 	sawAny := result.SawText || result.SawToolCall || result.SawReasoning
 
 	if err != nil {
-		l.record(ctx, CallRecord{Model: base, Ok: false, Effort: effort, Agent: req.Agent, At: time.Now().UnixMilli()}, result, err, firstAt)
+		l.record(ctx, CallRecord{Model: base, Ok: false, Exit: plan.NodeID, Effort: effort, Agent: req.Agent, At: time.Now().UnixMilli()}, result, err, firstAt)
+		// Book the failure against (exit, model) so later requests skip it. The
+		// ledger only ever skips known-bad pairs — it is never used to prefer a
+		// "known good" one, which would pin every concurrent request onto the
+		// first success and burn that exit's allowance.
+		switch asUpstream(err).Code {
+		case CodeRegion:
+			ReportExit(plan.NodeID, base, "region")
+		case CodeQuota:
+			ReportExit(plan.NodeID, base, "limited")
+		case CodeTransport, CodeServer, CodeTimeout, CodeEmpty:
+			ReportExit(plan.NodeID, base, "other")
+		}
 		// The caller decides what a 429 means: under rotation it re-asks the
 		// pool before the model gets a throttle episode.
 		return Outcome{Finish: result.Finish}, asUpstream(err), sawAny
@@ -829,12 +858,17 @@ func (l *Lane) attemptModel(ctx context.Context, req Request, model, effort stri
 		case "failed", "cancelled":
 			// A terminal frame that names the turn a failure is not a clean
 			// stop, even though the mapped reason collapses into stop.
-			l.record(ctx, CallRecord{Model: base, Ok: false, Effort: effort, Agent: req.Agent, At: time.Now().UnixMilli()}, result, nil, firstAt)
+			l.record(ctx, CallRecord{Model: base, Ok: false, Exit: plan.NodeID, Effort: effort, Agent: req.Agent, At: time.Now().UnixMilli()}, result, nil, firstAt)
 			return Outcome{Usage: result.Usage}, &UpstreamError{Code: CodeServer,
 				Message: "upstream ended the turn with " + result.FinishToken}, sawAny
 		}
 		l.NoteRealSuccess(base)
-		l.record(ctx, CallRecord{Model: base, Ok: true, Effort: effort, Agent: req.Agent, At: time.Now().UnixMilli()}, result, nil, firstAt)
+		// A served request is proof: clear this exit's cooldown and the ban
+		// booked against this very (exit, model) pair.
+		if r := CurrentRotator(); r != nil && plan.NodeID != "" {
+			r.Revive(plan.NodeID, base)
+		}
+		l.record(ctx, CallRecord{Model: base, Ok: true, Exit: plan.NodeID, Effort: effort, Agent: req.Agent, At: time.Now().UnixMilli()}, result, nil, firstAt)
 		return Outcome{Usage: result.Usage, Finish: result.Finish}, nil, true
 	}
 
@@ -865,7 +899,7 @@ func (l *Lane) attemptModel(ctx context.Context, req Request, model, effort stri
 			}})
 		}
 		if recovBudget < 512 || !checkpointFits(recMsgs, *entry, checkpoint, recovBudget) {
-			l.record(ctx, CallRecord{Model: base, Ok: false, Truncated: true, Effort: effort, Agent: req.Agent, At: time.Now().UnixMilli()}, result, nil, firstAt)
+			l.record(ctx, CallRecord{Model: base, Ok: false, Truncated: true, Exit: plan.NodeID, Effort: effort, Agent: req.Agent, At: time.Now().UnixMilli()}, result, nil, firstAt)
 			return Outcome{Usage: result.Usage}, &UpstreamError{Code: CodeTransport, Message: "upstream cut a turn short; the continuation does not fit the context"}, sawAny
 		}
 		recBody := buildBody(recMsgs, nil, recovBudget)
@@ -893,11 +927,16 @@ func (l *Lane) attemptModel(ctx context.Context, req Request, model, effort stri
 		if rerr == nil && recResult.SawFinish && recResult.FinishToken != "failed" && recResult.FinishToken != "cancelled" && recResult.SawText {
 			recResult.Usage.Merge(&result.Usage)
 			l.NoteRealSuccess(base)
-			l.record(ctx, CallRecord{Model: base, Ok: true, Recovered: true, Effort: effort, Agent: req.Agent, At: time.Now().UnixMilli()}, recResult, nil, firstAt)
+			// The continuation rode the same exit and served: same proof as a
+			// clean turn, so lift this pair's cooldown/ban too.
+			if r := CurrentRotator(); r != nil && plan.NodeID != "" {
+				r.Revive(plan.NodeID, base)
+			}
+			l.record(ctx, CallRecord{Model: base, Ok: true, Recovered: true, Exit: plan.NodeID, Effort: effort, Agent: req.Agent, At: time.Now().UnixMilli()}, recResult, nil, firstAt)
 			return Outcome{Usage: recResult.Usage, Finish: recResult.Finish, Recovered: true}, nil, true
 		}
 		recResult.Usage.Merge(&result.Usage)
-		l.record(ctx, CallRecord{Model: base, Ok: false, Truncated: true, Effort: effort, Agent: req.Agent, At: time.Now().UnixMilli()}, recResult, rerr, firstAt)
+		l.record(ctx, CallRecord{Model: base, Ok: false, Truncated: true, Exit: plan.NodeID, Effort: effort, Agent: req.Agent, At: time.Now().UnixMilli()}, recResult, rerr, firstAt)
 		if rerr != nil {
 			uerr := asUpstream(rerr)
 			if uerr.Code == CodeQuota {
@@ -910,7 +949,7 @@ func (l *Lane) attemptModel(ctx context.Context, req Request, model, effort stri
 
 	// Not recoverable: a mid-content cut is a property of this turn's length,
 	// and re-sending would pay the same five minutes again.
-	l.record(ctx, CallRecord{Model: base, Ok: false, Truncated: true, Effort: effort, Agent: req.Agent, At: time.Now().UnixMilli()}, result, nil, firstAt)
+	l.record(ctx, CallRecord{Model: base, Ok: false, Truncated: true, Exit: plan.NodeID, Effort: effort, Agent: req.Agent, At: time.Now().UnixMilli()}, result, nil, firstAt)
 	return Outcome{Usage: result.Usage}, &UpstreamError{Code: CodeTransport, Message: "upstream closed the stream without a finish token"}, sawAny
 }
 func (l *Lane) record(ctx context.Context, rec CallRecord, result StreamResult, err error, firstAt int64) {

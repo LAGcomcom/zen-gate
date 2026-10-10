@@ -40,6 +40,23 @@ type Manager struct {
 	stopping bool
 	rr       atomic.Uint64
 	lastSync time.Time
+
+	// sticky remembers (conversation → exit) so one conversation keeps the
+	// same exit and a client's prompt cache has a chance to hit. It is a
+	// preference, never a lock: an unusable exit is dropped immediately.
+	sticky   map[string]string
+	stickyAt map[string]int64
+
+	// bans is the (exit, model) ledger: once an exit fails for a model, later
+	// requests stop re-hitting the same wall. fails/failAt drive the adaptive
+	// delay — a transient failure parks the pair for seconds, and only a
+	// repeated one grows it. There is deliberately no mirror table of
+	// "known-good" pairs: preferring one pins every concurrent request onto
+	// the first success (measured in #23), so the ledger only ever removes
+	// candidates.
+	bans     map[string]time.Time
+	fails    map[string]int
+	failAt   map[string]time.Time
 	lastErr  string
 	version  string
 
@@ -57,7 +74,11 @@ type NodeHealth struct {
 	Country   string `json:"country,omitempty"`
 	LatencyMs int    `json:"latencyMs,omitempty"`
 	LastCheck int64  `json:"lastCheck,omitempty"`
-	CoolUntil int64  `json:"-"`
+	// LastOKMs is when a **real request** last succeeded through this node,
+	// as opposed to when it was last probed. A probe is a sample and a served
+	// request is proof, so this is what clears a cooldown / a ban.
+	LastOKMs  int64 `json:"lastOkMs,omitempty"`
+	CoolUntil int64 `json:"-"`
 }
 
 // NewManager builds the manager; logging goes through log (may be nil).
@@ -65,7 +86,15 @@ func NewManager(st *store.Store, log func(string, ...any)) *Manager {
 	if log == nil {
 		log = func(string, ...any) {}
 	}
-	return &Manager{st: st, log: log, health: map[string]*NodeHealth{}}
+	return &Manager{
+		st: st, log: log,
+		health:   map[string]*NodeHealth{},
+		sticky:   map[string]string{},
+		bans:     map[string]time.Time{},
+		fails:    map[string]int{},
+		failAt:   map[string]time.Time{},
+		stickyAt: map[string]int64{},
+	}
 }
 
 // BinaryPath resolves the sing-box executable: the user-configured path wins,

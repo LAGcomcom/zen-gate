@@ -38,6 +38,21 @@ func (r *countRotator) Dial(ctx context.Context, network, addr string) (net.Conn
 
 func (r *countRotator) Healthy() int { return 3 }
 
+// The extended Rotator surface. This double only asserts that a rotate-mode
+// transport dials through the installed rotator, so the egress-decision
+// methods can stay trivial.
+func (r *countRotator) Pick(seed, model string) string { return "test-exit" }
+
+func (r *countRotator) DialThrough(ctx context.Context, network, addr, nodeID string) (net.Conn, error) {
+	return r.Dial(ctx, network, addr)
+}
+
+func (r *countRotator) ExitKey(nodeID string) string { return nodeID }
+
+func (r *countRotator) Report(nodeID, model, class string) {}
+
+func (r *countRotator) Revive(nodeID, model string) {}
+
 func (r *countRotator) seen() []string {
 	r.mu.Lock()
 	defer r.mu.Unlock()

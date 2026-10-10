@@ -96,6 +96,30 @@ type Rotator interface {
 	Dial(ctx context.Context, network, addr string) (net.Conn, error)
 	// Healthy reports how many nodes are currently dialable.
 	Healthy() int
+
+	// Pick chooses an exit for one model. seed is the conversation's stable
+	// identity: one conversation prefers the same exit, so the upstream has a
+	// chance to reuse its prompt cache, while different conversations still
+	// spread across the pool. Rotation is counted per **egress IP**, not per
+	// node: quota is accounted per IP, and an airport routinely sells several
+	// nodes that leave through one (measured: 55 live nodes, 21 IPs).
+	Pick(seed, model string) string
+	// DialThrough dials via one specific exit, so the session bound to that
+	// exit is the session actually used.
+	DialThrough(ctx context.Context, network, addr, nodeID string) (net.Conn, error)
+	// ExitKey returns an exit's stable identity (its egress IP; the node id
+	// when the IP is unknown). The upstream session is derived from it, so
+	// nodes sharing one IP present one session instead of one each.
+	ExitKey(nodeID string) string
+	// Report books one failure against an (exit, model) pair. The ledger is
+	// only ever used to skip a combination known to be bad.
+	Report(nodeID, model, class string)
+	// Revive clears the (exit, model) pair and the exit's transport cooldown
+	// after a real request for that model succeeded through it — real traffic
+	// is harder evidence than any probe sample. It never lifts bans recorded
+	// against other models: one model working through an exit says nothing
+	// about another the exit region-gates or quotas separately.
+	Revive(nodeID, model string)
 }
 
 var (
@@ -103,6 +127,38 @@ var (
 	rotator  Rotator
 	rotation atomic.Bool
 )
+
+// ExitPlan is one attempt's egress decision: which exit serves which model.
+// It rides the request context so the transport dials exactly the chosen
+// exit — that is what binds the upstream session to a real exit.
+type ExitPlan struct {
+	NodeID  string
+	ExitKey string
+	Model   string
+}
+
+type exitPlanKey struct{}
+
+// WithExitPlan stamps an egress decision onto a request context.
+func WithExitPlan(ctx context.Context, p ExitPlan) context.Context {
+	return context.WithValue(ctx, exitPlanKey{}, p)
+}
+
+// ExitPlanFrom reads the egress decision (zero value when unset).
+func ExitPlanFrom(ctx context.Context) ExitPlan {
+	if p, ok := ctx.Value(exitPlanKey{}).(ExitPlan); ok {
+		return p
+	}
+	return ExitPlan{}
+}
+
+// CurrentRotator exposes the installed rotator so the lane can pick an exit
+// before building the request, and bind the session to it.
+func CurrentRotator() Rotator {
+	rotMu.RLock()
+	defer rotMu.RUnlock()
+	return rotator
+}
 
 // SetRotator installs (or, with nil, removes) the per-request egress rotator.
 func SetRotator(r Rotator) {
@@ -168,6 +224,13 @@ func rotateDialContext(ctx context.Context, network, addr string) (net.Conn, err
 	r := rotator
 	rotMu.RUnlock()
 	if r != nil {
+		// Prefer the exit the caller already chose: that keeps the upstream
+		// session consistent with the exit actually used.
+		if plan := ExitPlanFrom(ctx); plan.NodeID != "" {
+			if c, derr := r.DialThrough(ctx, network, addr, plan.NodeID); derr == nil {
+				return c, nil
+			}
+		}
 		if c, err := r.Dial(ctx, network, addr); err == nil {
 			return c, nil
 		} else if ctx.Err() != nil {
