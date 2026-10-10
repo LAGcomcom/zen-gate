@@ -322,13 +322,40 @@ func (l *Lane) ServableModels() []ModelInfo {
 // RefreshCatalog re-pulls both listings; a failure on either keeps that
 // source's cached slice.
 func (l *Lane) RefreshCatalog(ctx context.Context) {
-	cat := []ModelInfo{}
+	// Each source keeps its previous slice when its own listing fails. The
+	// rebuild starts from the cached catalog rather than from nothing, because
+	// a catalog that shrinks when a fetch merely blipped loses models that are
+	// still perfectly usable — and that loss is not cosmetic: the agent
+	// adapters are re-injected from this list, so a model that vanishes here
+	// vanishes from every client's picker too.
+	//
+	// Observed: one boot where the Zen listing lost its race with sing-box's
+	// first inbound left the catalog holding only the 4 Kilo rows. All six Zen
+	// models were still listed by the upstream and kept serving requests, but
+	// they were gone from the gateway's own /v1/models and from ZCode until the
+	// next restart happened to win the race. A refresh may only ever ADD to
+	// what it does not know, never subtract on a failed round trip.
+	l.mu.Lock()
+	prev := l.catalog
+	l.mu.Unlock()
+
+	var zen, kilo []ModelInfo
+	for _, m := range prev {
+		if m.Channel == ChannelKilo {
+			kilo = append(kilo, m)
+		} else {
+			zen = append(zen, m)
+		}
+	}
 	if ids, err := FetchListing(ctx); err == nil && len(ids) > 0 {
-		cat = append(cat, BuildCatalog(ids)...)
+		zen = BuildCatalog(ids)
 	}
-	if rows, err := FetchKiloListing(ctx); err == nil {
-		cat = append(cat, BuildKiloCatalog(rows)...)
+	if rows, err := FetchKiloListing(ctx); err == nil && len(rows) > 0 {
+		kilo = BuildKiloCatalog(rows)
 	}
+	cat := make([]ModelInfo, 0, len(zen)+len(kilo))
+	cat = append(cat, zen...)
+	cat = append(cat, kilo...)
 	if len(cat) == 0 {
 		return
 	}
