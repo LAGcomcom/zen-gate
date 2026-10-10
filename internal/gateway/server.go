@@ -414,6 +414,19 @@ func lanIPv4(addrs []net.Addr) string {
 
 func (s *Server) route(w http.ResponseWriter, r *http.Request) {
 	path := strings.TrimSuffix(r.URL.Path, "/")
+	// CORS for the API surface only (issue #34): a browser page on another
+	// origin — the model-provider formatters, a web SDK, any fetch() from a
+	// site — reads /v1/* as cross-origin and fails with "Failed to fetch"
+	// without these headers. The API key stays the gate: a page that does not
+	// know it still cannot list models or send turns, it just gets a clean 401
+	// instead of a silent CORS block. /admin/* deliberately stays closed — the
+	// dashboard is same-origin and the management surface must never be
+	// readable by a random web page.
+	if isV1APIPath(path) {
+		if corsAPI(w, r) {
+			return // preflight answered in full
+		}
+	}
 	switch {
 	case path == "/health":
 		writeJSON(w, 200, map[string]any{"ok": true, "service": "zen-gate"})
