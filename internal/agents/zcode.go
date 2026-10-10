@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+
+	"zen-gate/internal/lane"
 )
 
 // zCode injects a personal provider rule into ZCode's provider_config.json.
@@ -35,6 +37,36 @@ const providerName = "Zen Gate"
 // stableProviderID is a fixed identity for our provider rule so the matching
 // modelConfigRules entries can be replaced idempotently across enables.
 const stableProviderID = "5a3e8f10-1c2b-4d3e-9f4a-0b7c6d5e4a3b"
+
+// rulePropertiesFor builds the "properties" block of one model rule.
+//
+// Every key must be stated. ZCode overlays its built-in catalogue for any key
+// a rule omits (ModelInputFormatConfig.overlay), and for a model its catalogue
+// has never heard of there is nothing to overlay: the field stays absent and
+// the client treats the model as text-only. Measured on a live install —
+// muse-spark-1.3 and stepfun/step-5 both answer images through the gateway
+// ("input_modalities": [text, image]) yet reached ZCode without
+// "supportsImage", so pasting a screenshot silently lost the picture, while
+// models ZCode happens to know (mimo, space-bunny, longcat) got the field from
+// its own catalogue. Whether images survived depended on ZCode's private model
+// list, which is exactly the class of bug issue #27 named.
+//
+// The five keys are the whole inputFormat schema (it is .strict()), so
+// stating all five leaves ZCode nothing to guess. The unverified modalities
+// stay false on purpose: a modality the gateway has not accepted must never
+// receive that modality's traffic.
+func rulePropertiesFor(m lane.ModelInfo) map[string]any {
+	return map[string]any{
+		"contextWindow": m.ContextWindow,
+		"inputFormat": map[string]any{
+			"supportsText":  true,
+			"supportsImage": m.Vision,
+			"supportsVideo": false,
+			"supportsAudio": m.AudioInput,
+			"supportsPdf":   m.FileInput,
+		},
+	}
+}
 
 // reasoningLevelSpec declares the thought-level selector for one model:
 // values feed ZCode's picker; the CEL map merges {"reasoning_effort": level}
@@ -158,9 +190,7 @@ func (z *zcode) Enable(o Options) error {
 		kept = append(kept, existing)
 	}
 	for _, m := range o.Models {
-		cfgMap := map[string]any{
-			"properties": map[string]any{"contextWindow": m.ContextWindow},
-		}
+		cfgMap := map[string]any{"properties": rulePropertiesFor(m)}
 		// Write the whole optionSpecs, not just the thought selector: whatever
 		// key we omit, ZCode fills from its own built-in metadata, and the
 		// mixed rule contradicts itself (issue #27) — the picker shows ZCode's
