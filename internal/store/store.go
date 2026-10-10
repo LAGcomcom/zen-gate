@@ -139,6 +139,11 @@ type Config struct {
 	// every custom-provider model id's capabilities (vision/audio/file) into
 	// tags.json.
 	AutoTagEnabled bool `json:"autoTagEnabled"`
+	// OpenRefEnabled pulls the public OpenRouter model listing and fills the
+	// capacity fields (context window / max output) for lane models the local
+	// table knows nothing about — recorded as 上游声明, never overriding a
+	// curated row, a probe, or an AI verdict. See internal/openref.
+	OpenRefEnabled bool `json:"openRefEnabled,omitempty"`
 	// LogCategories is the per-class logging switch set. A partial or absent
 	// map merges onto logx.DefaultCategories(), so an upgraded config never
 	// turns the high-volume classes on by itself.
@@ -221,6 +226,12 @@ type ModelTag struct {
 	MaxOutput     int    `json:"maxOutput,omitempty"`
 	Source        string `json:"source"`
 	At            int64  `json:"at"` // epoch ms
+	// CapsOnly marks a row that states nothing about modalities — the bools
+	// are unset defaults, not verdicts. The public capacity reference (the
+	// OpenRouter listing) writes these: it knows a model's published window,
+	// not what the free lane will accept through it. Consumers must take the
+	// capacities and keep the name heuristics for the modality questions.
+	CapsOnly bool `json:"capsOnly,omitempty"`
 }
 
 // Store owns config + stats files.
@@ -406,6 +417,14 @@ func Open() (*Store, error) {
 		if strings.TrimSpace(cfg.RoutingStrategy) == "" {
 			cfg.RoutingStrategy = "catalog"
 		}
+	}
+	// v11: the public capacity reference (issue #28). Ships enabled: it only
+	// fills capacities for models the local table states nothing about, so
+	// what it can change is a guess being replaced by the upstream's own
+	// published number — recorded as 上游声明 and overruled by the first 实测.
+	if cfg.SchemaVersion < 11 {
+		cfg.SchemaVersion = 11
+		cfg.OpenRefEnabled = true
 	}
 	if cfg.RoutingStrategy == "" {
 		cfg.RoutingStrategy = "catalog"

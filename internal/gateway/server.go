@@ -256,9 +256,12 @@ func New(l *lane.Lane, st *store.Store) *Server {
 	mux.HandleFunc("/", s.safeRoute)
 	s.mux = mux
 	// tags.json is the durable half of a verdict; the catalog is rebuilt from
-	// the curated table on every boot, so without this a measured 音频/文件
-	// capability would disappear at restart and routing would fall back to a
-	// name guess until the tagger ran again.
+	// the curated table on every boot AND on every RefreshCatalog (every probe
+	// interval), so without a replay hook a measured 音频/文件 capability or an
+	// openref capacity would vanish a poll later and routing/agent injection
+	// would fall back to the name guess. Replay synchronously so readers woken
+	// by the rebuild never see the raw catalog.
+	l.OnCatalogReload = s.applyStoredTags
 	s.applyStoredTags()
 	return s
 }
@@ -268,10 +271,15 @@ func New(l *lane.Lane, st *store.Store) *Server {
 // the lane itself; an effort-suffixed tag id retries on the bare id.
 func (s *Server) applyStoredTags() {
 	for id, tag := range s.Store.SnapshotTags() {
-		audio, file, vision := tag.Audio, tag.File, tag.Vision
 		caps := lane.CapabilityTags{
-			Audio: &audio, File: &file, Vision: &vision,
 			ContextWindow: tag.ContextWindow, MaxOutput: tag.MaxOutput,
+		}
+		// A CapsOnly row (the public capacity reference) states windows but
+		// nothing about modalities — feeding its unset false bools in would
+		// silence audio/file the name heuristics or a curated row allowed.
+		if !tag.CapsOnly {
+			audio, file, vision := tag.Audio, tag.File, tag.Vision
+			caps.Audio, caps.File, caps.Vision = &audio, &file, &vision
 		}
 		if s.Lane.ApplyCapabilityTags(id, caps) {
 			continue
@@ -545,6 +553,12 @@ func (s *Server) modelCard(floor lane.ModelInfo, id, ownedBy string, cfg *store.
 	if caps.Known && (!freeLane || caps.Source != store.TagSourceHeuris) {
 		vision, audio, file, reasoning = caps.Vision, caps.Audio, caps.File, caps.Reasoning
 		source = caps.Source
+	}
+	// A CapsOnly row (public capacity reference) states windows without
+	// touching modalities, so it never flips Known — but the badge should
+	// still say where the numbers came from.
+	if !caps.Known && caps.Source == store.TagSourceListing {
+		source = store.TagSourceListing
 	}
 	if caps.ContextWindow > 0 {
 		contextWindow = caps.ContextWindow

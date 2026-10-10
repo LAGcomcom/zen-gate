@@ -1889,6 +1889,8 @@ function renderSettings(s){
             <button class="ghost" id="btn-retag">重新标注</button>
             <button class="act off" id="tg-autotag">关闭</button>
           </div></div>
+        <div class="switch"><div><span class="nm">公开容量参考</span><div class="ds">用无需凭据的公开模型目录为「本地能力表完全没收录」的新模型补全上下文窗口/最大输出容量，每 6 小时同步；只写容量不写模态，来源记为「上游声明」，策展表认识的、以及被实测/AI 标注过的模型一律不动</div></div>
+          <button class="act off" id="tg-openref">关闭</button></div>
       </div>
 
       <div class="card">
@@ -2133,6 +2135,7 @@ function renderSettings(s){
   setToggle("#tg-smart", s.settings.smartRouting);
   setToggle("#tg-fallback", s.settings.laneFallbackToProviders);
   setToggle("#tg-autotag", s.settings.autoTagEnabled);
+  setToggle("#tg-openref", s.settings.openRefEnabled);
   setToggle("#tg-lan", s.settings.allowLan);
   const sseg = el.querySelector("#strategy-seg");
   if (sseg){
@@ -2162,6 +2165,7 @@ function renderSettings(s){
   bindSettingToggle("#tg-smart", "smartRouting", "智能路由已开启：切换会避开不支持本次模态的模型", "智能路由已关闭：恢复目录顺序、不带能力过滤");
   bindSettingToggle("#tg-fallback", "laneFallbackToProviders", "耗尽后回落自定义 API 已开启（消耗你的 Key 额度）", "耗尽后回落自定义 API 已关闭");
   bindSettingToggle("#tg-autotag", "autoTagEnabled", "AI 能力标注已开启", "AI 能力标注已暂停");
+  bindSettingToggle("#tg-openref", "openRefEnabled", "公开容量参考已开启：新模型将自动获得上游容量", "公开容量参考已暂停");
   const lanBtn = el.querySelector("#tg-lan");
   if(lanBtn && !lanBtn.dataset.bound){
     lanBtn.dataset.bound = "1";

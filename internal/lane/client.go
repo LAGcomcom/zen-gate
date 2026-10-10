@@ -113,6 +113,14 @@ type Lane struct {
 	// OnProbeResult fires after each individual model probe finished — main
 	// uses it to feed the per-model first-token sample history.
 	OnProbeResult func(ProbeResult)
+	// OnCatalogReload fires after RefreshCatalog swapped in a rebuilt catalog
+	// (curated table + upstream listing, no tags). The catalog rebuild drops
+	// every tag-patched verdict, and until this hook existed the only re-apply
+	// ran once at boot — a probe-verified modality or an externally supplied
+	// capacity silently vanished 30 minutes in, leaving routing and agent
+	// injection back on the name guess. Owners must replay their stored
+	// verdicts here, before notify() lets readers take the fresh snapshot.
+	OnCatalogReload func()
 }
 
 type atomicFlag struct{ v int32 }
@@ -322,6 +330,13 @@ func (l *Lane) RefreshCatalog(ctx context.Context) {
 	l.mu.Lock()
 	l.catalog = cat
 	l.mu.Unlock()
+	// Replay persisted verdicts synchronously before the broadcast: every
+	// reader woken by notify() (dashboard, agent injection, the lane's own
+	// capability filter) must see the tags-bearing catalog, not the raw
+	// rebuild for one window.
+	if l.OnCatalogReload != nil {
+		l.OnCatalogReload()
+	}
 	l.notify()
 }
 

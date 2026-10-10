@@ -117,15 +117,10 @@ func main() {
 		avg, _ := st.TTFTStats(model)
 		return avg
 	})
-	// Re-apply persisted capability tags (AI tagger / live probes) so the
-	// catalog's modality verdicts survive restarts.
-	for id, tag := range st.SnapshotTags() {
-		audio, file, vision := tag.Audio, tag.File, tag.Vision
-		ln.ApplyCapabilityTags(id, lane.CapabilityTags{
-			Audio: &audio, File: &file, Vision: &vision,
-			ContextWindow: tag.ContextWindow, MaxOutput: tag.MaxOutput,
-		})
-	}
+	// Persisted capability tags (AI tagger / live probes / the public capacity
+	// reference) are replayed into the catalog inside gateway.New, which also
+	// guards the CapsOnly rows and retries effort-suffixed ids — no boot loop
+	// here.
 	ln.LoadThrottleNotes(quotaNotesFromStore(st.SnapshotQuota()))
 	ln.SetThrottleUpdate(func(model string, note lane.ThrottleNote) {
 		qn := store.QuotaNote{ThrottledAt: note.ThrottledAt, CooldownUntil: note.CooldownUntil, LastOK: note.LastOK}
@@ -227,6 +222,7 @@ func main() {
 	ln.OnChange = syncEndpoints
 	gw.SetModelsSync(syncEndpoints)
 	ln.StartLoops(ctx, time.Duration(cfg.ProbeIntervalMinutes)*time.Minute)
+	gw.StartOpenRefLoop(ctx)
 	syncEndpoints()
 
 	if err := gw.Start(); err != nil {

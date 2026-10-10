@@ -338,6 +338,7 @@ func (s *Server) adminState(w http.ResponseWriter) {
 		"routingStrategy":         cfg.RoutingStrategy,
 		"laneFallbackToProviders": cfg.LaneFallbackToProviders,
 		"autoTagEnabled":          cfg.AutoTagEnabled,
+		"openRefEnabled":          cfg.OpenRefEnabled,
 		"allowLan":                cfg.AllowLan,
 	}
 	for k, v := range logSettingsView(cfg) {
@@ -427,6 +428,7 @@ func (s *Server) adminSettings(w http.ResponseWriter, r *http.Request) {
 		RoutingStrategy         *string          `json:"routingStrategy"`
 		LaneFallbackToProviders *bool            `json:"laneFallbackToProviders"`
 		AutoTagEnabled          *bool            `json:"autoTagEnabled"`
+		OpenRefEnabled          *bool            `json:"openRefEnabled"`
 		AllowLan                *bool            `json:"allowLan"`
 		LogCategories           *map[string]bool `json:"logCategories"`
 		LogLevel                *string          `json:"logLevel"`
@@ -547,6 +549,12 @@ func (s *Server) adminSettings(w http.ResponseWriter, r *http.Request) {
 		}
 		changed = true
 	}
+	openRefOn := false
+	if in.OpenRefEnabled != nil {
+		cfg.OpenRefEnabled = *in.OpenRefEnabled
+		openRefOn = *in.OpenRefEnabled
+		changed = true
+	}
 	if in.AllowLan != nil && *in.AllowLan != cfg.AllowLan {
 		cfg.AllowLan = *in.AllowLan
 		changed = true
@@ -581,6 +589,12 @@ func (s *Server) adminSettings(w http.ResponseWriter, r *http.Request) {
 	if changed {
 		s.commitSettings(&cfg)
 		_ = s.Store.Save()
+	}
+	if openRefOn {
+		// Turning the reference on should fill capacities now, not when the
+		// 6-hour loop next fires — one detached pull after the commit, so it
+		// reads the just-published setting.
+		go s.OpenRefPull(context.Background())
 	}
 	if lanChanged {
 		// The reply must leave before the switchover: Rebind closes the very
@@ -624,6 +638,7 @@ func (s *Server) commitSettings(next *store.Config) {
 		c.RoutingStrategy = next.RoutingStrategy
 		c.LaneFallbackToProviders = next.LaneFallbackToProviders
 		c.AutoTagEnabled = next.AutoTagEnabled
+		c.OpenRefEnabled = next.OpenRefEnabled
 		c.AllowLan = next.AllowLan
 		c.LogCategories = next.LogCategories
 		c.LogLevel = next.LogLevel

@@ -46,7 +46,7 @@ func (s *Server) modalityCapsOf(upstreamModel string) modalityCaps {
 			// Inputs are what the router filters on; an output-only
 			// declaration is not a modality verdict.
 			Known: declared.InputDeclared, Source: store.TagSourceListing}
-	case hasTag:
+	case hasTag && !tag.CapsOnly:
 		c = modalityCaps{Vision: tag.Vision, Audio: tag.Audio, File: tag.File,
 			Reasoning: tag.Reasoning, Known: true, Source: tag.Source}
 	default:
@@ -54,6 +54,13 @@ func (s *Server) modalityCapsOf(upstreamModel string) modalityCaps {
 			c = modalityCaps{Vision: nt.Vision, Audio: nt.Audio, File: nt.File,
 				Reasoning: nt.Reasoning, Known: true, Source: store.TagSourceHeuris}
 		}
+	}
+	// A CapsOnly row (the public capacity reference) states windows and
+	// nothing else: modality answers come from the branches above exactly as
+	// if the row did not exist, and only the source label is stamped — and
+	// only where nothing stronger spoke.
+	if hasTag && tag.CapsOnly && c.Source == "" {
+		c.Source = tag.Source
 	}
 	if hasTag {
 		c.ContextWindow, c.MaxOutput = tag.ContextWindow, tag.MaxOutput
