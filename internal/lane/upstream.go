@@ -111,6 +111,16 @@ func SessionForExit(seed, exitKey string) string {
 	return SessionForConversation(seed + "\x00exit\x00" + exitKey)
 }
 
+// ReportExit books an (exit, model) failure against the live rotator.
+func ReportExit(nodeID, model, class string) {
+	if nodeID == "" || model == "" {
+		return
+	}
+	if r := CurrentRotator(); r != nil {
+		r.Report(nodeID, model, class)
+	}
+}
+
 // RequestIdFor derives a stable per-turn request id; retries of one turn share it.
 func RequestIdFor(session, turnSeed string) string {
 	if strings.TrimSpace(turnSeed) == "" {

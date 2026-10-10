@@ -45,7 +45,12 @@ func (m *Manager) Pick(seed, model string) string {
 		if h == nil || !h.Alive {
 			return false
 		}
-		return h.CoolUntil == 0 || now.UnixMilli() >= h.CoolUntil
+		if h.CoolUntil != 0 && now.UnixMilli() < h.CoolUntil {
+			return false
+		}
+		// Skip a pair this model already failed against. The ledger only ever
+		// removes candidates; it never promotes one.
+		return !m.bannedFor(node.ID, model, now)
 	}
 
 	// Sticky: a conversation prefers the exit it already used. This is a

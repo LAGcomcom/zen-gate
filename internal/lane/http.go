@@ -111,6 +111,12 @@ type Rotator interface {
 	// when the IP is unknown). The upstream session is derived from it, so
 	// nodes sharing one IP present one session instead of one each.
 	ExitKey(nodeID string) string
+	// Report books one failure against an (exit, model) pair. The ledger is
+	// only ever used to skip a combination known to be bad.
+	Report(nodeID, model, class string)
+	// Revive marks one exit healthy again after a real request succeeded
+	// through it — real traffic is harder evidence than any probe sample.
+	Revive(nodeID string)
 }
 
 var (

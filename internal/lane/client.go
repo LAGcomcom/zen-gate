@@ -832,6 +832,18 @@ func (l *Lane) attemptModel(ctx context.Context, req Request, model, effort stri
 
 	if err != nil {
 		l.record(ctx, CallRecord{Model: base, Ok: false, Effort: effort, Agent: req.Agent, At: time.Now().UnixMilli()}, result, err, firstAt)
+		// Book the failure against (exit, model) so later requests skip it. The
+		// ledger only ever skips known-bad pairs — it is never used to prefer a
+		// "known good" one, which would pin every concurrent request onto the
+		// first success and burn that exit's allowance.
+		switch asUpstream(err).Code {
+		case CodeRegion:
+			ReportExit(plan.NodeID, base, "region")
+		case CodeQuota:
+			ReportExit(plan.NodeID, base, "limited")
+		case CodeTransport, CodeServer, CodeTimeout, CodeEmpty:
+			ReportExit(plan.NodeID, base, "other")
+		}
 		// The caller decides what a 429 means: under rotation it re-asks the
 		// pool before the model gets a throttle episode.
 		return Outcome{Finish: result.Finish}, asUpstream(err), sawAny
@@ -846,6 +858,10 @@ func (l *Lane) attemptModel(ctx context.Context, req Request, model, effort stri
 				Message: "upstream ended the turn with " + result.FinishToken}, sawAny
 		}
 		l.NoteRealSuccess(base)
+		// A served request is proof: clear this exit's cooldown and its bans.
+		if r := CurrentRotator(); r != nil && plan.NodeID != "" {
+			r.Revive(plan.NodeID)
+		}
 		l.record(ctx, CallRecord{Model: base, Ok: true, Effort: effort, Agent: req.Agent, At: time.Now().UnixMilli()}, result, nil, firstAt)
 		return Outcome{Usage: result.Usage, Finish: result.Finish}, nil, true
 	}

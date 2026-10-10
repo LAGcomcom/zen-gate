@@ -46,8 +46,17 @@ type Manager struct {
 	// preference, never a lock: an unusable exit is dropped immediately.
 	sticky   map[string]string
 	stickyAt map[string]int64
-	lastErr  string
-	version  string
+
+	// bans is the (exit, model) ledger: once an exit fails for a model, later
+	// requests stop re-hitting the same wall. good is its mirror. fails/failAt
+	// drive the adaptive delay — a transient failure parks the pair for
+	// seconds, and only a repeated one grows it.
+	bans    map[string]time.Time
+	good    map[string]time.Time
+	fails   map[string]int
+	failAt  map[string]time.Time
+	lastErr string
+	version string
 
 	deathCancel context.CancelFunc // bounds the dead-node recheck loop
 }
@@ -63,7 +72,11 @@ type NodeHealth struct {
 	Country   string `json:"country,omitempty"`
 	LatencyMs int    `json:"latencyMs,omitempty"`
 	LastCheck int64  `json:"lastCheck,omitempty"`
-	CoolUntil int64  `json:"-"`
+	// LastOKMs is when a **real request** last succeeded through this node,
+	// as opposed to when it was last probed. A probe is a sample and a served
+	// request is proof, so this is what clears a cooldown / a ban.
+	LastOKMs  int64 `json:"lastOkMs,omitempty"`
+	CoolUntil int64 `json:"-"`
 }
 
 // NewManager builds the manager; logging goes through log (may be nil).
@@ -75,6 +88,10 @@ func NewManager(st *store.Store, log func(string, ...any)) *Manager {
 		st: st, log: log,
 		health:   map[string]*NodeHealth{},
 		sticky:   map[string]string{},
+		bans:     map[string]time.Time{},
+		good:     map[string]time.Time{},
+		fails:    map[string]int{},
+		failAt:   map[string]time.Time{},
 		stickyAt: map[string]int64{},
 	}
 }

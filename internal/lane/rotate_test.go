@@ -49,6 +49,10 @@ func (r *countRotator) DialThrough(ctx context.Context, network, addr, nodeID st
 
 func (r *countRotator) ExitKey(nodeID string) string { return nodeID }
 
+func (r *countRotator) Report(nodeID, model, class string) {}
+
+func (r *countRotator) Revive(nodeID string) {}
+
 func (r *countRotator) seen() []string {
 	r.mu.Lock()
 	defer r.mu.Unlock()
