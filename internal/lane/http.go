@@ -52,7 +52,10 @@ func ClassifyFailure(status int, payload string, retryAfterSec int) *UpstreamErr
 	case status == 429 || quotaRe.MatchString(payload):
 		e.Code = CodeQuota
 		if e.RetryAfter == 0 {
-			e.RetryAfter = 60
+			// No Retry-After header is the normal case on this lane, so this
+			// default is what a 429 actually parks the model for. See
+			// quotaCooldownNoHeaderSec in throttle.go for why it is short.
+			e.RetryAfter = quotaCooldownNoHeaderSec
 		}
 	case isHTMLPage(payload):
 		// The front proxy refused before any model was consulted; replaying
