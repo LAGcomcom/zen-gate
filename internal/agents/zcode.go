@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+
 	"zen-gate/internal/lane"
 )
 
@@ -37,24 +38,20 @@ const providerName = "Zen Gate"
 // modelConfigRules entries can be replaced idempotently across enables.
 const stableProviderID = "5a3e8f10-1c2b-4d3e-9f4a-0b7c6d5e4a3b"
 
-// reasoningLevelSpec declares the thought-level selector for one model:
-// values feed ZCode's picker; the CEL map merges {"reasoning_effort": level}
-// into the outgoing request body, which the gateway maps onto the effort
-// budget (2048 / 8192 / model capacity).
-// rulePropertiesFor builds the \`properties\` block of one model rule.
+// rulePropertiesFor builds the "properties" block of one model rule.
 //
 // Every key must be stated. ZCode overlays its built-in catalogue for any key
 // a rule omits (ModelInputFormatConfig.overlay), and for a model its catalogue
 // has never heard of there is nothing to overlay: the field stays absent and
 // the client treats the model as text-only. Measured on a live install —
 // muse-spark-1.3 and stepfun/step-5 both answer images through the gateway
-// (\`input_modalities\`: [text, image]) yet reached ZCode without
-// \`supportsImage\`, so pasting a screenshot silently lost the picture, while
+// ("input_modalities": [text, image]) yet reached ZCode without
+// "supportsImage", so pasting a screenshot silently lost the picture, while
 // models ZCode happens to know (mimo, space-bunny, longcat) got the field from
 // its own catalogue. Whether images survived depended on ZCode's private model
 // list, which is exactly the class of bug issue #27 named.
 //
-// The five keys are the whole inputFormat schema (it is \`.strict()\`), so
+// The five keys are the whole inputFormat schema (it is .strict()), so
 // stating all five leaves ZCode nothing to guess. The unverified modalities
 // stay false on purpose: a modality the gateway has not accepted must never
 // receive that modality's traffic.
@@ -71,6 +68,10 @@ func rulePropertiesFor(m lane.ModelInfo) map[string]any {
 	}
 }
 
+// reasoningLevelSpec declares the thought-level selector for one model:
+// values feed ZCode's picker; the CEL map merges {"reasoning_effort": level}
+// into the outgoing request body, which the gateway maps onto the effort
+// budget (2048 / 8192 / model capacity).
 func reasoningLevelSpec() map[string]any {
 	return map[string]any{
 		"values": []string{"light", "balanced", "deep"},
