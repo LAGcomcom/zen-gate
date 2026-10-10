@@ -10,26 +10,52 @@ import (
 	"zen-gate/internal/lane"
 )
 
-// workBuddy injects custom models into ~/.workbuddy/models.json (WorkBuddy /
-// CodeBuddy desktop). The embedded CodeBuddy CLI watches that file and hot-
-// reloads it (~1s debounce), so entries appear without restarting the app.
+// workBuddy injects custom models into <config-dir>/models.json for the two
+// CodeBuddy-kernel desktop variants: WorkBuddy (~/.workbuddy) and its
+// international sibling WorkBuddy AI (~/.workbuddy-ai). Same kernel, same
+// schema, same hot-reload (~1s debounce) — only the directory, the display
+// name and the process name differ, so one adapter carries both as fields.
 // Injected entries carry a full chat-completions endpoint url and are
 // self-identified by their 127.0.0.1 host; the pristine file is backed up
 // before the first write and restored verbatim on disable.
 
-type workBuddy struct{}
+type workBuddy struct {
+	id      string // adapter id: "workbuddy" | "workbuddy-ai"
+	name    string // display name
+	dirEnv  string // env var that overrides the config dir
+	dirName string // home-relative config dir
+	process string // running-app name for the dashboard hint
+}
 
-func newWorkBuddy() *workBuddy { return &workBuddy{} }
+func newWorkBuddy() *workBuddy {
+	return &workBuddy{
+		id:      "workbuddy",
+		name:    "WorkBuddy",
+		dirEnv:  "WORKBUDDY_CONFIG_DIR",
+		dirName: ".workbuddy",
+		process: "WorkBuddy",
+	}
+}
+
+func newWorkBuddyAI() *workBuddy {
+	return &workBuddy{
+		id:      "workbuddy-ai",
+		name:    "WorkBuddy AI",
+		dirEnv:  "WORKBUDDY_AI_CONFIG_DIR",
+		dirName: ".workbuddy-ai",
+		process: "WorkBuddy AI",
+	}
+}
 
 func (w *workBuddy) Meta() (string, string, string) {
-	return "workbuddy", "WorkBuddy", "~/.workbuddy/models.json 注入自定义模型（CodeBuddy 内核，保存后自动热加载）"
+	return w.id, w.name, filepath.Join("~", w.dirName, "models.json") + " 注入自定义模型（CodeBuddy 内核，保存后自动热加载）"
 }
 
 func (w *workBuddy) configDir() string {
-	if p := os.Getenv("WORKBUDDY_CONFIG_DIR"); p != "" {
+	if p := os.Getenv(w.dirEnv); p != "" {
 		return p
 	}
-	return homePath(".workbuddy")
+	return homePath(w.dirName)
 }
 
 func (w *workBuddy) configPath() string {
@@ -39,7 +65,7 @@ func (w *workBuddy) configPath() string {
 func (w *workBuddy) Detect() (bool, string, string) {
 	dir := w.configDir()
 	if _, err := os.Stat(dir); err != nil {
-		return false, "", "未检测到 WorkBuddy"
+		return false, "", "未检测到 " + w.name
 	}
 	version := ""
 	if data, err := os.ReadFile(filepath.Join(dir, "last-launch.json")); err == nil {
@@ -50,9 +76,9 @@ func (w *workBuddy) Detect() (bool, string, string) {
 			version = launch.Version
 		}
 	}
-	detail := "检测到 ~/.workbuddy"
+	detail := "检测到 ~/" + w.dirName
 	if _, err := os.Stat(w.configPath()); err != nil {
-		detail = "检测到 ~/.workbuddy（models.json 尚未创建）"
+		detail = "检测到 ~/" + w.dirName + "（models.json 尚未创建）"
 	}
 	return true, version, detail
 }
@@ -101,7 +127,7 @@ func (w *workBuddy) Enable(o Options) error {
 		// already-injected content, so only back up files without our entries.
 		doc, perr := parseModelsDoc(raw)
 		if perr != nil || !hasOwnEntry(doc) {
-			_, _ = backupFile("workbuddy", path, raw)
+			_, _ = backupFile(w.id, path, raw)
 		}
 	}
 	doc, err := w.read()
@@ -139,7 +165,7 @@ func (w *workBuddy) Enable(o Options) error {
 
 func (w *workBuddy) Disable() error {
 	path := w.configPath()
-	if b := latestBackup("workbuddy", "models.json"); b != "" {
+	if b := latestBackup(w.id, "models.json"); b != "" {
 		if data, err := os.ReadFile(b); err == nil {
 			return atomicWrite(path, data)
 		}
