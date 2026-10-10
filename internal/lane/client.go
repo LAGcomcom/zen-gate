@@ -555,12 +555,29 @@ func (l *Lane) notify() {
 // refused request never consumed any).
 const quotaEgressRetries = 3
 
-// quotaEgressTotalMS bounds the *total* time the retry-on-another-exit loop may
-// spend. A per-attempt count alone is not enough: a stalling exit burns the
-// whole attempt budget each time, so 3 retries can still mean a minute of
-// waiting. Fast refusals (a 429 usually answers in well under a second) still
-// get all their retries; only the stalling case is cut short.
+// The retry-on-another-exit loop needs a total-time bound as well as an attempt
+// count: a per-attempt count alone lets a stalling exit burn a whole attempt
+// each round, so 3 retries can still mean minutes of waiting.
+//
+// The bound depends on WHICH failure is being retried, because the two classes
+// answer on completely different time scales:
+//
+//   - A 429 is a fast refusal (well under a second), so all three retries fit
+//     comfortably in a few seconds.
+//   - A transport failure or an upstream 5xx is a SLOW failure: measured here at
+//     30-90s per attempt. A single budget sized for 429s therefore expires
+//     before the first retry can even start, and the loop silently degrades to
+//     attempts=1 — which is what it did on a real install, returning 502 after
+//     93 seconds while healthy exits sat idle.
+//
+// So the budget is per class. Slow failures get enough room for the retries to
+// actually happen, and the attempt count still caps how many.
 const quotaEgressTotalMS = 40000
+
+// slowEgressTotalMS is the budget for the exit-shaped slow failures. It has to
+// clear at least one full attempt (the response-header timeout) plus room for a
+// retry, or the retry never runs.
+const slowEgressTotalMS = 210000
 
 // Complete runs one logical turn: effort budgeting, wire encoding, the
 // fingerprint gate, streaming decode, and — for a cut pure-reasoning turn —
@@ -593,6 +610,8 @@ func (l *Lane) Complete(ctx context.Context, req Request, emit func(Chunk)) (Out
 	model := requested
 	failovers := 0
 	egressTries := 0
+	// The deadline is per attempt: each round gets the budget its own failure
+	// class deserves, rather than one bound fixed before we knew what failed.
 	egressDeadline := time.Now().Add(quotaEgressTotalMS * time.Millisecond)
 	tried := map[string]bool{requested: true}
 	for {
@@ -606,7 +625,10 @@ func (l *Lane) Complete(ctx context.Context, req Request, emit func(Chunk)) (Out
 		// counted per egress IP and a funded exit may be two hops away, so ask
 		// the pool a few times before believing it. Every retry is a fresh dial
 		// (rotate disables keep-alives) and the node round-robin moves on.
-		if egressRetryable(uerr.Code) && !sawAny && RotationActive() && egressTries < quotaEgressRetries && time.Now().Before(egressDeadline) {
+		// Slow failures get their own budget: a retry that cannot start inside the
+		// 429-sized window would otherwise be skipped, leaving attempts=1.
+		if egressRetryable(uerr.Code) && !sawAny && RotationActive() && egressTries < quotaEgressRetries &&
+			time.Now().Before(egressDeadline.Add(egressBudgetFor(uerr.Code))) {
 			egressTries++
 			continue
 		}
@@ -647,6 +669,17 @@ func (l *Lane) Complete(ctx context.Context, req Request, emit func(Chunk)) (Out
 // exit-shaped: the request never got an answer, so asking another exit costs
 // nothing and can turn a 502 into a 200. Before this, only CodeQuota retried,
 // so a single stalling exit failed the turn while the rest of the pool idled.
+// egressBudgetFor is the extra time this failure class may spend retrying
+// before the loop gives up. 429s need almost none; slow failures need a full
+// attempt's worth, because their per-attempt cost IS the reason they failed.
+func egressBudgetFor(code string) time.Duration {
+	switch code {
+	case CodeQuota:
+		return 0
+	}
+	return slowEgressTotalMS * time.Millisecond
+}
+
 func egressRetryable(code string) bool {
 	switch code {
 	case CodeQuota, CodeTransport, CodeServer, CodeTimeout:

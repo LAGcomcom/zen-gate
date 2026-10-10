@@ -64,3 +64,23 @@ func TestSetProxyInstallsAResponseHeaderTimeout(t *testing.T) {
 		t.Errorf("ResponseHeaderTimeout = %v, too short for a cold start (a first-call step-5 took 62s)", tr.ResponseHeaderTimeout)
 	}
 }
+
+// The retry loop needs a total-time bound, but one bound cannot fit both failure
+// classes: a 429 refuses in well under a second, while a transport failure or an
+// upstream 5xx costs 30-90s per attempt. With a single 429-sized budget the slow
+// class expired before its first retry could start, so the loop silently
+// degraded to attempts=1 -- observed returning 502 after 93 seconds while
+// healthy exits sat idle.
+func TestEgressBudgetIsPerFailureClass(t *testing.T) {
+	if got := egressBudgetFor(CodeQuota); got != 0 {
+		t.Errorf("egressBudgetFor(quota) = %v, want 0: a 429 answers fast, the base window already fits its retries", got)
+	}
+	// The slow class needs room for at least one full attempt to answer, or the
+	// retry it is meant to enable cannot begin.
+	for _, code := range []string{CodeTransport, CodeServer, CodeTimeout} {
+		got := egressBudgetFor(code)
+		if got < responseHeaderTimeout {
+			t.Errorf("egressBudgetFor(%s) = %v, need at least one full attempt (%v) or the retry can never start", code, got, responseHeaderTimeout)
+		}
+	}
+}
