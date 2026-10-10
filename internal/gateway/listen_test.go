@@ -284,8 +284,20 @@ func TestSettingsAllowLanRepliesOverLiveListener(t *testing.T) {
 	if resp.StatusCode != 200 || !j.OK || !j.Changed {
 		t.Fatalf("settings = %d %+v, 期望 200 ok+changed", resp.StatusCode, j)
 	}
-	if code, err := getHealth(fmt.Sprintf("http://%s:%d/health", ip, port)); err != nil || code != 200 {
-		t.Fatalf("切换后局域网不可达: code=%d err=%v", code, err)
+	// The reply is flushed BEFORE Rebind runs (that ordering is the point of
+	// the test), so the LAN listener may still be opening when the follow-up
+	// request leaves: a single-shot assert loses that race on loaded runners
+	// (v1.7.1's build-macos saw connection refused). Poll until reachable.
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		code, err := getHealth(fmt.Sprintf("http://%s:%d/health", ip, port))
+		if err == nil && code == 200 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("切换后局域网不可达: code=%d err=%v", code, err)
+		}
+		time.Sleep(50 * time.Millisecond)
 	}
 }
 
