@@ -445,34 +445,46 @@ func (s *Server) adminSettings(w http.ResponseWriter, r *http.Request) {
 	cfg := *s.Store.Config()
 	changed := false
 	lanChanged := false
+	// dirty records the fields THIS request actually validated and assigned.
+	// commitSettings publishes only these: the cfg snapshot is taken at
+	// request start, and publishing all of it let any two overlapping settings
+	// writes revert each other's fields — toggling notifications in one tab
+	// rolled back a proxy saved in another (issue #32: "GUI 改完过一阵变回默认").
+	dirty := map[string]bool{}
 	if in.Port != nil && *in.Port > 0 && *in.Port < 65536 && *in.Port != cfg.Port {
 		cfg.Port = *in.Port
 		changed = true
+		dirty["port"] = true
 	}
 	if in.DefaultMaxTokens != nil && *in.DefaultMaxTokens > 0 {
 		cfg.DefaultMaxTokens = *in.DefaultMaxTokens
 		s.Lane.SetDefaultMaxTokens(*in.DefaultMaxTokens)
 		changed = true
+		dirty["defaultMaxTokens"] = true
 	}
 	if in.DefaultEffort != nil {
 		switch *in.DefaultEffort {
 		case "light", "balanced", "deep":
 			cfg.DefaultEffort = *in.DefaultEffort
 			changed = true
+			dirty["defaultEffort"] = true
 		}
 	}
 	if in.ProbeIntervalMinutes != nil && *in.ProbeIntervalMinutes > 0 {
 		cfg.ProbeIntervalMinutes = *in.ProbeIntervalMinutes
 		changed = true
+		dirty["probeIntervalMinutes"] = true
 	}
 	if in.CloseToTray != nil {
 		cfg.CloseToTray = *in.CloseToTray
 		changed = true
+		dirty["closeToTray"] = true
 	}
 	if in.Notifications != nil {
 		cfg.Notifications = *in.Notifications
 		notify.SetEnabled(*in.Notifications)
 		changed = true
+		dirty["notifications"] = true
 	}
 	if in.ProxyMode != nil {
 		switch *in.ProxyMode {
@@ -485,9 +497,11 @@ func (s *Server) adminSettings(w http.ResponseWriter, r *http.Request) {
 				cfg.ProxyMode = *in.ProxyMode
 				if in.ProxyURL != nil {
 					cfg.ProxyURL = strings.TrimSpace(*in.ProxyURL)
+					dirty["proxyUrl"] = true
 				}
 				lane.SetProxy(cfg.ProxyMode, cfg.ProxyURL)
 				changed = true
+				dirty["proxyMode"] = true
 			}
 		default:
 			// An unrecognised mode used to fall through silently: the panel
@@ -500,47 +514,57 @@ func (s *Server) adminSettings(w http.ResponseWriter, r *http.Request) {
 		cfg.ProxyURL = strings.TrimSpace(*in.ProxyURL)
 		lane.SetProxy(cfg.ProxyMode, cfg.ProxyURL)
 		changed = true
+		dirty["proxyUrl"] = true
 	}
 	if in.UpdateFeed != nil {
 		cfg.UpdateFeed = strings.TrimSpace(*in.UpdateFeed)
 		changed = true
+		dirty["updateFeed"] = true
 	}
 	if in.AnnouncementFeed != nil {
 		cfg.AnnouncementFeed = strings.TrimSpace(*in.AnnouncementFeed)
 		changed = true
+		dirty["announcementFeed"] = true
 	}
 	if in.StatsServerURL != nil {
 		cfg.StatsServerURL = strings.TrimRight(strings.TrimSpace(*in.StatsServerURL), "/")
 		changed = true
+		dirty["statsServerUrl"] = true
 	}
 	if in.ExposeRegion != nil {
 		cfg.ExposeRegion = *in.ExposeRegion
 		s.Lane.SetExposeRegion(*in.ExposeRegion)
 		changed = true
+		dirty["exposeRegion"] = true
 	}
 	if in.FailoverEnabled != nil {
 		cfg.FailoverEnabled = *in.FailoverEnabled
 		s.Lane.SetFailover(cfg.FailoverEnabled, cfg.FailoverMax)
 		changed = true
+		dirty["failoverEnabled"] = true
 	}
 	if in.FailoverMax != nil && *in.FailoverMax > 0 && *in.FailoverMax <= 5 {
 		cfg.FailoverMax = *in.FailoverMax
 		s.Lane.SetFailover(cfg.FailoverEnabled, cfg.FailoverMax)
 		changed = true
+		dirty["failoverMax"] = true
 	}
 	if in.SmartRouting != nil {
 		cfg.SmartRouting = *in.SmartRouting
 		s.Lane.SetSmartRouting(cfg.SmartRouting)
 		changed = true
+		dirty["smartRouting"] = true
 	}
 	if in.RoutingStrategy != nil {
 		cfg.RoutingStrategy = lane.NormalizeStrategy(*in.RoutingStrategy)
 		s.Lane.SetStrategy(cfg.RoutingStrategy)
 		changed = true
+		dirty["routingStrategy"] = true
 	}
 	if in.LaneFallbackToProviders != nil {
 		cfg.LaneFallbackToProviders = *in.LaneFallbackToProviders
 		changed = true
+		dirty["laneFallbackToProviders"] = true
 	}
 	if in.AutoTagEnabled != nil {
 		cfg.AutoTagEnabled = *in.AutoTagEnabled
@@ -548,17 +572,20 @@ func (s *Server) adminSettings(w http.ResponseWriter, r *http.Request) {
 			s.tagger.SetEnabled(cfg.AutoTagEnabled)
 		}
 		changed = true
+		dirty["autoTagEnabled"] = true
 	}
 	openRefOn := false
 	if in.OpenRefEnabled != nil {
 		cfg.OpenRefEnabled = *in.OpenRefEnabled
 		openRefOn = *in.OpenRefEnabled
 		changed = true
+		dirty["openRefEnabled"] = true
 	}
 	if in.AllowLan != nil && *in.AllowLan != cfg.AllowLan {
 		cfg.AllowLan = *in.AllowLan
 		changed = true
 		lanChanged = true
+		dirty["allowLan"] = true
 	}
 	logChanged := false
 	if in.LogCategories != nil {
@@ -569,6 +596,7 @@ func (s *Server) adminSettings(w http.ResponseWriter, r *http.Request) {
 		cfg.LogCategories = next
 		changed = true
 		logChanged = true
+		dirty["logCategories"] = true
 	}
 	if in.LogLevel != nil {
 		switch *in.LogLevel {
@@ -576,18 +604,20 @@ func (s *Server) adminSettings(w http.ResponseWriter, r *http.Request) {
 			cfg.LogLevel = *in.LogLevel
 			changed = true
 			logChanged = true
+			dirty["logLevel"] = true
 		}
 	}
 	if in.LogKeepDays != nil && *in.LogKeepDays >= 1 && *in.LogKeepDays <= 365 {
 		cfg.LogKeepDays = *in.LogKeepDays
 		changed = true
 		logChanged = true
+		dirty["logKeepDays"] = true
 	}
 	if logChanged {
 		s.ApplyLogSettings(&cfg)
 	}
 	if changed {
-		s.commitSettings(&cfg)
+		s.commitSettings(&cfg, dirty)
 		_ = s.Store.Save()
 	}
 	if openRefOn {
@@ -613,36 +643,84 @@ func (s *Server) adminSettings(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]any{"ok": true, "changed": changed})
 }
 
-// commitSettings publishes the settings fields this handler owns. It lists them
-// instead of replacing the whole config, so a Providers edit that landed while
-// this request was validating survives it.
-func (s *Server) commitSettings(next *store.Config) {
+// commitSettings publishes exactly the fields this request validated (dirty).
+// Publishing the whole snapshot instead — every field the handler owns, plus
+// SubsEnabled/SingBoxPath it never even parses — meant two overlapping
+// settings writes reverted each other: a request that started before a proxy
+// save committed the stale proxy back afterwards (issue #32, "GUI 改完过一阵
+// 变回默认"). A provider or subscription edit that landed mid-request
+// survives the same way it always did: those fields are not this handler's.
+func (s *Server) commitSettings(next *store.Config, dirty map[string]bool) {
 	s.Store.Mutate(func(c *store.Config) {
-		c.Port = next.Port
-		c.DefaultMaxTokens = next.DefaultMaxTokens
-		c.DefaultEffort = next.DefaultEffort
-		c.ProbeIntervalMinutes = next.ProbeIntervalMinutes
-		c.CloseToTray = next.CloseToTray
-		c.Notifications = next.Notifications
-		c.UpdateFeed = next.UpdateFeed
-		c.AnnouncementFeed = next.AnnouncementFeed
-		c.StatsServerURL = next.StatsServerURL
-		c.ExposeRegion = next.ExposeRegion
-		c.ProxyMode = next.ProxyMode
-		c.ProxyURL = next.ProxyURL
-		c.SubsEnabled = next.SubsEnabled
-		c.SingBoxPath = next.SingBoxPath
-		c.FailoverEnabled = next.FailoverEnabled
-		c.FailoverMax = next.FailoverMax
-		c.SmartRouting = next.SmartRouting
-		c.RoutingStrategy = next.RoutingStrategy
-		c.LaneFallbackToProviders = next.LaneFallbackToProviders
-		c.AutoTagEnabled = next.AutoTagEnabled
-		c.OpenRefEnabled = next.OpenRefEnabled
-		c.AllowLan = next.AllowLan
-		c.LogCategories = next.LogCategories
-		c.LogLevel = next.LogLevel
-		c.LogKeepDays = next.LogKeepDays
+		if dirty["port"] {
+			c.Port = next.Port
+		}
+		if dirty["defaultMaxTokens"] {
+			c.DefaultMaxTokens = next.DefaultMaxTokens
+		}
+		if dirty["defaultEffort"] {
+			c.DefaultEffort = next.DefaultEffort
+		}
+		if dirty["probeIntervalMinutes"] {
+			c.ProbeIntervalMinutes = next.ProbeIntervalMinutes
+		}
+		if dirty["closeToTray"] {
+			c.CloseToTray = next.CloseToTray
+		}
+		if dirty["notifications"] {
+			c.Notifications = next.Notifications
+		}
+		if dirty["updateFeed"] {
+			c.UpdateFeed = next.UpdateFeed
+		}
+		if dirty["announcementFeed"] {
+			c.AnnouncementFeed = next.AnnouncementFeed
+		}
+		if dirty["statsServerUrl"] {
+			c.StatsServerURL = next.StatsServerURL
+		}
+		if dirty["exposeRegion"] {
+			c.ExposeRegion = next.ExposeRegion
+		}
+		if dirty["proxyMode"] {
+			c.ProxyMode = next.ProxyMode
+		}
+		if dirty["proxyUrl"] {
+			c.ProxyURL = next.ProxyURL
+		}
+		if dirty["failoverEnabled"] {
+			c.FailoverEnabled = next.FailoverEnabled
+		}
+		if dirty["failoverMax"] {
+			c.FailoverMax = next.FailoverMax
+		}
+		if dirty["smartRouting"] {
+			c.SmartRouting = next.SmartRouting
+		}
+		if dirty["routingStrategy"] {
+			c.RoutingStrategy = next.RoutingStrategy
+		}
+		if dirty["laneFallbackToProviders"] {
+			c.LaneFallbackToProviders = next.LaneFallbackToProviders
+		}
+		if dirty["autoTagEnabled"] {
+			c.AutoTagEnabled = next.AutoTagEnabled
+		}
+		if dirty["openRefEnabled"] {
+			c.OpenRefEnabled = next.OpenRefEnabled
+		}
+		if dirty["allowLan"] {
+			c.AllowLan = next.AllowLan
+		}
+		if dirty["logCategories"] {
+			c.LogCategories = next.LogCategories
+		}
+		if dirty["logLevel"] {
+			c.LogLevel = next.LogLevel
+		}
+		if dirty["logKeepDays"] {
+			c.LogKeepDays = next.LogKeepDays
+		}
 	})
 }
 
