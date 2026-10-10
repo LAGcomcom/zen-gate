@@ -739,6 +739,18 @@ func (l *Lane) attemptModel(ctx context.Context, req Request, model, effort stri
 	wire := entry.Wire
 	style := mapWireStyle(wire)
 
+	// Choose the exit before the request is built, then derive the upstream
+	// session from the exit's stable identity. Doing it in this order is what
+	// makes one conversation one exit: the same prompt prefix keeps landing on
+	// the same egress, so the upstream has a chance to reuse its prompt cache
+	// instead of re-prefilling the whole conversation on every turn.
+	plan := ExitPlan{Model: base}
+	if r := CurrentRotator(); r != nil {
+		plan.NodeID = r.Pick(req.SessionSeed, base)
+		plan.ExitKey = r.ExitKey(plan.NodeID)
+	}
+	ctx = WithExitPlan(ctx, plan)
+
 	// The Zen lane fingerprints tools and mints session/request ids; the Kilo
 	// pool has no tool-name gate and no session concept — its models see the
 	// caller's tools exactly as declared, and a plain POST per turn.
@@ -788,7 +800,7 @@ func (l *Lane) attemptModel(ctx context.Context, req Request, model, effort stri
 	// The Zen lane fingerprints tools and mints session/request ids; the Kilo
 	// pool has no tool-name gate and no session concept — its models see the
 	// caller's tools exactly as declared, and a plain POST per turn.
-	session := SessionForConversation(req.SessionSeed)
+	session := SessionForExit(req.SessionSeed, plan.ExitKey)
 	requestID := RequestIdFor(session, req.TurnSeed)
 	post := func(cctx context.Context, body map[string]any, onData func(payload []byte) error) (*Usage, error) {
 		if kilo {

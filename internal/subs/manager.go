@@ -40,6 +40,12 @@ type Manager struct {
 	stopping bool
 	rr       atomic.Uint64
 	lastSync time.Time
+
+	// sticky remembers (conversation → exit) so one conversation keeps the
+	// same exit and a client's prompt cache has a chance to hit. It is a
+	// preference, never a lock: an unusable exit is dropped immediately.
+	sticky   map[string]string
+	stickyAt map[string]int64
 	lastErr  string
 	version  string
 
@@ -65,7 +71,12 @@ func NewManager(st *store.Store, log func(string, ...any)) *Manager {
 	if log == nil {
 		log = func(string, ...any) {}
 	}
-	return &Manager{st: st, log: log, health: map[string]*NodeHealth{}}
+	return &Manager{
+		st: st, log: log,
+		health:   map[string]*NodeHealth{},
+		sticky:   map[string]string{},
+		stickyAt: map[string]int64{},
+	}
 }
 
 // BinaryPath resolves the sing-box executable: the user-configured path wins,

@@ -101,6 +101,16 @@ func SessionForConversation(seed string) string {
 	return "ses_" + hex.EncodeToString(sum[:6]) + base62From(sum[6:20])
 }
 
+// SessionForExit binds one conversation to one exit. Quota is accounted per
+// session AND per egress IP, so a session that appears from dozens of
+// countries is both an obvious fingerprint and a cache miss on every turn.
+func SessionForExit(seed, exitKey string) string {
+	if exitKey == "" {
+		return SessionForConversation(seed)
+	}
+	return SessionForConversation(seed + "\x00exit\x00" + exitKey)
+}
+
 // RequestIdFor derives a stable per-turn request id; retries of one turn share it.
 func RequestIdFor(session, turnSeed string) string {
 	if strings.TrimSpace(turnSeed) == "" {
