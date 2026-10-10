@@ -606,7 +606,7 @@ func (l *Lane) Complete(ctx context.Context, req Request, emit func(Chunk)) (Out
 		// counted per egress IP and a funded exit may be two hops away, so ask
 		// the pool a few times before believing it. Every retry is a fresh dial
 		// (rotate disables keep-alives) and the node round-robin moves on.
-		if uerr.Code == CodeQuota && !sawAny && RotationActive() && egressTries < quotaEgressRetries && time.Now().Before(egressDeadline) {
+		if egressRetryable(uerr.Code) && !sawAny && RotationActive() && egressTries < quotaEgressRetries && time.Now().Before(egressDeadline) {
 			egressTries++
 			continue
 		}
@@ -641,9 +641,28 @@ func (l *Lane) Complete(ctx context.Context, req Request, emit func(Chunk)) (Out
 // switchableFailure reports whether this failure class can plausibly be
 // answered by a different model. Transport/credential faults are egress-wide —
 // switching models would just pay latency for the same refusal.
+// egressRetryable reports whether the same model is worth asking again through
+// a DIFFERENT exit. Quota is the original case (a 429 is one IP's answer, not
+// the model's), but a transport failure or an upstream 5xx is just as
+// exit-shaped: the request never got an answer, so asking another exit costs
+// nothing and can turn a 502 into a 200. Before this, only CodeQuota retried,
+// so a single stalling exit failed the turn while the rest of the pool idled.
+func egressRetryable(code string) bool {
+	switch code {
+	case CodeQuota, CodeTransport, CodeServer, CodeTimeout:
+		return true
+	}
+	return false
+}
+
+// A failure another model can plausibly answer. CodeTransport belongs here:
+// the transport error is an egress-shaped failure, not a verdict about this
+// model, and leaving it out meant a single stalled exit returned 502 to the
+// user while a dozen other exits sat idle — observed at 217 seconds of
+// waiting for one request, attempts=1.
 func switchableFailure(uerr *UpstreamError) bool {
 	switch uerr.Code {
-	case CodeQuota, CodeRegion, CodeServer, CodeTimeout, CodeEmpty:
+	case CodeQuota, CodeRegion, CodeServer, CodeTimeout, CodeEmpty, CodeTransport:
 		return true
 	}
 	return false
