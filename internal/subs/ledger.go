@@ -57,7 +57,6 @@ func (m *Manager) Report(nodeID, model, class string) {
 	}
 	m.fails[k]++
 	m.failAt[k] = now
-	delete(m.good, k)
 	n := m.fails[k]
 
 	var d time.Duration
@@ -80,10 +79,17 @@ func (m *Manager) Report(nodeID, model, class string) {
 	m.bans[k] = now.Add(d)
 }
 
-// Revive clears an exit's failure state after a real request succeeded through
-// it. A served request is harder evidence than any probe sample, so there is no
-// reason to sit out the rest of a cooldown.
-func (m *Manager) Revive(nodeID string) {
+// Revive clears an exit's failure state after a real request for one model
+// succeeded through it. A served request is harder evidence than any probe
+// sample, so there is no reason to sit out the rest of a cooldown.
+//
+// The node-level cooldown is transport state — model-independent — so a
+// success clears it outright. The (exit, model) ban is not: one model working
+// through an exit says nothing about another model that the exit region-gates
+// or has a separate quota for, so clearing sibling bans here would let a
+// model-B success re-arm a model-A wall. Only the pair that just succeeded is
+// lifted.
+func (m *Manager) Revive(nodeID, model string) {
 	if nodeID == "" {
 		return
 	}
@@ -94,15 +100,13 @@ func (m *Manager) Revive(nodeID string) {
 		h.CoolUntil = 0
 		h.LastOKMs = now.UnixMilli()
 	}
-	prefix := nodeID + "\x00"
-	for k := range m.bans {
-		if len(k) > len(prefix) && k[:len(prefix)] == prefix {
-			delete(m.bans, k)
-			delete(m.fails, k)
-			delete(m.failAt, k)
-			m.good[k] = now
-		}
+	if model == "" {
+		return
 	}
+	k := banKey(nodeID, model)
+	delete(m.bans, k)
+	delete(m.fails, k)
+	delete(m.failAt, k)
 }
 
 // bannedFor reports whether this pair is inside its ban window, clearing the

@@ -114,9 +114,12 @@ type Rotator interface {
 	// Report books one failure against an (exit, model) pair. The ledger is
 	// only ever used to skip a combination known to be bad.
 	Report(nodeID, model, class string)
-	// Revive marks one exit healthy again after a real request succeeded
-	// through it — real traffic is harder evidence than any probe sample.
-	Revive(nodeID string)
+	// Revive clears the (exit, model) pair and the exit's transport cooldown
+	// after a real request for that model succeeded through it — real traffic
+	// is harder evidence than any probe sample. It never lifts bans recorded
+	// against other models: one model working through an exit says nothing
+	// about another the exit region-gates or quotas separately.
+	Revive(nodeID, model string)
 }
 
 var (

@@ -2,6 +2,7 @@ package subs
 
 import (
 	"testing"
+	"time"
 )
 
 // Node pool for these tests. Four nodes, three distinct egress IPs, with one IP
@@ -110,5 +111,40 @@ func TestExitKeyPrefersEgressIP(t *testing.T) {
 	}
 	if got := m.ExitKey(""); got != "" {
 		t.Errorf("ExitKey(empty) = %q, want empty", got)
+	}
+}
+
+// The interlock the 429 egress-retry loop depends on: a sticky conversation
+// books a failure against its chosen exit, and the NEXT Pick with the same
+// seed must move off it. The lane's retry re-enters attemptModel, which
+// re-Picks — if sticky outranked the ban, every retry would hit the same wall
+// and the client would watch the same 429 repeat.
+func TestStickyConversationMovesOnQuotaBan(t *testing.T) {
+	m, _ := poolForPick()
+	first := m.Pick("conv-1", "m")
+	if first == "" {
+		t.Fatal("no exit picked")
+	}
+	m.Report(first, "m", "limited")
+	second := m.Pick("conv-1", "m")
+	if second == first {
+		t.Fatalf("conversation stayed on the banned exit %s — 429 retries would re-hit the same wall", first)
+	}
+	// Once the ban expires the conversation keeps its rebound exit (sticky is
+	// sticky until the exit becomes unusable again) — but the lifted exit is
+	// back in rotation for fresh conversations.
+	m.bans[banKey(first, "m")] = time.Now().Add(-time.Second)
+	if got := m.Pick("conv-1", "m"); got != second {
+		t.Errorf("conversation moved off its rebound exit: %s -> %s", second, got)
+	}
+	returned := false
+	for i := 0; i < 80; i++ {
+		if m.Pick("", "m") == first {
+			returned = true
+			break
+		}
+	}
+	if !returned {
+		t.Errorf("the expired ban still keeps %s out of rotation", first)
 	}
 }

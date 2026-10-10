@@ -67,7 +67,8 @@ func TestFailCountForgetsAfterTheMemoryWindow(t *testing.T) {
 	}
 }
 
-// Real traffic is proof: a served request clears the cooldown and the bans.
+// Real traffic is proof: a served request clears the cooldown and the pair's
+// ban.
 func TestReviveClearsCooldownAndBans(t *testing.T) {
 	m, health := poolForPick()
 	m.park("n3")
@@ -75,7 +76,7 @@ func TestReviveClearsCooldownAndBans(t *testing.T) {
 	if _, banned := m.bans[banKey("n3", "m")]; !banned {
 		t.Fatal("setup: the pair should be banned")
 	}
-	m.Revive("n3")
+	m.Revive("n3", "m")
 	if health["n3"].CoolUntil != 0 {
 		t.Error("Revive left a cooldown in place")
 	}
@@ -84,6 +85,32 @@ func TestReviveClearsCooldownAndBans(t *testing.T) {
 	}
 	if health["n3"].LastOKMs == 0 {
 		t.Error("Revive did not record the real-traffic success")
+	}
+}
+
+// A success for one model must not lift another model's ban on the same exit:
+// model B working through an exit says nothing about model A, which the exit
+// may region-gate or quota separately. The old prefix sweep re-armed A's wall
+// on every B success.
+func TestReviveDoesNotLiftSiblingModelBans(t *testing.T) {
+	m, health := poolForPick()
+	m.Report("n3", "model-a", "region")
+	m.Report("n3", "model-b", "other")
+	// A real request for model B succeeds through the same exit.
+	m.Revive("n3", "model-b")
+	if _, banned := m.bans[banKey("n3", "model-b")]; banned {
+		t.Error("the succeeding pair's ban must be lifted")
+	}
+	if _, banned := m.bans[banKey("n3", "model-a")]; !banned {
+		t.Error("a sibling model's ban was lifted by another model's success")
+	}
+	// The node-level cooldown is model-independent and does clear.
+	if health["n3"].LastOKMs == 0 {
+		t.Error("Revive did not record the real-traffic success")
+	}
+	// And the banned sibling stays skipped by the picker.
+	if id := m.Pick("", "model-a"); id == "n3" {
+		t.Error("Pick returned an exit still banned for this model")
 	}
 }
 

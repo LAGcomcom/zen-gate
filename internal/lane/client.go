@@ -863,9 +863,10 @@ func (l *Lane) attemptModel(ctx context.Context, req Request, model, effort stri
 				Message: "upstream ended the turn with " + result.FinishToken}, sawAny
 		}
 		l.NoteRealSuccess(base)
-		// A served request is proof: clear this exit's cooldown and its bans.
+		// A served request is proof: clear this exit's cooldown and the ban
+		// booked against this very (exit, model) pair.
 		if r := CurrentRotator(); r != nil && plan.NodeID != "" {
-			r.Revive(plan.NodeID)
+			r.Revive(plan.NodeID, base)
 		}
 		l.record(ctx, CallRecord{Model: base, Ok: true, Exit: plan.NodeID, Effort: effort, Agent: req.Agent, At: time.Now().UnixMilli()}, result, nil, firstAt)
 		return Outcome{Usage: result.Usage, Finish: result.Finish}, nil, true
@@ -926,6 +927,11 @@ func (l *Lane) attemptModel(ctx context.Context, req Request, model, effort stri
 		if rerr == nil && recResult.SawFinish && recResult.FinishToken != "failed" && recResult.FinishToken != "cancelled" && recResult.SawText {
 			recResult.Usage.Merge(&result.Usage)
 			l.NoteRealSuccess(base)
+			// The continuation rode the same exit and served: same proof as a
+			// clean turn, so lift this pair's cooldown/ban too.
+			if r := CurrentRotator(); r != nil && plan.NodeID != "" {
+				r.Revive(plan.NodeID, base)
+			}
 			l.record(ctx, CallRecord{Model: base, Ok: true, Recovered: true, Exit: plan.NodeID, Effort: effort, Agent: req.Agent, At: time.Now().UnixMilli()}, recResult, nil, firstAt)
 			return Outcome{Usage: recResult.Usage, Finish: recResult.Finish, Recovered: true}, nil, true
 		}

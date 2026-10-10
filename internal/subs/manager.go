@@ -48,15 +48,17 @@ type Manager struct {
 	stickyAt map[string]int64
 
 	// bans is the (exit, model) ledger: once an exit fails for a model, later
-	// requests stop re-hitting the same wall. good is its mirror. fails/failAt
-	// drive the adaptive delay — a transient failure parks the pair for
-	// seconds, and only a repeated one grows it.
-	bans    map[string]time.Time
-	good    map[string]time.Time
-	fails   map[string]int
-	failAt  map[string]time.Time
-	lastErr string
-	version string
+	// requests stop re-hitting the same wall. fails/failAt drive the adaptive
+	// delay — a transient failure parks the pair for seconds, and only a
+	// repeated one grows it. There is deliberately no mirror table of
+	// "known-good" pairs: preferring one pins every concurrent request onto
+	// the first success (measured in #23), so the ledger only ever removes
+	// candidates.
+	bans     map[string]time.Time
+	fails    map[string]int
+	failAt   map[string]time.Time
+	lastErr  string
+	version  string
 
 	deathCancel context.CancelFunc // bounds the dead-node recheck loop
 }
@@ -89,7 +91,6 @@ func NewManager(st *store.Store, log func(string, ...any)) *Manager {
 		health:   map[string]*NodeHealth{},
 		sticky:   map[string]string{},
 		bans:     map[string]time.Time{},
-		good:     map[string]time.Time{},
 		fails:    map[string]int{},
 		failAt:   map[string]time.Time{},
 		stickyAt: map[string]int64{},
