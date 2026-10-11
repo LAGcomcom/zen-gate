@@ -63,7 +63,10 @@ OpenCode Zen 提供了一批**免登录、免计费**的模型车道，但它们
 ## 快速开始
 
 **Windows** — 从 [Releases](https://github.com/LAGcomcom/zen-gate/releases/latest) 下载
-`zen-gate.exe`，双击运行（托盘出现图标）。
+`zen-gate.exe`，双击运行（托盘出现图标）。机器没装 WebView2 Runtime 时会自动改用
+默认浏览器打开管理页，网关功能不受影响；想要内嵌窗口装一下
+[WebView2 Runtime](https://developer.microsoft.com/microsoft-edge/webview2/) 即可。
+`ZEN_GATE_NO_WEBVIEW2=1` 可强制浏览器模式（排障用）。
 
 **macOS** — `tools/build-macos.sh` 产出 `dist/Zen Gate.app`，安装并启动：
 

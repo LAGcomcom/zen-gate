@@ -417,7 +417,11 @@ func main() {
 				windowHidden = false
 				if mainHwnd != 0 {
 					window.ShowWindowWin(mainHwnd)
+					return
 				}
+				// Fallback mode (embedded window unavailable): there is no
+				// window to focus, so the tray's 打开管理页 opens the browser.
+				tray.Open(dashURL)
 			},
 		},
 		Bounds: func() *window.Bounds {
@@ -449,7 +453,6 @@ func main() {
 	cancel()
 	gw.Stop()
 	mgr.Stop()
-	qoderHub.Stop()
 	qoderHub.Stop()
 	_ = st.FlushStats()
 	logger.Infof("zen-gate 已退出")
