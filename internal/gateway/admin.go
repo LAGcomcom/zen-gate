@@ -113,6 +113,14 @@ func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request, rest string
 		s.adminAgent(w, r, strings.TrimPrefix(rest, "agent/"))
 	case rest == "qoder/status" && r.Method == http.MethodGet:
 		s.adminQoderStatus(w, r)
+	case rest == "workbuddy/status" && r.Method == http.MethodGet:
+		s.adminWorkBuddyStatus(w, r)
+	case rest == "workbuddy/login/start" && r.Method == http.MethodPost:
+		s.adminWorkBuddyLoginStart(w)
+	case rest == "workbuddy/login/poll" && r.Method == http.MethodGet:
+		s.adminWorkBuddyLoginPoll(w)
+	case rest == "workbuddy/logout" && r.Method == http.MethodPost:
+		s.adminWorkBuddyLogout(w)
 	case rest == "providers" && r.Method == http.MethodPost:
 		s.adminProviderSave(w, r)
 	case rest == "providers/delete" && r.Method == http.MethodPost:
@@ -339,6 +347,7 @@ func (s *Server) adminState(w http.ResponseWriter) {
 		"laneFallbackToProviders": cfg.LaneFallbackToProviders,
 		"autoTagEnabled":          cfg.AutoTagEnabled,
 		"openRefEnabled":          cfg.OpenRefEnabled,
+		"workBuddyEnabled":        cfg.WorkBuddy.Enabled,
 		"allowLan":                cfg.AllowLan,
 	}
 	for k, v := range logSettingsView(cfg) {
@@ -429,6 +438,7 @@ func (s *Server) adminSettings(w http.ResponseWriter, r *http.Request) {
 		LaneFallbackToProviders *bool            `json:"laneFallbackToProviders"`
 		AutoTagEnabled          *bool            `json:"autoTagEnabled"`
 		OpenRefEnabled          *bool            `json:"openRefEnabled"`
+		WorkBuddyEnabled        *bool            `json:"workBuddyEnabled"`
 		AllowLan                *bool            `json:"allowLan"`
 		LogCategories           *map[string]bool `json:"logCategories"`
 		LogLevel                *string          `json:"logLevel"`
@@ -581,6 +591,11 @@ func (s *Server) adminSettings(w http.ResponseWriter, r *http.Request) {
 		changed = true
 		dirty["openRefEnabled"] = true
 	}
+	if in.WorkBuddyEnabled != nil {
+		cfg.WorkBuddy.Enabled = *in.WorkBuddyEnabled
+		changed = true
+		dirty["workBuddyEnabled"] = true
+	}
 	if in.AllowLan != nil && *in.AllowLan != cfg.AllowLan {
 		cfg.AllowLan = *in.AllowLan
 		changed = true
@@ -619,6 +634,12 @@ func (s *Server) adminSettings(w http.ResponseWriter, r *http.Request) {
 	if changed {
 		s.commitSettings(&cfg, dirty)
 		_ = s.Store.Save()
+	}
+	if dirty["workBuddyEnabled"] {
+		// The published copy is the account of record; push it into the lane
+		// and let the catalog rebuild decide whether the roster appears.
+		s.Lane.SetWorkBuddyAccount(cfg.WorkBuddy)
+		go s.Lane.RefreshCatalog(context.Background())
 	}
 	if openRefOn {
 		// Turning the reference on should fill capacities now, not when the

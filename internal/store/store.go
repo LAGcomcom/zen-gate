@@ -157,8 +157,12 @@ type Config struct {
 	// HiddenModels lists gateway model ids the user unchecked on the 模型 page:
 	// they stay servable if requested explicitly but disappear from agent
 	// pickers and /v1/models.
-	HiddenModels []string    `json:"hiddenModels,omitempty"`
-	Window       WindowState `json:"window"`
+	HiddenModels []string `json:"hiddenModels,omitempty"`
+	// WorkBuddy is the WorkBuddy 账号渠道 (intl) credential set. The lane
+	// writes rotated token pairs and activity dates back through its persist
+	// callback; Masked() hides both tokens from config exports.
+	WorkBuddy lane.WBAccount `json:"workBuddy"`
+	Window    WindowState    `json:"window"`
 }
 
 // DayStat aggregates one calendar day.
@@ -633,6 +637,12 @@ func (s *Store) Masked() *Config {
 		if cfg.Subscriptions[i].URL != "" {
 			cfg.Subscriptions[i].URL = MaskedValue
 		}
+	}
+	if cfg.WorkBuddy.AccessToken != "" {
+		cfg.WorkBuddy.AccessToken = MaskedValue
+	}
+	if cfg.WorkBuddy.RefreshToken != "" {
+		cfg.WorkBuddy.RefreshToken = MaskedValue
 	}
 	return cfg
 }

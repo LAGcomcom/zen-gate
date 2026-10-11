@@ -57,8 +57,10 @@ func FreshState(r ProbeResult) string {
 const probeRechecks = 2
 
 // recheckNegative re-asks a refusal elsewhere. An available answer anywhere
-// wins immediately; otherwise the last refusal is what we publish.
-func recheckNegative(ctx context.Context, m ModelInfo, r ProbeResult) ProbeResult {
+// wins immediately; otherwise the last refusal is what we publish. probe is
+// the caller's channel-aware prober — re-checks must ride the same source as
+// the first verdict, never the Zen endpoint a WorkBuddy model cannot answer.
+func recheckNegative(ctx context.Context, m ModelInfo, r ProbeResult, probe func(context.Context, ModelInfo) ProbeResult) ProbeResult {
 	if r.State == StateAvailable || r.State == StateUnknown {
 		return r
 	}
@@ -68,7 +70,7 @@ func recheckNegative(ctx context.Context, m ModelInfo, r ProbeResult) ProbeResul
 		}
 		EmitProbeStep(ctx, PhaseRequest, StepRunning, 0,
 			fmt.Sprintf("换个出口复核 %d/%d", i+1, probeRechecks))
-		rr := ProbeModel(ctx, m)
+		rr := probe(ctx, m)
 		if rr.State == StateAvailable {
 			return rr
 		}

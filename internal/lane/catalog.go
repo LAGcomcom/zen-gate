@@ -25,8 +25,13 @@ type ModelInfo struct {
 }
 
 // Channel tags for the catalog's free sources. The empty channel is the
-// OpenCode Zen lane itself; ChannelKilo is the keyless Kilo free pool.
-const ChannelKilo = "kilo"
+// OpenCode Zen lane itself; ChannelKilo is the keyless Kilo free pool;
+// ChannelWorkBuddy is the WorkBuddy 账号渠道 (intl), the credential-bearing
+// third source.
+const (
+	ChannelKilo      = "kilo"
+	ChannelWorkBuddy = "workbuddy"
+)
 
 var alwaysFree = map[string]bool{"union-alpha": true, "space-bunny-free": true}
 

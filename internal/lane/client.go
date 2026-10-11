@@ -101,6 +101,17 @@ type Lane struct {
 	ttft             TTFTSource
 	throttle         *ThrottleBook
 
+	// WorkBuddy 账号渠道 state. wbMu serializes token rotation (upstream
+	// rotates the refresh token on every refresh — two overlapping refreshes
+	// void the second pair) and guards the account snapshot the request paths
+	// read.
+	wbMu          sync.Mutex
+	wbAcct        WBAccount
+	wbPersist     func(WBAccount)
+	wbRefreshedAt time.Time
+	wbLoginState  string
+	wbLoginAt     time.Time
+
 	probing         atomicFlag
 	lastProbeAt     time.Time
 	backoffRounds   int
@@ -339,11 +350,14 @@ func (l *Lane) RefreshCatalog(ctx context.Context) {
 	prev := l.catalog
 	l.mu.Unlock()
 
-	var zen, kilo []ModelInfo
+	var zen, kilo, wb []ModelInfo
 	for _, m := range prev {
-		if m.Channel == ChannelKilo {
+		switch m.Channel {
+		case ChannelKilo:
 			kilo = append(kilo, m)
-		} else {
+		case ChannelWorkBuddy:
+			wb = append(wb, m)
+		default:
 			zen = append(zen, m)
 		}
 	}
@@ -353,9 +367,19 @@ func (l *Lane) RefreshCatalog(ctx context.Context) {
 	if rows, err := FetchKiloListing(ctx); err == nil && len(rows) > 0 {
 		kilo = BuildKiloCatalog(rows)
 	}
-	cat := make([]ModelInfo, 0, len(zen)+len(kilo))
+	// The WorkBuddy roster is static (three curated free models), so unlike
+	// the two fetched sources it cannot fail a fetch — the only gate is the
+	// account. Logging out empties the bucket on purpose: logged-out models
+	// must leave the pickers, a subtract that is the point here.
+	if _, ok := l.workBuddyReady(); ok {
+		wb = buildWorkBuddyCatalog()
+	} else {
+		wb = nil
+	}
+	cat := make([]ModelInfo, 0, len(zen)+len(kilo)+len(wb))
 	cat = append(cat, zen...)
 	cat = append(cat, kilo...)
+	cat = append(cat, wb...)
 	if len(cat) == 0 {
 		return
 	}
@@ -415,7 +439,7 @@ func (l *Lane) ProbeRound(ctx context.Context, manual bool) {
 		l.mu.Unlock()
 		l.notify()
 
-		r := recheckNegative(ctx, m, ProbeModel(ctx, m))
+		r := recheckNegative(ctx, m, l.probeModelFor(ctx, m), l.probeModelFor)
 
 		effective, _ := l.applyVerdict(m.ID, r)
 		if effective.State != StateThrottled {
@@ -498,7 +522,7 @@ func (l *Lane) ProbeOneCtx(ctx context.Context, model string) ProbeResult {
 		// The button asks "can this model answer right now", so the raw verdict
 		// is what the caller sees; the stored state is still guarded by live
 		// traffic.
-		r = recheckNegative(ctx, entry, ProbeModel(ctx, entry))
+		r = recheckNegative(ctx, entry, l.probeModelFor(ctx, entry), l.probeModelFor)
 		r, _ = l.applyVerdict(model, r)
 	}
 	switch r.State {
@@ -512,6 +536,16 @@ func (l *Lane) ProbeOneCtx(ctx context.Context, model string) ProbeResult {
 	}
 	l.notify()
 	return r
+}
+
+// probeModelFor routes one availability probe to the source that can answer
+// it: the WorkBuddy channel probes through its own account (ProbeModel is
+// hardwired to the Zen endpoint), everything else goes to the shared prober.
+func (l *Lane) probeModelFor(ctx context.Context, m ModelInfo) ProbeResult {
+	if m.Channel == ChannelWorkBuddy {
+		return l.probeWorkBuddy(ctx, m)
+	}
+	return ProbeModel(ctx, m)
 }
 
 // StartLoops runs the periodic catalog refresh + probe + egress watch until
@@ -837,8 +871,12 @@ func (l *Lane) attemptModel(ctx context.Context, req Request, model, effort stri
 
 	// The Zen lane fingerprints tools and mints session/request ids; the Kilo
 	// pool has no tool-name gate and no session concept — its models see the
-	// caller's tools exactly as declared, and a plain POST per turn.
+	// caller's tools exactly as declared, and a plain POST per turn. The
+	// WorkBuddy channel is like Kilo on the fingerprint front (its identity
+	// headers are account-derived, not session-minted) but carries its own
+	// account credential and body quirks.
 	kilo := entry.Channel == ChannelKilo
+	wb := entry.Channel == ChannelWorkBuddy
 	buildBody := func(msgs []Message, tools []ToolDef, maxTokens int) map[string]any {
 		body := map[string]any{"model": base, "stream": true}
 		switch wire {
@@ -878,6 +916,13 @@ func (l *Lane) attemptModel(ctx context.Context, req Request, model, effort stri
 		if kilo && entry.Reasoning {
 			body["reasoning"] = map[string]any{"effort": kiloEffortRung(effort)}
 		}
+		// WorkBuddy: usage-bearing streams, per-family thinking fields, and
+		// the reasoning_content backfill the upstream demands on assistant
+		// turns once thinking is enabled.
+		if wb {
+			wbApplyModelQuirks(body, base, effort)
+			wbBackfillReasoning(body)
+		}
 		return body
 	}
 
@@ -887,6 +932,9 @@ func (l *Lane) attemptModel(ctx context.Context, req Request, model, effort stri
 	session := SessionForExit(req.SessionSeed, plan.ExitKey)
 	requestID := RequestIdFor(session, req.TurnSeed)
 	post := func(cctx context.Context, body map[string]any, onData func(payload []byte) error) (*Usage, error) {
+		if wb {
+			return l.wbPost(cctx, body, onData)
+		}
 		if kilo {
 			return PostKiloStreamed(cctx, body, onData)
 		}

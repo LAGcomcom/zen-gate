@@ -130,6 +130,13 @@ func main() {
 		st.SetQuotaNote(model, qn)
 	})
 	lane.SetProxy(cfg.ProxyMode, cfg.ProxyURL)
+	// WorkBuddy 账号渠道：config 是账号的落盘处，lane 持快照；上游轮换
+	// refresh token，lane 通过 persist 回调把新 token 对写回 config。
+	ln.SetWorkBuddyAccount(cfg.WorkBuddy)
+	ln.SetWorkBuddyPersist(func(a lane.WBAccount) {
+		st.Mutate(func(c *store.Config) { c.WorkBuddy = a })
+		_ = st.Save()
+	})
 	// 订阅轮询:sidecar manager wires into the gateway, the lane rotator and
 	// every shutdown path below.
 	mgr := subs.NewManager(st, logger.Infof)
@@ -222,6 +229,34 @@ func main() {
 	ln.OnChange = syncEndpoints
 	gw.SetModelsSync(syncEndpoints)
 	ln.StartLoops(ctx, time.Duration(cfg.ProbeIntervalMinutes)*time.Minute)
+	// WorkBuddy 每日活跃：本地日历日一次，用免费模型发一条极小对话领取活跃
+	// 积分。启动 90s 后先查一次（覆盖"当天已登录"的场景），之后每小时补查；
+	// 已完成/未登录的检查是纯日期比较，重复触发没有成本。
+	go func() {
+		time.Sleep(90 * time.Second)
+		runWBActivity := func() {
+			ran, err := ln.WorkBuddyDailyActivity(ctx)
+			if !ran {
+				return
+			}
+			if err != nil {
+				logger.Infof("WorkBuddy 每日活跃未完成（下个小时重试）: %v", err)
+				return
+			}
+			logger.Infof("WorkBuddy 每日活跃已完成")
+		}
+		runWBActivity()
+		t := time.NewTicker(time.Hour)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				runWBActivity()
+			}
+		}
+	}()
 	gw.StartOpenRefLoop(ctx)
 	syncEndpoints()
 

@@ -1156,6 +1156,15 @@ function renderProviders(s){
         <h3>Qoder 账号渠道 <span class="muted" style="font-size:11px" id="qoder-state"></span></h3>
         <div class="muted" style="font-size:12px; line-height:1.7" id="qoder-body"></div>
       </div>
+      <div class="card" id="wb-card">
+        <h3>WorkBuddy 账号渠道（国际版） <span class="muted" style="font-size:11px" id="wb-state"></span></h3>
+        <div class="muted" style="font-size:12px; line-height:1.7" id="wb-body">加载中…</div>
+        <div style="margin-top:8px; display:flex; gap:8px; flex-wrap:wrap; align-items:center">
+          <button class="act" id="wb-login">授权登录</button>
+          <button class="ghost" id="wb-logout">退出登录</button>
+          <button class="act off" id="tg-workbuddy">关闭</button>
+        </div>
+      </div>
       <div class="card">
         <h3>免费模型商预设 <span class="muted" style="font-size:11px">点击填充，Key 需要你自己去对应平台申请</span></h3>
         <div class="pchips" id="pv-presets"></div>
@@ -1291,6 +1300,76 @@ function renderProviders(s){
     });
   }
   renderProviderList(s);
+  renderWorkBuddyCard();
+  bindWorkBuddyCard();
+}
+
+/* WorkBuddy 账号渠道卡：状态读 /admin/api/workbuddy/status，登录走 state 轮询
+   （授权页开在新标签，这里两秒一探，拿到令牌即停并刷新）。 */
+let wbPollTimer = null;
+async function renderWorkBuddyCard(){
+  const st = await fetch("/admin/api/workbuddy/status").then(r=>r.json()).catch(()=>null);
+  const state = $("#wb-state"), body = $("#wb-body");
+  if(!state || !body || !st){ if(state) state.textContent = "状态获取失败"; return; }
+  setToggle("#tg-workbuddy", !!st.enabled);
+  const lg = $("#wb-logout");
+  if(lg) lg.style.display = st.loggedIn ? "" : "none";
+  if(!st.loggedIn){
+    state.textContent = "未登录";
+    body.innerHTML = '用 WorkBuddy（www.workbuddy.ai）账号授权后，三个免费模型（hy4-preview-f / hy3 / deepseek-v4.1-flash）直接进入「模型」页和所有 Agent 选择器，每日自动活跃领取积分。免费模型走 24h 窗口限量；提示词可能被上游记录，别交机密内容。';
+    return;
+  }
+  state.textContent = st.enabled ? "已启用" : "已停用";
+  const exp = st.expiresAtMs ? new Date(st.expiresAtMs).toLocaleString() : "未知";
+  body.innerHTML = '账号 <b>' + (st.nickname || st.uid || "-") + '</b> · 登录有效期至 ' + exp +
+    ' · 积分 <b>' + (st.credits === "" ? "—" : st.credits) + '</b> · 上次活跃 ' + (st.lastActivityDate || "—") +
+    (st.detail ? '<br><span style="color:#c88">' + st.detail + '</span>' : '');
+}
+function bindWorkBuddyCard(){
+  const card = $("#wb-card");
+  if(!card || card.dataset.bound) return;
+  card.dataset.bound = "1";
+  $("#wb-login").onclick = async () => {
+    const b = $("#wb-login");
+    b.disabled = true;
+    const j = await api("/workbuddy/login/start", {});
+    b.disabled = false;
+    if (!j || !j.authUrl) return;
+    // 服务端已用系统默认浏览器打开授权页（复用你已有的 workbuddy.ai 登录态）；
+    // 卡片同时给出链接兜底，并进入两秒一轮的令牌轮询。
+    const state = $("#wb-state"), body = $("#wb-body");
+    state.textContent = "等待授权…";
+    body.innerHTML = '授权页已在你的默认浏览器打开。如果你在浏览器里已登录过 WorkBuddy，通常只需点一下确认；' +
+      '没有自动弹出时 <a href="' + j.authUrl + '" target="_blank" rel="noopener">点这里打开授权页</a>。' +
+      '完成后这里会自动拿到令牌（有效期最长 5 分钟）。';
+    const deadline = Date.now() + 5*60*1000;
+    if (wbPollTimer) clearInterval(wbPollTimer);
+    wbPollTimer = setInterval(async () => {
+      if (Date.now() > deadline) { clearInterval(wbPollTimer); wbPollTimer = null; renderWorkBuddyCard(); return; }
+      const p = await fetch("/admin/api/workbuddy/login/poll").then(r=>r.json()).catch(()=>null);
+      if (p && p.state === "ok") {
+        clearInterval(wbPollTimer); wbPollTimer = null;
+        toast("WorkBuddy 授权成功，免费模型已进入模型页");
+        renderWorkBuddyCard();
+      } else if (p && p.state === "error") {
+        clearInterval(wbPollTimer); wbPollTimer = null;
+        toast("WorkBuddy 登录未完成：" + (p.error || "请重试"));
+        renderWorkBuddyCard();
+      }
+    }, 2000);
+  };
+  $("#wb-logout").onclick = async () => {
+    const j = await api("/workbuddy/logout", {});
+    if (j) toast("已退出 WorkBuddy 账号");
+    renderWorkBuddyCard();
+  };
+  const tgb = $("#tg-workbuddy");
+  tgb.onclick = async () => {
+    const on = tgb.dataset.on !== "1";
+    const j = await api("/settings", { workBuddyEnabled: on });
+    if(j){ setToggle("#tg-workbuddy", on); toast(on ? "WorkBuddy 渠道已启用" : "WorkBuddy 渠道已停用"); }
+    renderWorkBuddyCard();
+  };
 }
 
 function hostOf(u){ try { return new URL(u).host; } catch(e){ return u; } }
