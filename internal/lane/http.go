@@ -189,6 +189,20 @@ func RotationActive() bool { return rotation.Load() }
 // (a first-call step-5 took 62s) and still cuts a stalled exit short.
 const responseHeaderTimeout = 90 * time.Second
 
+// streamIdleTimeout is how long a stream may deliver nothing before the call is
+// abandoned. It resets on every chunk, so it never bounds a long answer -- what
+// it bounds is silence, i.e. an exit that returned the headers and then stopped.
+//
+// It has to fit inside slowEgressTotalMS together with one response-header
+// timeout, for the same reason that budget is documented with: otherwise the
+// retry exists but can never run. At five minutes a stalled stream outlived the
+// whole 210s budget, so nothing ever retried and the caller only saw its own
+// cancellation -- the access log shows client-side ABORTED at 315s and 600s with
+// no in= or out= at all, meaning no byte was ever decoded. Measured on the same
+// install, healthy turns deliver a chunk every few seconds and finish in 7-62s,
+// so 90s of silence is a stuck exit rather than a slow one.
+const streamIdleTimeout = 90 * time.Second
+
 func SetProxy(mode, url string) {
 	t := &http.Transport{ResponseHeaderTimeout: responseHeaderTimeout}
 	switch mode {
@@ -325,7 +339,7 @@ func PostStreamed(ctx context.Context, path string, body map[string]any, session
 	// One pump owns resp.Body for the whole call; the head bytes are read
 	// through it for shape inspection and then unread so decoding sees the
 	// full stream.
-	pump := newStreamReader(ctx, resp.Body, 5*time.Minute)
+	pump := newStreamReader(ctx, resp.Body, streamIdleTimeout)
 	defer pump.Close()
 	head := readUpTo(pump, 4096, 20*time.Second)
 

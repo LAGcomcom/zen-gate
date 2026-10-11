@@ -30,7 +30,10 @@ import (
 var KiloBase = "https://api.kilo.ai/api/gateway"
 
 const (
-	kiloTurnTimeout = 5 * time.Minute
+	// kiloTurnTimeout bounds the same thing as the Zen lane's idle deadline --
+	// how long the stream may stay silent -- so it shares that value rather than
+	// keeping a second copy that can drift back outside the retry budget.
+	kiloTurnTimeout = streamIdleTimeout
 	kiloUserAgent   = "zen-gate/1.4"
 )
 
