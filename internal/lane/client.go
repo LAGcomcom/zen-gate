@@ -361,10 +361,10 @@ func (l *Lane) RefreshCatalog(ctx context.Context) {
 			zen = append(zen, m)
 		}
 	}
-	if ids, err := FetchListing(ctx); err == nil && len(ids) > 0 {
+	if ids, err := fetchListingWithColdBootRetry(ctx, len(zen), FetchListing); err == nil && len(ids) > 0 {
 		zen = BuildCatalog(ids)
 	}
-	if rows, err := FetchKiloListing(ctx); err == nil && len(rows) > 0 {
+	if rows, err := fetchListingWithColdBootRetry(ctx, len(kilo), FetchKiloListing); err == nil && len(rows) > 0 {
 		kilo = BuildKiloCatalog(rows)
 	}
 	// The WorkBuddy roster is static (three curated free models), so unlike
@@ -394,6 +394,49 @@ func (l *Lane) RefreshCatalog(ctx context.Context) {
 		l.OnCatalogReload()
 	}
 	l.notify()
+}
+
+// coldBootRetryDelay is how long a listing waits before its single retry. It is
+// deliberately short: a first attempt that fails while the process is starting
+// has usually lost a race with something that is about to be ready — sing-box's
+// first inbound comes up seconds after the gateway does — rather than hit an
+// outage a longer wait would outlast.
+const coldBootRetryDelay = 3 * time.Second
+
+// fetchListingWithColdBootRetry runs a source listing and, when the catalog
+// holds nothing for that source yet, gives a failed attempt one more chance.
+//
+// The rebuild already keeps the previous slice of whichever source failed, which
+// makes a mid-life blip survivable (see RefreshCatalog). A cold boot has no such
+// slice to keep, so the same blip drops the source outright: its models stay
+// listed upstream and keep serving, but they are missing from /v1/models and
+// from every client the agent adapters are injected into, and nothing retries
+// until the next probe round, 30 minutes by default.
+//
+// Observed 2026-10-11, immediately after a restart: the Kilo listing failed once
+// (one exit in the rotation refusing the connection) while the Zen listing
+// succeeded, /v1/models came up holding only the six Zen rows, and the ZCode
+// adapter was re-injected with that short roster. The twelve Kilo rows returned
+// on the next boot. A failed listing logs nothing, so the only symptom visible
+// to the user was a picker listing fewer models than the upstream does.
+//
+// Retrying is limited to the cold case on purpose: with rows already cached the
+// failure costs nothing, and a listing that answers successfully with no rows is
+// an answer rather than a failure.
+func fetchListingWithColdBootRetry[T any](ctx context.Context, cached int, fetch func(context.Context) ([]T, error)) ([]T, error) {
+	rows, err := fetch(ctx)
+	if cached > 0 || err == nil {
+		return rows, err
+	}
+	select {
+	case <-ctx.Done():
+		return rows, err
+	case <-time.After(coldBootRetryDelay):
+	}
+	if retried, retryErr := fetch(ctx); retryErr == nil {
+		return retried, nil
+	}
+	return rows, err
 }
 
 // ProbeRound re-probes availability once, with exponential backoff after an
