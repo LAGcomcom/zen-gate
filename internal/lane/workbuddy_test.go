@@ -333,6 +333,16 @@ func TestWorkBuddyDailyActivitySpentWindowClosesTheDay(t *testing.T) {
 	}
 }
 
+// TestWBTurnTimeoutSharesTheStreamIdleDeadline keeps the WorkBuddy channel on
+// the lane-wide silence bound: the stalled-exit arithmetic behind PR #40 (one
+// response-header timeout + one idle timeout must fit the slow retry budget)
+// applies to this source's streams exactly as it does to Zen and Kilo.
+func TestWBTurnTimeoutSharesTheStreamIdleDeadline(t *testing.T) {
+	if wbTurnTimeout != streamIdleTimeout {
+		t.Errorf("wbTurnTimeout = %v, want it to share streamIdleTimeout (%v)", wbTurnTimeout, streamIdleTimeout)
+	}
+}
+
 func TestWBApplyModelQuirks(t *testing.T) {
 	body := map[string]any{}
 	wbApplyModelQuirks(body, "hy4-preview-f", "light")

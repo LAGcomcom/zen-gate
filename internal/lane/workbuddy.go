@@ -40,8 +40,9 @@ import (
 var WorkBuddyBase = "https://www.workbuddy.ai"
 
 const (
-	wbTurnTimeout = 5 * time.Minute
-	wbChatPath    = "/v2/chat/completions"
+	wbTurnTimeout = streamIdleTimeout // shares the lane-wide silence bound (PR #40)
+
+	wbChatPath = "/v2/chat/completions"
 
 	wbAuthStatePath    = "/v2/plugin/auth/state"
 	wbAuthTokenPath    = "/v2/plugin/auth/token"
