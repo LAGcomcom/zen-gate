@@ -177,8 +177,17 @@ func RotationActive() bool { return rotation.Load() }
 // "system" follows the Windows system proxy (WinINET settings), "direct"
 // bypasses, "custom" uses the given URL, "rotate" tunnels every dial through
 // the Rotator installed via SetRotator.
+// responseHeaderTimeout bounds the wait for a response's first byte once the
+// connection is up. The dial timeout does not cover this: an exit that accepts
+// the TCP connection and then simply never answers leaves the request hanging
+// with no deadline at all. Observed on a real install, one such exit produced a
+// 217-second request that ended in TRANSPORT, while the same model through other
+// exits answered in ~15 seconds. 90s clears the slowest cold start measured here
+// (a first-call step-5 took 62s) and still cuts a stalled exit short.
+const responseHeaderTimeout = 90 * time.Second
+
 func SetProxy(mode, url string) {
-	t := &http.Transport{}
+	t := &http.Transport{ResponseHeaderTimeout: responseHeaderTimeout}
 	switch mode {
 	case "direct":
 		t.Proxy = nil
