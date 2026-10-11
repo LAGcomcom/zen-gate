@@ -28,7 +28,21 @@ type ThrottleNote struct {
 }
 
 const (
-	throttleCooldownDefault = 60 * 1000       // 1 min when upstream gave no Retry-After
+	// quotaCooldownNoHeaderSec is how long a throttle signal parks one model
+	// when nothing upstream said otherwise. It is deliberately SHORT.
+	//
+	// This lane's free pool is one globally shared credential ("Bearer public"),
+	// so a 429 reports momentary crowding, not a durable property of the model.
+	// Measured 2026-10-11: space-bunny-free and longcat-2.5-preview-free both
+	// answered 429, and both answered 200 again within two minutes; of 92
+	// recorded throttle episodes the shortest was 0.6s. A 60s park therefore
+	// punished a model for a condition that usually clears in seconds — and
+	// because nextCandidate() skips a throttled model, the client showed
+	// "unavailable" while the model was fine. Retrying costs no quota (a refused
+	// request consumes none), so the cheap direction is the short cooldown.
+	quotaCooldownNoHeaderSec = 10
+
+	throttleCooldownDefault = quotaCooldownNoHeaderSec * 1000
 	throttleCooldownMax     = 2 * 3600 * 1000 // 2 h cap — probes will re-verify
 	throttleEpisodeTTL      = 14 * 24 * 3600 * 1000
 	throttleMaxEpisodes     = 12
