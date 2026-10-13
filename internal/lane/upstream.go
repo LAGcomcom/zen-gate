@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"regexp"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 )
@@ -89,6 +90,15 @@ func MintRequestId(nowMS int64) string {
 // SessionForConversation maps one downstream conversation onto one stable
 // upstream session. Free-tier quota is accounted per session, so a fresh id
 // per request would exhaust it and surface as 429.
+//
+// The id must be MINTED, not hashed: since the free-tier gate moved into the
+// private inference proxy, the service decodes the 12-hex prefix of
+// x-opencode-session as the truncated inverted ~(ms<<12|seq) of a real
+// OpenCode client and 403s (FreeTierError) any prefix that does not decode
+// to a fresh timestamp — a sha256-derived prefix never can (#47). One
+// conversation still gets exactly one session: the minted id is remembered
+// per seed and re-minted only when it grows too old for the freshness
+// window, so per-session quota and prompt cache keep working.
 func SessionForConversation(seed string) string {
 	seed = strings.TrimSpace(seed)
 	if sessionRe.MatchString(seed) {
@@ -97,9 +107,37 @@ func SessionForConversation(seed string) string {
 	if seed == "" {
 		seed = "global"
 	}
-	sum := sha256.Sum256([]byte("zen-gate\x00" + seed))
-	return "ses_" + hex.EncodeToString(sum[:6]) + base62From(sum[6:20])
+	sessionsMu.Lock()
+	defer sessionsMu.Unlock()
+	if s, ok := sessionsBySeed[seed]; ok && time.Since(s.at) < sessionRemintAfter {
+		return s.id
+	}
+	if len(sessionsBySeed) >= sessionsBySeedCap {
+		// The table is a stability cache, not state worth evicting
+		// carefully: a full reset only mints fresh ids for busy seeds.
+		sessionsBySeed = map[string]mintedSession{}
+	}
+	id := MintSessionId(0)
+	sessionsBySeed[seed] = mintedSession{id: id, at: time.Now()}
+	return id
 }
+
+type mintedSession struct {
+	id string
+	at time.Time
+}
+
+const (
+	sessionsBySeedCap = 4096
+	// The free-tier gate tolerates prefixes about a week old; re-mint at
+	// six days to stay inside the window even on sessions that never restart.
+	sessionRemintAfter = 6 * 24 * time.Hour
+)
+
+var (
+	sessionsMu     sync.Mutex
+	sessionsBySeed = map[string]mintedSession{}
+)
 
 // SessionForExit binds one conversation to one exit. Quota is accounted per
 // session AND per egress IP, so a session that appears from dozens of
