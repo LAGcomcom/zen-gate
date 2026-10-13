@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"regexp"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 )
@@ -86,6 +87,21 @@ func MintRequestId(nowMS int64) string {
 	return "msg_" + hex.EncodeToString(raw[:]) + base62From(rnd)
 }
 
+// sessionTable remembers the session id minted for each conversation seed.
+// Minting keeps the 48-bit hex prefix a fresh, decodable stamp — the gate
+// decodes it and rejects digest-shaped prefixes as "not an OpenCode client" —
+// while remembering keeps one session per conversation, which prompt cache
+// and per-session quota accounting both rely on.
+var (
+	sessionMu    sync.Mutex
+	sessionTable = map[string]string{}
+)
+
+// sessionTableCap bounds the table; hitting it drops every mapping at once.
+// That many live conversations make a one-off remap of each session cheaper
+// than eviction policy.
+const sessionTableCap = 4096
+
 // SessionForConversation maps one downstream conversation onto one stable
 // upstream session. Free-tier quota is accounted per session, so a fresh id
 // per request would exhaust it and surface as 429.
@@ -97,8 +113,17 @@ func SessionForConversation(seed string) string {
 	if seed == "" {
 		seed = "global"
 	}
-	sum := sha256.Sum256([]byte("zen-gate\x00" + seed))
-	return "ses_" + hex.EncodeToString(sum[:6]) + base62From(sum[6:20])
+	sessionMu.Lock()
+	defer sessionMu.Unlock()
+	if id, ok := sessionTable[seed]; ok {
+		return id
+	}
+	if len(sessionTable) >= sessionTableCap {
+		sessionTable = map[string]string{}
+	}
+	id := MintSessionId(0)
+	sessionTable[seed] = id
+	return id
 }
 
 // SessionForExit binds one conversation to one exit. Quota is accounted per

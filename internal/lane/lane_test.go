@@ -2,6 +2,7 @@ package lane
 
 import (
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -9,6 +10,7 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 )
 
 // --- identity minting -------------------------------------------------------
@@ -45,6 +47,49 @@ func TestRequestIdForStablePerTurn(t *testing.T) {
 	}
 	if RequestIdFor(s, "turn-1") == RequestIdFor(s, "turn-2") {
 		t.Fatal("different turns must differ")
+	}
+}
+
+// The gate decodes the 48-bit session prefix as ~(ms<<12|counter) and rejects
+// prefixes whose stamp is stale, so a derived session must carry a fresh,
+// invertible stamp — a sha256 digest reads as "not an OpenCode client".
+func TestSessionPrefixDecodesToFreshStamp(t *testing.T) {
+	const mask36 = 1<<36 - 1
+	now36 := uint64(time.Now().UnixMilli()) & mask36
+	for _, seed := range []string{"conv-123", "probe:m1", ""} {
+		raw, err := hex.DecodeString(SessionForConversation(seed)[4:16])
+		if err != nil {
+			t.Fatalf("session prefix must be hex: %v", err)
+		}
+		var stamped uint64
+		for _, b := range raw {
+			stamped = stamped<<8 | uint64(b)
+		}
+		stamped = ^stamped & (1<<48 - 1)
+		if seq := stamped & 0xFFF; seq == 0 {
+			t.Fatal("minted counter must be nonzero")
+		}
+		delta := (stamped>>12 - now36) & mask36
+		if delta > 1<<35 {
+			delta = 1<<36 - delta
+		}
+		if delta > 60_000 {
+			t.Fatalf("session stamp must be fresh, off by %d ms", delta)
+		}
+	}
+}
+
+func TestSessionTableFlushesWholesaleAtCap(t *testing.T) {
+	first := SessionForConversation("flush-probe")
+	for i := 0; i < sessionTableCap; i++ {
+		SessionForConversation(fmt.Sprintf("flush-fill-%d", i))
+	}
+	again := SessionForConversation("flush-probe")
+	if again == first {
+		t.Fatal("cap must drop the whole table, not the newest entries")
+	}
+	if SessionForConversation("flush-probe") != again {
+		t.Fatal("table must keep remembering after a flush")
 	}
 }
 
