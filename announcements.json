@@ -1,6 +1,15 @@
 {
   "announcements": [
     {
+      "id": "2026-10-13-v1.7.7-release",
+      "title": "v1.7.7 修正：Anthropic 客户端工具调用全废（#48）、OpenCode 免费档 403（#47）",
+      "body": "本次是两个紧急修复（都来自 issue 实测定位，感谢 @Yuyaoshangjing 和 @rui08984-dot）：\n1. 修复（issue #48）：走 Anthropic /v1/messages 的客户端（Claude Code、Claude Desktop 及任何 Anthropic SDK）只要用到工具，模型就报告「所有工具被中断」。根因在协议转换层：Anthropic 把工具结果放在 user 轮里回传，而网关把它投给 chat 线路（Kilo 池、OpenRouter 等）的投影函数没有这个分支，内容被静默丢弃——上游收到空工具结果才补了那句报错。现在每个工具结果都如实转发；顺带修复流式响应缺 event: 行的问题（Anthropic SDK 按事件名识别，缺行导致流式全部失败、只能非流式兜底）。走 OpenAI 协议（/v1/chat/completions）的客户端此前不受影响，行为不变；\n2. 修复（issue #47）：OpenCode 免费模型全部报 403 FreeTierError。上游 10-11 起把免费档校验挪进推理代理，开始解码 x-opencode-session 前缀里的时间戳，而网关的会话 id 是哈希生成的、解不出时间戳。现在会话 id 改为按 OpenCode 客户端的形状铸造并一一对应记住（一个会话一个 id，额度与缓存不受影响），过期自动重铸；\n3. 升级方式：总览页「一键更新」或 Releases 页下载。",
+      "level": "info",
+      "start": "2026-10-13",
+      "end": "2026-10-20",
+      "url": "https://github.com/LAGcomcom/zen-gate/releases/latest"
+    },
+    {
       "id": "2026-10-13-v1.7.6-release",
       "title": "v1.7.6 修正：ZCode 模型被清空（#45）、启动失败不再静默退出（#44）",
       "body": "本次是问题修正版：\n1. 修复（issue #45）：开启 ZCode 适配后模型选择器整体变空。ZCode 把 provider_config.json 当一份严格文档校验——任何一处不合法就整份作废、以空配置启动，用户自己的供应商也一起消失。本条堵住三条能写出不合法文件的路径：冷启动清单未就绪时不再用空清单覆写现有配置（v1.7.5 公告里「短名单被重新注入 ZCode」正是这条，当时只修了补拉，没拦注入端）；模型 id 为空或重复的条目在写入前被丢弃；上下文窗口缺失的模型写入保守默认值而不是 0；\n2. 修复（issue #44）：端口被占用（含自行做过端口转发的机器）或数据目录损坏时，GUI 版没有控制台，表现为「双击没反应、进程没有」且无法自救。现在启动失败会弹出原生错误对话框，写明失败端口和换端口方法（zen-gate.exe --port 18787）后再退出；\n3. 升级方式：总览页「一键更新」或 Releases 页下载。已开启 ZCode 适配的用户升级后无需重开开关，下一轮探测清单就绪时会自动重新注入完整模型清单；若升级前模型已变空，重启一次 ZCode 即可恢复。",
