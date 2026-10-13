@@ -69,6 +69,12 @@ func main() {
 	st, err := store.Open()
 	if err != nil {
 		fmt.Println("open store:", err)
+		// Same silent-exit class as the bind failure (issue #44): a corrupt or
+		// unwritable data dir otherwise looks like a dead double-click.
+		window.FatalAlert("Zen Gate 无法启动",
+			fmt.Sprintf("读取数据目录失败：%v\n\n"+
+				"如果 %%APPDATA%%\\zen-gate（Windows）/ ~/.config/zen-gate 下的 config.json 损坏，\n"+
+				"修复或删除该目录后重试。", err))
 		os.Exit(1)
 	}
 	logger := logx.New(st.Home)
@@ -263,6 +269,16 @@ func main() {
 	if err := gw.Start(); err != nil {
 		logger.Errorf("listen on port %d: %v", cfg.Port, err)
 		fmt.Println("listen error:", err)
+		// The GUI build (-H=windowsgui) has no console: without this dialog the
+		// only symptom of a refused bind — a port forwarded, taken or held by a
+		// stale process — is "double-click does nothing" (issue #44). Block on a
+		// native error box so the user reads the port and the way out before the
+		// process exits.
+		window.FatalAlert("Zen Gate 无法启动",
+			fmt.Sprintf("端口 %d 绑定失败：%v\n\n"+
+				"常见原因：端口被其他程序占用、做过端口转发，或残留了一个 zen-gate 进程。\n"+
+				"可以先在命令行用 zen-gate.exe --port 18787 换一个端口启动，或在任务管理器结束残留进程。",
+				cfg.Port, err))
 		os.Exit(1)
 	}
 	dashURL := strings.TrimSuffix(gw.BaseURL(), "/v1")

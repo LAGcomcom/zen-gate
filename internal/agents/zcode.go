@@ -3,7 +3,9 @@ package agents
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
+	"strings"
 
 	"zen-gate/internal/lane"
 )
@@ -34,6 +36,17 @@ func (z *zcode) Detect() (bool, string, string) {
 
 const providerName = "Zen Gate"
 
+// defaultContextWindow floors the contextWindow written into a model rule when
+// the roster carries no capacity for it. ZCode's zod schema declares
+// properties.contextWindow as an integer that must be positive, and it parses
+// provider_config.json as one strict document: a single 0 anywhere fails the
+// whole file, and a rejected file is what boots ZCode with an empty in-memory
+// config — every provider, including the user's own, vanishes from the picker.
+// That is issue #45. A model whose window we simply do not know falls back to
+// the same value the lane's capability table uses for an unknown model, so the
+// rule stays valid and the claim stays conservative.
+const defaultContextWindow = 131072
+
 // stableProviderID is a fixed identity for our provider rule so the matching
 // modelConfigRules entries can be replaced idempotently across enables.
 const stableProviderID = "5a3e8f10-1c2b-4d3e-9f4a-0b7c6d5e4a3b"
@@ -56,8 +69,12 @@ const stableProviderID = "5a3e8f10-1c2b-4d3e-9f4a-0b7c6d5e4a3b"
 // stay false on purpose: a modality the gateway has not accepted must never
 // receive that modality's traffic.
 func rulePropertiesFor(m lane.ModelInfo) map[string]any {
+	cw := m.ContextWindow
+	if cw <= 0 {
+		cw = defaultContextWindow
+	}
 	return map[string]any{
-		"contextWindow": m.ContextWindow,
+		"contextWindow": cw,
 		"inputFormat": map[string]any{
 			"supportsText":  true,
 			"supportsImage": m.Vision,
@@ -133,6 +150,23 @@ func (z *zcode) Enable(o Options) error {
 		}
 		doc = map[string]any{}
 	}
+	// An empty roster is never written over a live file (issue #45, same
+	// discipline qoder.go already keeps). The boot path races the catalog: a
+	// cold listing blip can leave the lane with nothing to inject, and
+	// replacing personalModelIds with [] on every enabled ZCode is exactly the
+	// "models went empty" symptom — worse, ResyncEnabled would fingerprint the
+	// broken state and freeze it until some later roster change unlocked a
+	// rewrite. Refusing leaves the previous good injection on disk; the next
+	// notify with a non-empty roster rewrites normally.
+	models := sanitizeModels(o.Models)
+	if len(models) != len(o.Models) {
+		log.Printf("[zcode] 注入清单里 %d 条空/重复的模型 id 被丢弃（issue #45）", len(o.Models)-len(models))
+	}
+	if len(models) == 0 {
+		if _, statErr := os.Stat(z.configPath()); statErr == nil {
+			return fmt.Errorf("模型清单尚未就绪，已保留 ZCode 现有配置（issue #45）")
+		}
+	}
 	if v, ok := doc["schemaVersion"].(float64); !ok || v == 0 {
 		doc["schemaVersion"] = 1
 	}
@@ -143,8 +177,8 @@ func (z *zcode) Enable(o Options) error {
 	if err != nil {
 		return err
 	}
-	ids := make([]string, 0, len(o.Models))
-	for _, m := range o.Models {
+	ids := make([]string, 0, len(models))
+	for _, m := range models {
 		ids = append(ids, m.ID)
 	}
 	rule := map[string]any{
@@ -182,14 +216,14 @@ func (z *zcode) Enable(o Options) error {
 	if err != nil {
 		return err
 	}
-	kept = make([]any, 0, len(modelRules)+len(o.Models))
+	kept = make([]any, 0, len(modelRules)+len(models))
 	for _, existing := range modelRules {
 		if entryProviderID(existing) == stableProviderID {
 			continue // replace our own stale entries, keep everything else
 		}
 		kept = append(kept, existing)
 	}
-	for _, m := range o.Models {
+	for _, m := range models {
 		cfgMap := map[string]any{"properties": rulePropertiesFor(m)}
 		// Write the whole optionSpecs, not just the thought selector: whatever
 		// key we omit, ZCode fills from its own built-in metadata, and the
@@ -316,4 +350,37 @@ func entryProviderID(raw any) string {
 		return s
 	}
 	return ""
+}
+
+// sanitizeModels keeps the injected document inside the constraints ZCode's
+// zod schema validates provider_config.json against (issue #45):
+//
+//   - ZCode's checkUniqueIds superRefine rejects the whole file when two
+//     providerRules share a providerId, and two model rules sharing a
+//     (providerId, modelId) pair collide the same way — so each id appears
+//     exactly once, first occurrence wins.
+//   - modelId / personalModelIds entries must be non-empty strings
+//     (string().min(1)), so a blank id is dropped rather than written.
+//
+// The rejection is total: a failing parse makes ZCode boot with an empty
+// in-memory config, which is the "every model went blank" symptom the issue
+// reports — the user's own providers disappear with ours.
+func sanitizeModels(models []lane.ModelInfo) []lane.ModelInfo {
+	if len(models) == 0 {
+		return models
+	}
+	seen := make(map[string]bool, len(models))
+	out := make([]lane.ModelInfo, 0, len(models))
+	for _, m := range models {
+		id := strings.TrimSpace(m.ID)
+		if id == "" || seen[id] {
+			continue
+		}
+		seen[id] = true
+		if id != m.ID {
+			m.ID = id
+		}
+		out = append(out, m)
+	}
+	return out
 }
