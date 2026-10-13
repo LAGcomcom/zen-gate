@@ -279,7 +279,7 @@ func (s *Server) relayAnthropicMessages(w http.ResponseWriter, r *http.Request, 
 		if sse.flushed {
 			return
 		}
-		sse.event(map[string]any{"type": "message_start", "message": map[string]any{
+		sse.typedEvent(map[string]any{"type": "message_start", "message": map[string]any{
 			"id": randomID("msg_"), "type": "message", "role": "assistant", "model": served,
 			"content": []any{}, "stop_sequence": nil, "stop_reason": nil,
 			"usage": map[string]any{"input_tokens": 0, "output_tokens": 0}}})
@@ -298,7 +298,7 @@ func (s *Server) relayAnthropicMessages(w http.ResponseWriter, r *http.Request, 
 	}
 	if uerr != nil && finish == "" && !st.sawAny {
 		if sse.flushed {
-			sse.event(map[string]any{"type": "error",
+			sse.typedEvent(map[string]any{"type": "error",
 				"error": map[string]any{"type": errorType(uerr), "message": uerr.Message}})
 			return
 		}
@@ -306,10 +306,10 @@ func (s *Server) relayAnthropicMessages(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 	begin()
-	sse.event(map[string]any{"type": "message_delta",
+	sse.typedEvent(map[string]any{"type": "message_delta",
 		"delta": map[string]any{"stop_reason": stop, "stop_sequence": nil},
 		"usage": map[string]any{"output_tokens": usage.Output}})
-	sse.event(map[string]any{"type": "message_stop"})
+	sse.typedEvent(map[string]any{"type": "message_stop"})
 }
 
 // mintProviderID derives a unique, model-id-safe provider id from a display

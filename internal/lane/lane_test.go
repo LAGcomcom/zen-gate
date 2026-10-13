@@ -2,6 +2,8 @@ package lane
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -9,6 +11,7 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 )
 
 // --- identity minting -------------------------------------------------------
@@ -16,9 +19,50 @@ import (
 func TestMintSessionIdShape(t *testing.T) {
 	re := regexp.MustCompile(`^ses_[0-9a-f]{12}[0-9A-Za-z]{14}$`)
 	for i := 0; i < 50; i++ {
-		id := MintSessionId(1790925320157)
+		id := MintSessionId(0)
 		if !re.MatchString(id) {
 			t.Fatalf("minted session id does not match gateway shape: %s", id)
+		}
+	}
+}
+
+// The free-tier gate decodes the 12-hex prefix back to a timestamp and 403s
+// any session whose prefix is not mint-shaped and fresh (#47). The mint
+// keeps the LOW 48 bits of ~(ms<<12|seq), so decoding recovers only the low
+// 36 bits of the minted millisecond stamp — which is exactly what the gate
+// can check against wall clock.
+func decodePrefixMsBits(id string) (uint64, bool) {
+	raw, err := hex.DecodeString(strings.TrimPrefix(id, "ses_")[:12])
+	if err != nil {
+		return 0, false
+	}
+	var v uint64
+	for _, b := range raw {
+		v = v<<8 | uint64(b)
+	}
+	return (^v & 0xFFFFFFFFFFFF) >> 12, true
+}
+
+func TestConversationSessionPrefixDecodesToFreshTimestamp(t *testing.T) {
+	for _, seed := range []string{"conv-1", "conv-2"} {
+		id := SessionForConversation(seed)
+		got, ok := decodePrefixMsBits(id)
+		if !ok {
+			t.Fatalf("prefix of %s is not decodable hex", id)
+		}
+		now := uint64(time.Now().UnixMilli()) & 0xFFFFFFFFF
+		if diff := int64(now) - int64(got); diff < -60_000 || diff > 60_000 {
+			t.Fatalf("prefix of %s decodes to %d, now-bits %d — the gate wants a fresh mint", id, got, now)
+		}
+	}
+	// A digest-shaped id (old behaviour) decodes to a nonsense stamp —
+	// exactly why the gate rejected it. This pins the contrast.
+	sum := sha256.Sum256([]byte("zen-gate\x00old-style"))
+	old := "ses_" + hex.EncodeToString(sum[:6]) + base62From(sum[6:20])
+	if got, ok := decodePrefixMsBits(old); ok {
+		now := uint64(time.Now().UnixMilli()) & 0xFFFFFFFFF
+		if diff := int64(now) - int64(got); diff > -60_000 && diff < 60_000 {
+			t.Fatalf("digest-style id %s decodes fresh (%d) — test lost its meaning", old, got)
 		}
 	}
 }

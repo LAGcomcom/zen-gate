@@ -40,6 +40,28 @@ func (s *sseWriter) event(v any) {
 	s.f.Flush()
 }
 
+// typedEvent writes one JSON data frame preceded by an `event:` line carrying
+// the payload's TOP-LEVEL "type" field. Anthropic clients dispatch on the
+// event name (a stream without event: lines yields zero events); extracting
+// the name from the marshalled JSON through a struct decode can never pick up
+// a nested "type" (content_block / delta / message), which a textual scan
+// would hit (issue #48).
+func (s *sseWriter) typedEvent(v any) {
+	data, err := json.Marshal(v)
+	if err != nil {
+		return
+	}
+	var head struct {
+		Type string `json:"type"`
+	}
+	if json.Unmarshal(data, &head) == nil && head.Type != "" {
+		_, _ = s.w.Write(append(append([]byte("event: "), head.Type...), '\n'))
+	}
+	_, _ = s.w.Write(append(append([]byte("data: "), data...), '\n', '\n'))
+	s.flushed = true
+	s.f.Flush()
+}
+
 // done writes the OpenAI-style terminator.
 func (s *sseWriter) done() {
 	_, _ = s.w.Write([]byte("data: [DONE]\n\n"))

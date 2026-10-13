@@ -244,7 +244,7 @@ func (s *Server) handleAnthropicMessages(w http.ResponseWriter, r *http.Request)
 		if sse.flushed {
 			return
 		}
-		sse.event(map[string]any{"type": "message_start", "message": map[string]any{
+		sse.typedEvent(map[string]any{"type": "message_start", "message": map[string]any{
 			"id": msgID, "type": "message", "role": "assistant", "model": base,
 			"content": []any{}, "stop_sequence": nil, "stop_reason": nil,
 			"usage": map[string]any{"input_tokens": 0, "output_tokens": 0}}})
@@ -283,17 +283,17 @@ func (s *Server) handleAnthropicMessages(w http.ResponseWriter, r *http.Request)
 					stop = "max_tokens"
 				}
 				begin()
-				sse.event(map[string]any{"type": "message_delta",
+				sse.typedEvent(map[string]any{"type": "message_delta",
 					"delta": map[string]any{"stop_reason": stop, "stop_sequence": nil},
 					"usage": map[string]any{"output_tokens": usage.Output}})
-				sse.event(map[string]any{"type": "message_stop"})
+				sse.typedEvent(map[string]any{"type": "message_stop"})
 				return
 			}
 		}
 		if sse.flushed {
 			// Content (or a started fallback) already went on the wire, so the 200
 			// is committed: the refusal travels as an in-stream error event.
-			sse.event(map[string]any{"type": "error", "error": map[string]any{"type": errorType(uerr), "message": uerr.Message}})
+			sse.typedEvent(map[string]any{"type": "error", "error": map[string]any{"type": errorType(uerr), "message": uerr.Message}})
 			return
 		}
 		setRetryAfter(w, uerr)
@@ -301,10 +301,10 @@ func (s *Server) handleAnthropicMessages(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	begin()
-	sse.event(map[string]any{"type": "message_delta",
+	sse.typedEvent(map[string]any{"type": "message_delta",
 		"delta": map[string]any{"stop_reason": stop, "stop_sequence": nil},
 		"usage": map[string]any{"output_tokens": outcome.Usage.Output}})
-	sse.event(map[string]any{"type": "message_stop"})
+	sse.typedEvent(map[string]any{"type": "message_stop"})
 }
 
 func (st *anthropicStreamState) consume(c lane.Chunk) {
@@ -316,26 +316,26 @@ func (st *anthropicStreamState) consume(c lane.Chunk) {
 		st.index++
 		switch c.BlockType {
 		case "text":
-			st.sse.event(map[string]any{"type": "content_block_start", "index": idx,
+			st.sse.typedEvent(map[string]any{"type": "content_block_start", "index": idx,
 				"content_block": map[string]any{"type": "text", "text": ""}})
 		case "reasoning":
-			st.sse.event(map[string]any{"type": "content_block_start", "index": idx,
+			st.sse.typedEvent(map[string]any{"type": "content_block_start", "index": idx,
 				"content_block": map[string]any{"type": "thinking", "thinking": ""}})
 		case "tool-call":
-			st.sse.event(map[string]any{"type": "content_block_start", "index": idx,
+			st.sse.typedEvent(map[string]any{"type": "content_block_start", "index": idx,
 				"content_block": map[string]any{"type": "tool_use", "id": c.ID, "name": c.Name, "input": json.RawMessage("{}")}})
 		}
 	case lane.ChunkTextDelta:
-		st.sse.event(map[string]any{"type": "content_block_delta", "index": st.blockMap[c.Index],
+		st.sse.typedEvent(map[string]any{"type": "content_block_delta", "index": st.blockMap[c.Index],
 			"delta": map[string]any{"type": "text_delta", "text": c.Delta}})
 	case lane.ChunkReasonDelta:
-		st.sse.event(map[string]any{"type": "content_block_delta", "index": st.blockMap[c.Index],
+		st.sse.typedEvent(map[string]any{"type": "content_block_delta", "index": st.blockMap[c.Index],
 			"delta": map[string]any{"type": "thinking_delta", "thinking": c.Delta}})
 	case lane.ChunkToolCallDelta:
-		st.sse.event(map[string]any{"type": "content_block_delta", "index": st.blockMap[c.Index],
+		st.sse.typedEvent(map[string]any{"type": "content_block_delta", "index": st.blockMap[c.Index],
 			"delta": map[string]any{"type": "input_json_delta", "partial_json": c.Delta}})
 	case lane.ChunkBlockEnd:
-		st.sse.event(map[string]any{"type": "content_block_stop", "index": st.blockMap[c.Index]})
+		st.sse.typedEvent(map[string]any{"type": "content_block_stop", "index": st.blockMap[c.Index]})
 	}
 }
 

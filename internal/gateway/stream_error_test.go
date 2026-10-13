@@ -189,7 +189,9 @@ func TestAnthropicQuotaBeforeContentKeepsHttp429(t *testing.T) {
 }
 
 // A successful stream still opens with message_start, and one that carries no
-// content at all must not emit deltas without it.
+// content at all must not emit deltas without it. Since #48 the opener is a
+// pair of lines: the SDK dispatches on the event: name, and a stream whose
+// frames carry only data: yields zero events.
 func TestAnthropicStreamStillOpensWithMessageStart(t *testing.T) {
 	laneUp := laneUpstreamByModel(t, nil)
 	defer laneUp.Close()
@@ -200,7 +202,35 @@ func TestAnthropicStreamStillOpensWithMessageStart(t *testing.T) {
 		t.Fatalf("status = %d\n%s", resp.StatusCode, raw)
 	}
 	frames := strings.Split(strings.TrimSpace(raw), "\n")
-	if !strings.Contains(frames[0], `"type":"message_start"`) {
-		t.Fatalf("first frame = %q, want message_start", frames[0])
+	if frames[0] != "event: message_start" {
+		t.Fatalf("first line = %q, want the event: message_start name", frames[0])
+	}
+	if len(frames) < 2 || !strings.Contains(frames[1], `"type":"message_start"`) {
+		t.Fatalf("second line = %q, want the message_start data frame", frames[1])
+	}
+	// Every data: frame must sit under an event: line naming its top-level
+	// type — and the name must be the envelope's, never a nested one.
+	for i, line := range frames {
+		if !strings.HasPrefix(line, "data: ") {
+			continue
+		}
+		if i == 0 || frames[i-1] == "" {
+			t.Errorf("data frame at line %d has no event: name: %s", i, raw)
+			continue
+		}
+		var head struct {
+			Type string `json:"type"`
+		}
+		if err := json.Unmarshal([]byte(strings.TrimPrefix(line, "data: ")), &head); err != nil {
+			t.Errorf("data frame at line %d is not JSON: %v", i, err)
+			continue
+		}
+		want := "event: " + head.Type
+		if head.Type == "" {
+			want = "event: ping"
+		}
+		if frames[i-1] != want {
+			t.Errorf("event name = %q, want %q", frames[i-1], want)
+		}
 	}
 }
