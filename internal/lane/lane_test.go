@@ -94,60 +94,83 @@ func TestRequestIdForStablePerTurn(t *testing.T) {
 
 // --- fingerprint gate -------------------------------------------------------
 
-func TestApplyFingerprintPromotesRealShell(t *testing.T) {
+func TestApplyFingerprintAliasesConflictingRead(t *testing.T) {
 	body := map[string]any{"tools": []any{
 		map[string]any{"type": "function", "function": map[string]any{
-			"name": "pwsh", "description": "run shell", "parameters": map[string]any{"type": "object"},
+			"name": "read", "description": "custom reader", "parameters": map[string]any{"type": "object"},
 		}},
 	}}
 	rename := ApplyFingerprint(body, "chat")
 	tools := body["tools"].([]any)
-	if len(tools) != 4 {
-		t.Fatalf("quartet must be complete, got %d", len(tools))
+	if len(tools) != 3 {
+		t.Fatalf("conflicting read + exact read + shell, got %d tools", len(tools))
 	}
-	if rename["bash"] != "pwsh" {
-		t.Fatalf("bash slot must be donated by pwsh, rename=%v", rename)
+	if rename["read_client"] != "read" {
+		t.Fatalf("conflicting read must travel as read_client, rename=%v", rename)
 	}
-	// The promoted tool carries the bash name on the wire.
-	first := tools[0].(map[string]any)["function"].(map[string]any)["name"]
-	if first != "bash" {
-		t.Fatalf("promoted slot must be sent as bash, got %v", first)
-	}
-	// Remaining slots get self-disabling decoys.
-	for _, tt := range tools[1:] {
-		m := tt.(map[string]any)["function"].(map[string]any)
-		if m["description"] != "This tool is currently unavailable and must not be used." {
-			t.Fatalf("missing slot must get a decoy, got %v", m)
-		}
-	}
-}
-
-func TestApplyFingerprintNoDuplicates(t *testing.T) {
-	body := map[string]any{"tools": []any{
-		map[string]any{"type": "function", "function": map[string]any{"name": "Bash", "parameters": map[string]any{}}},
-		map[string]any{"type": "function", "function": map[string]any{"name": "bash", "parameters": map[string]any{}}},
-	}}
-	ApplyFingerprint(body, "chat")
-	tools := body["tools"].([]any)
-	count := 0
+	names := map[string]string{}
 	for _, tt := range tools {
-		m := tt.(map[string]any)
-		if fn := m["function"].(map[string]any)["name"]; fn == "bash" {
-			count++
-		}
+		m := tt.(map[string]any)["function"].(map[string]any)
+		names[m["name"].(string)] = m["description"].(string)
 	}
-	if count != 1 {
-		t.Fatalf("case variants must canonicalise to one bash, got %d", count)
+	if names["read_client"] != "custom reader" {
+		t.Fatalf("aliased tool must keep the caller definition, got %q", names["read_client"])
+	}
+	if !strings.Contains(names["read"], "Read the contents of a file") {
+		t.Fatalf("exact read must be appended, got %q", names["read"])
+	}
+	if !strings.Contains(names["shell"], "Execute a shell command") {
+		t.Fatalf("exact shell must be appended, got %q", names["shell"])
 	}
 }
 
-func TestApplyFingerprintRealBashUntouched(t *testing.T) {
+func TestApplyFingerprintExactDefinitionKept(t *testing.T) {
+	_, params, _ := fingerprintDefs("read")
 	body := map[string]any{"tools": []any{
-		map[string]any{"type": "function", "function": map[string]any{"name": "bash", "parameters": map[string]any{}}},
+		map[string]any{"type": "function", "function": map[string]any{
+			"name": "read", "description": realReadDesc, "parameters": params,
+		}},
 	}}
 	rename := ApplyFingerprint(body, "chat")
 	if len(rename) != 0 {
-		t.Fatalf("a real bash needs no rename, got %v", rename)
+		t.Fatalf("an exact fingerprint definition needs no rename, got %v", rename)
+	}
+	tools := body["tools"].([]any)
+	if len(tools) != 2 {
+		t.Fatalf("exact read kept + shell appended, got %d tools", len(tools))
+	}
+}
+
+func TestApplyFingerprintCaseVariantsPassThrough(t *testing.T) {
+	body := map[string]any{"tools": []any{
+		map[string]any{"type": "function", "function": map[string]any{"name": "Read", "parameters": map[string]any{"type": "object"}}},
+		map[string]any{"type": "function", "function": map[string]any{"name": "Bash", "parameters": map[string]any{"type": "object"}}},
+	}}
+	rename := ApplyFingerprint(body, "chat")
+	if len(rename) != 0 {
+		t.Fatalf("case variants are not fingerprint names, rename=%v", rename)
+	}
+	tools := body["tools"].([]any)
+	if len(tools) != 4 {
+		t.Fatalf("caller tools + read + shell, got %d tools", len(tools))
+	}
+	// Caller tools are preserved verbatim.
+	first := tools[0].(map[string]any)["function"].(map[string]any)["name"]
+	if first != "Read" {
+		t.Fatalf("case variants must pass through untouched, got %v", first)
+	}
+}
+
+func TestApplyFingerprintNoToolChoiceNone(t *testing.T) {
+	body := map[string]any{}
+	ApplyFingerprint(body, "chat")
+	if _, has := body["tool_choice"]; has {
+		t.Fatalf("chat must not default tool_choice, got %v", body["tool_choice"])
+	}
+	body = map[string]any{}
+	ApplyFingerprint(body, "flat")
+	if body["tool_choice"] != "auto" {
+		t.Fatalf("flat defaults to auto, got %v", body["tool_choice"])
 	}
 }
 
@@ -688,9 +711,9 @@ func TestClassifyKiloFailures(t *testing.T) {
 func TestBuildKiloCatalog(t *testing.T) {
 	rows := []map[string]any{
 		{"id": "nvidia/nemotron-3-ultra:free", "name": "NVIDIA: Nemotron 3 Ultra (free)", "isFree": true,
-			"context_length": 128000.0,
-			"top_provider":   map[string]any{"max_completion_tokens": 32768.0},
-			"architecture":   map[string]any{"input_modalities": []any{"text", "image"}},
+			"context_length":       128000.0,
+			"top_provider":         map[string]any{"max_completion_tokens": 32768.0},
+			"architecture":         map[string]any{"input_modalities": []any{"text", "image"}},
 			"supported_parameters": []any{"reasoning"}},
 		{"id": "stepfun/step-3:free", "name": "StepFun: Step 3 (free)", "isFree": true,
 			"supported_parameters": []any{"reasoning"}},

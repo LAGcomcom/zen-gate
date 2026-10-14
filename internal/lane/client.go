@@ -892,7 +892,7 @@ func (l *Lane) attemptModel(ctx context.Context, req Request, model, effort stri
 
 	if entry.SystemOne || entry.Wire == "systemone" {
 		return Outcome{}, &UpstreamError{Code: CodeServer,
-			Message: base + " is a System One decision model: it answers typed questions on /zen/v1/systemone, not chat requests"}, false
+			Message: base + " is a System One decision model: it answers typed questions on /inference/v1/systemone, not chat requests"}, false
 	}
 
 	budget := BudgetFor(effort, *entry, req.MaxTokens, defMax)

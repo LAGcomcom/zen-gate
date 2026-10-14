@@ -71,10 +71,10 @@ func main() {
 		fmt.Println("open store:", err)
 		// Same silent-exit class as the bind failure (issue #44): a corrupt or
 		// unwritable data dir otherwise looks like a dead double-click.
-		window.FatalAlert("Zen Gate 无法启动",
-			fmt.Sprintf("读取数据目录失败：%v\n\n"+
-				"如果 %%APPDATA%%\\zen-gate（Windows）/ ~/.config/zen-gate 下的 config.json 损坏，\n"+
-				"修复或删除该目录后重试。", err))
+		window.FatalAlert("Zen Gate failed to start",
+			fmt.Sprintf("Failed to read the data directory: %v\n\n"+
+				"If config.json under %%APPDATA%%\\zen-gate (Windows) / ~/.config/zen-gate is corrupt,\n"+
+				"repair or delete that directory and retry.", err))
 		os.Exit(1)
 	}
 	logger := logx.New(st.Home)
@@ -86,7 +86,7 @@ func main() {
 	// Headless second instances (dev/test against a separate ZEN_GATE_HOME)
 	// opt in via ZEN_GATE_ALLOW_MULTI; the tray app keeps the single-instance
 	// guarantee.
-	if os.Getenv("ZEN_GATE_ALLOW_MULTI") == "" && !window.AcquireSingleInstance(`Local\zen-gate-instance`, "Zen Gate · 本地免费模型网关") {
+	if os.Getenv("ZEN_GATE_ALLOW_MULTI") == "" && !window.AcquireSingleInstance(`Local\zen-gate-instance`, "Zen Gate · Local free-model gateway") {
 		logger.Infof("second launch: focused the running instance instead")
 		return
 	}
@@ -198,21 +198,21 @@ func main() {
 	gw.SetAutostartState(agents.AutostartEnabled)
 
 	stateText := func(s string) string {
-		return map[string]string{lane.StateAvailable: "可用", lane.StateUnknown: "未知",
-			lane.StateThrottled: "暂时限流·可重试", lane.StateRegionBlock: "地区受限",
-			lane.StateUnavailable: "不可用"}[s]
+		return map[string]string{lane.StateAvailable: "Available", lane.StateUnknown: "Unknown",
+			lane.StateThrottled: "Rate-limited · retryable", lane.StateRegionBlock: "Region blocked",
+			lane.StateUnavailable: "Unavailable"}[s]
 	}
 	ln.OnProbeEdge = func(model, from, to string) {
 		if model == "" {
 			logger.Warnf("免费车道整轮 429 限额，探测进入指数退避")
 			if windowHidden {
-				notify.Toast("免费车道已达限额", "本轮探测全部 429，稍后自动恢复")
+				notify.Toast("Free lane quota reached", "All probes hit 429 this round — will recover automatically")
 			}
 			return
 		}
 		logger.Infof("模型状态变化: %s %s → %s", model, stateText(from), stateText(to))
 		if windowHidden {
-			notify.Toast("模型状态变化", fmt.Sprintf("%s: %s → %s", model, stateText(from), stateText(to)))
+			notify.Toast("Model status change", fmt.Sprintf("%s: %s → %s", model, stateText(from), stateText(to)))
 		}
 	}
 
@@ -274,10 +274,10 @@ func main() {
 		// stale process — is "double-click does nothing" (issue #44). Block on a
 		// native error box so the user reads the port and the way out before the
 		// process exits.
-		window.FatalAlert("Zen Gate 无法启动",
-			fmt.Sprintf("端口 %d 绑定失败：%v\n\n"+
-				"常见原因：端口被其他程序占用、做过端口转发，或残留了一个 zen-gate 进程。\n"+
-				"可以先在命令行用 zen-gate.exe --port 18787 换一个端口启动，或在任务管理器结束残留进程。",
+		window.FatalAlert("Zen Gate failed to start",
+			fmt.Sprintf("Failed to bind port %d: %v\n\n"+
+				"Common causes: the port is taken, a port forward is in place, or a stale zen-gate process is still running.\n"+
+				"Try zen-gate.exe --port 18787 to use another port, or end the stale process in Task Manager.",
 				cfg.Port, err))
 		os.Exit(1)
 	}
@@ -331,7 +331,7 @@ func main() {
 		if has && cfg.LastVersion != ver {
 			logger.Infof("发现新版本 %s (当前 %s)", ver, gateway.Version)
 			if windowHidden {
-				notify.Toast("Zen Gate 有新版本 "+ver, "当前 "+gateway.Version+" · 打开管理页查看下载链接")
+				notify.Toast("Zen Gate "+ver+" available", "Current "+gateway.Version+" · open the dashboard for the download link")
 			}
 			st.Mutate(func(c *store.Config) { c.LastVersion = ver })
 			_ = st.Save()
@@ -447,7 +447,7 @@ func main() {
 	// requires both objects on that one thread.
 
 	window.Run(window.Options{
-		Title:    "Zen Gate · 本地免费模型网关",
+		Title:    "Zen Gate · Local free-model gateway",
 		URL:      dashURL,
 		DataPath: st.Home + string(os.PathSeparator) + "webview",
 		Width:    1160,
@@ -549,7 +549,7 @@ func trayStatus(st *store.Store, ln *lane.Lane) string {
 	if d, ok := days[today]; ok {
 		tok = d.Output
 	}
-	return fmt.Sprintf("运行中 · 今日输出 %d tok · %d 模型可用", tok, len(ln.ServableModels()))
+	return fmt.Sprintf("Running · %d tok output today · %d models available", tok, len(ln.ServableModels()))
 }
 
 // writeCrash appends a panic value and the full goroutine stack to crash.log.

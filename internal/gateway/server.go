@@ -739,31 +739,31 @@ func (s *Server) handleCodexCatalog(w http.ResponseWriter, r *http.Request) {
 		return priority[stateOf(models[i].ID)] > priority[stateOf(models[j].ID)]
 	})
 	levels := []map[string]any{
-		{"effort": "low", "description": "轻量，最省额度"},
-		{"effort": "medium", "description": "均衡"},
-		{"effort": "high", "description": "深思"},
+		{"effort": "low", "description": "Light — uses the least quota"},
+		{"effort": "medium", "description": "Balanced"},
+		{"effort": "high", "description": "Deep"},
 	}
 	out := []map[string]any{}
 	for _, m := range models {
-		desc := "免费车道 · 当前不可用"
+		desc := "Free lane · currently unavailable"
 		if name, ok := customName[m.ID]; ok {
-			desc = "自定义 API · " + name
+			desc = "Custom API · " + name
 		} else {
 			switch stateOf(m.ID) {
 			case lane.StateAvailable:
-				desc = "免费车道 · 实测可用"
+				desc = "Free lane · probed available"
 			case lane.StateThrottled:
-				desc = "免费车道 · 已限额，稍后恢复"
+				desc = "Free lane · quota hit, recovers later"
 			case lane.StateUnknown:
-				desc = "免费车道 · 尚未探测"
+				desc = "Free lane · not probed yet"
 			}
 			if m.RegionSensitive {
-				desc += " · 可能被地区门拦截"
+				desc += " · may be region-blocked"
 			}
 		}
 		lv := levels
 		if !m.Reasoning {
-			lv = []map[string]any{{"effort": "medium", "description": "默认"}}
+			lv = []map[string]any{{"effort": "medium", "description": "Default"}}
 		}
 		mods := []string{"text"}
 		if m.Vision {

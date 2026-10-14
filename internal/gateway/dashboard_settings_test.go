@@ -39,20 +39,20 @@ func runDashboardJS(t *testing.T, marker, prelude, tail string) any {
 }
 
 // 系统信息 printed the raw mode key for every proxy mode outside the two-word
-// map, so the overview showed "system" / "rotate" where 设置 shows Chinese.
+// map, so the overview showed "system" / "rotate" where Settings shows a label.
 func TestDashboardProxyLabelCoversEveryMode(t *testing.T) {
 	got := runDashboardJS(t, "function proxyLabel(", "", `
 const cases = {
-  system: "跟随系统",
-  env: "跟随环境变量",
-  direct: "直连",
+  system: "Follow system",
+  env: "Follow env",
+  direct: "Direct",
   custom: "socks5://127.0.0.1:7891",
-  rotate: "订阅轮询 (sing-box)",
+  rotate: "Subscription rotation",
 };
 const seen = {};
 for (const [mode, want] of Object.entries(cases)) {
   const v = want === "socks5://127.0.0.1:7891" ? proxyLabel(mode, want) : proxyLabel(mode, "");
-  if (!/[\u4e00-\u9fff]/.test(v) && mode !== "custom") {
+  if (mode !== "custom" && (v === mode || v === "")) {
     throw new Error("mode " + mode + " still prints its raw key: " + v);
   }
   seen[mode] = v;
@@ -64,7 +64,7 @@ process.stdout.write(JSON.stringify(seen));
 	if labels["custom"] != "socks5://127.0.0.1:7891" {
 		t.Errorf("custom = %v, want the URL the user typed", labels["custom"])
 	}
-	if labels["rotate"] != "订阅轮询 (sing-box)" {
+	if labels["rotate"] != "Subscription rotation (sing-box)" {
 		t.Errorf("rotate = %v", labels["rotate"])
 	}
 }

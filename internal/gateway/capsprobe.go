@@ -123,9 +123,9 @@ func (s *Server) probeCapabilities(ctx context.Context, p *store.Provider, model
 		label string
 		part  lane.Part
 	}{
-		{"vision", "图像", lane.ImagePart{DataURL: "data:image/png;base64," + probePNG}},
-		{"audio", "音频", lane.AudioPart{Data: base64.StdEncoding.EncodeToString(tinyWAV()), Format: "wav"}},
-		{"file", "文件", lane.FilePart{Name: "probe.pdf", MediaType: "application/pdf", Data: base64.StdEncoding.EncodeToString(tinyPDF())}},
+		{"vision", "Image", lane.ImagePart{DataURL: "data:image/png;base64," + probePNG}},
+		{"audio", "Audio", lane.AudioPart{Data: base64.StdEncoding.EncodeToString(tinyWAV()), Format: "wav"}},
+		{"file", "File", lane.FilePart{Name: "probe.pdf", MediaType: "application/pdf", Data: base64.StdEncoding.EncodeToString(tinyPDF())}},
 	}
 	for _, step := range steps {
 		lane.EmitProbeStep(ctx, step.label, lane.StepRunning, 0, "")

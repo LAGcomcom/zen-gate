@@ -94,7 +94,7 @@ func probeQoder() qoderStatus {
 	st := qoderStatus{}
 	code, body, err := qoderGet("/health")
 	if err != nil || code != 200 {
-		st.Detail = "qodercn-gateway 未运行（127.0.0.1:8095）"
+		st.Detail = "qodercn-gateway is not running (127.0.0.1:8095)"
 		return st
 	}
 	st.Running = true
@@ -106,15 +106,15 @@ func probeQoder() qoderStatus {
 	// /quota, whose expiry is cosmetic.
 	code, body, err = qoderGet("/v1/models")
 	if err != nil {
-		st.Detail = "网关在线但模型列表查询失败: " + err.Error()
+		st.Detail = "Gateway is up but the model list query failed: " + err.Error()
 		return st
 	}
 	if code == 401 || strings.Contains(string(body), "TOKEN_EXPIRE") {
-		st.Detail = "token 已过期——打开 Qoder IDE 登录一次，网关每个请求都会重读凭据，下一个请求自动恢复"
+		st.Detail = "token expired — open Qoder IDE and sign in once; the gateway re-reads credentials on every request and recovers automatically"
 		return st
 	}
 	if code != 200 {
-		st.Detail = fmt.Sprintf("模型列表查询返回 HTTP %d", code)
+		st.Detail = fmt.Sprintf("Model list query returned HTTP %d", code)
 		return st
 	}
 	st.LoggedIn = true
@@ -124,7 +124,7 @@ func probeQoder() qoderStatus {
 		} `json:"data"`
 	}
 	if json.Unmarshal(body, &listing) != nil {
-		st.Detail = "已登录但模型列表无法解析"
+		st.Detail = "Signed in but the model list could not be parsed"
 		return st
 	}
 	for _, m := range listing.Data {
@@ -136,7 +136,7 @@ func probeQoder() qoderStatus {
 	st.Catalog = parseQoderCatalog(body)
 	if len(st.ModelIDs) == 0 {
 		st.LoggedIn = false
-		st.Detail = "已登录但渠道没有返回任何模型"
+		st.Detail = "Signed in but the channel returned no models"
 	}
 	return st
 }
@@ -228,10 +228,10 @@ func (s *Server) ensureQoderProvider(st qoderStatus) bool {
 	// Logged in: create on first sight, sync the roster on later probes.
 	if idx == -1 {
 		p := store.Provider{
-			ID: qoderProviderID, Name: "Qoder 账号渠道",
+			ID: qoderProviderID, Name: "Qoder account channel",
 			BaseURL: qoderGatewayURL + "/v1", Protocol: store.ProtocolOpenAI,
 			Enabled: true, Models: st.ModelIDs,
-			Note: "由 zen-gate 托管的 qodercn-gateway sidecar 自动管理，登录状态跟随 Qoder IDE",
+			Note: "Managed automatically by zen-gate's qodercn-gateway sidecar; sign-in follows Qoder IDE",
 		}
 		mergeCatalog(&p, st.Catalog)
 		s.Store.Mutate(func(c *store.Config) {

@@ -457,13 +457,13 @@ func (in *providerIn) normalize() error {
 		in.Protocol = store.ProtocolOpenAI
 	}
 	if in.Name == "" {
-		return errAdmin("名称不能为空")
+		return errAdmin("Name is required")
 	}
 	if in.BaseURL == "" {
-		return errAdmin("Base URL 不能为空")
+		return errAdmin("Base URL is required")
 	}
 	if in.Protocol != store.ProtocolOpenAI && in.Protocol != store.ProtocolAnthropic {
-		return errAdmin("协议只支持 openai / anthropic")
+		return errAdmin("Protocol must be openai or anthropic")
 	}
 	return nil
 }
@@ -515,7 +515,7 @@ func (s *Server) adminProviderSave(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		if !found {
-			writeJSON(w, 404, map[string]any{"ok": false, "error": "供应商不存在: " + in.ID})
+			writeJSON(w, 404, map[string]any{"ok": false, "error": "Provider not found: " + in.ID})
 			return
 		}
 		// The edit happens on the copy Mutate publishes, never on the snapshot
@@ -606,7 +606,7 @@ func (s *Server) adminProviderDelete(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	writeJSON(w, 404, map[string]any{"ok": false, "error": "供应商不存在: " + in.ID})
+	writeJSON(w, 404, map[string]any{"ok": false, "error": "Provider not found: " + in.ID})
 }
 
 // adminProviderModels fetches a provider's /models listing live. With an id it
@@ -634,7 +634,7 @@ func (s *Server) adminProviderModels(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		if !found {
-			writeJSON(w, 404, map[string]any{"ok": false, "error": "供应商不存在: " + in.ID})
+			writeJSON(w, 404, map[string]any{"ok": false, "error": "Provider not found: " + in.ID})
 			return
 		}
 		catalog, err := relay.FetchModelCatalog(ctx, p.BaseURL, p.APIKey, p.Protocol)
@@ -671,7 +671,7 @@ func (s *Server) adminProviderModels(w http.ResponseWriter, r *http.Request) {
 				}
 			})
 			if !applied {
-				writeJSON(w, 404, map[string]any{"ok": false, "error": "供应商不存在: " + in.ID})
+				writeJSON(w, 404, map[string]any{"ok": false, "error": "Provider not found: " + in.ID})
 				return
 			}
 			if err := s.Store.Save(); err != nil {

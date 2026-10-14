@@ -60,7 +60,7 @@ func TestCapabilityProbeReportsEachModality(t *testing.T) {
 	if len(steps) != 6 {
 		t.Fatalf("steps = %d %+v, want start+verdict per modality", len(steps), stepNames(steps))
 	}
-	if got, want := strings.Join(stepNames(steps), ","), "图像,图像,音频,音频,文件,文件"; got != want {
+	if got, want := strings.Join(stepNames(steps), ","), "Image,Image,Audio,Audio,File,File"; got != want {
 		t.Fatalf("step names = %q, want %q", got, want)
 	}
 	if steps[0].Status != lane.StepRunning || steps[1].Status != lane.StepOK {

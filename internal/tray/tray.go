@@ -48,7 +48,7 @@ func Loop() {
 	systray.Run(func() {
 		setIcon()
 		systray.SetTitle("Zen Gate")
-		systray.SetTooltip("Zen Gate · 本地免费模型网关")
+		systray.SetTooltip("Zen Gate · Local free-model gateway")
 		mu.Lock()
 		statusCh = make(chan string, 16)
 		pending := lastStatus
@@ -61,11 +61,11 @@ func Loop() {
 				systray.SetTooltip(t)
 			}
 		}()
-		mOpen := systray.AddMenuItem("打开管理页", "Focus the main window")
-		mReprobe := systray.AddMenuItem("重新探测可用性", "Re-probe model availability")
-		mCopy := systray.AddMenuItem("复制接入地址", "Copy base URL")
+		mOpen := systray.AddMenuItem("Open Dashboard", "Focus the main window")
+		mReprobe := systray.AddMenuItem("Re-probe availability", "Re-probe model availability")
+		mCopy := systray.AddMenuItem("Copy gateway URL", "Copy base URL")
 		systray.AddSeparator()
-		mQuit := systray.AddMenuItem("退出", "Quit zen-gate")
+		mQuit := systray.AddMenuItem("Quit", "Quit zen-gate")
 		mOpen.Enable()
 		go func() {
 			for {

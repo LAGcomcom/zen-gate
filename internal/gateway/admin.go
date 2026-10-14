@@ -67,7 +67,7 @@ func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request, rest string
 		s.adminUpdateApply(w)
 	case rest == "update/check" && r.Method == http.MethodPost:
 		if s.updateCheck == nil {
-			writeJSON(w, 503, map[string]any{"ok": false, "error": "更新检查未就绪"})
+			writeJSON(w, 503, map[string]any{"ok": false, "error": "Update check not ready"})
 			return
 		}
 		has, ver := s.updateCheck()
@@ -137,7 +137,7 @@ func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request, rest string
 		s.adminAnnouncementRead(w, r)
 	case rest == "announcements/refresh" && r.Method == http.MethodPost:
 		if s.announcementPull == nil {
-			writeJSON(w, 503, map[string]any{"ok": false, "error": "公告拉取未就绪"})
+			writeJSON(w, 503, map[string]any{"ok": false, "error": "Announcements not ready"})
 			return
 		}
 		go s.announcementPull()
@@ -148,7 +148,7 @@ func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request, rest string
 		s.adminSubsRefresh(w, r)
 	case rest == "subs/probe" && r.Method == http.MethodPost:
 		if s.subs == nil {
-			writeJSON(w, 503, map[string]any{"ok": false, "error": "订阅轮询未就绪"})
+			writeJSON(w, 503, map[string]any{"ok": false, "error": "Subscription rotation not ready"})
 			return
 		}
 		// r.Context() dies when this handler returns, killing a probe that has
@@ -290,7 +290,7 @@ func (s *Server) adminState(w http.ResponseWriter) {
 			row := modelRow{
 				ID: id, Name: mid, State: "custom", Custom: true,
 				ProviderID: p.ID,
-				Blurb:      "自定义供应商「" + p.Name + "」",
+				Blurb:      "Custom provider \"" + p.Name + "\"",
 				Hidden:     hidden[id],
 			}
 			caps := s.modalityCapsOf(mid)
@@ -500,7 +500,7 @@ func (s *Server) adminSettings(w http.ResponseWriter, r *http.Request) {
 		switch *in.ProxyMode {
 		case "env", "direct", "custom", "system", "rotate":
 			if *in.ProxyMode == "custom" && (in.ProxyURL == nil || strings.TrimSpace(*in.ProxyURL) == "") && strings.TrimSpace(cfg.ProxyURL) == "" {
-				writeJSON(w, 400, map[string]any{"ok": false, "error": "自定义代理需要填写代理地址"})
+				writeJSON(w, 400, map[string]any{"ok": false, "error": "Custom proxy requires a proxy address"})
 				return
 			}
 			if cfg.ProxyMode != *in.ProxyMode || (in.ProxyURL != nil && cfg.ProxyURL != *in.ProxyURL) {
@@ -516,7 +516,7 @@ func (s *Server) adminSettings(w http.ResponseWriter, r *http.Request) {
 		default:
 			// An unrecognised mode used to fall through silently: the panel
 			// said 已保存 and the egress never moved.
-			writeJSON(w, 400, map[string]any{"ok": false, "error": "未知代理模式：" + *in.ProxyMode})
+			writeJSON(w, 400, map[string]any{"ok": false, "error": "Unknown proxy mode: " + *in.ProxyMode})
 			return
 		}
 	}
@@ -929,7 +929,7 @@ func (s *Server) adminProxyTest(w http.ResponseWriter, r *http.Request) {
 	case "custom":
 		u, err := neturl.Parse(strings.TrimSpace(proxyURL))
 		if err != nil || u.Host == "" {
-			writeJSON(w, 400, map[string]any{"ok": false, "error": "代理地址不合法"})
+			writeJSON(w, 400, map[string]any{"ok": false, "error": "Invalid proxy address"})
 			return
 		}
 		fixed := u
@@ -954,7 +954,7 @@ func (s *Server) adminProxyTest(w http.ResponseWriter, r *http.Request) {
 	latency := time.Since(t0).Milliseconds()
 	if err != nil {
 		writeJSON(w, 200, map[string]any{"ok": false, "latencyMs": latency,
-			"error": "经此代理无法访问上游: " + err.Error()})
+			"error": "Upstream unreachable via this proxy: " + err.Error()})
 		return
 	}
 	defer resp.Body.Close()
@@ -974,7 +974,7 @@ func (s *Server) adminProxyTest(w http.ResponseWriter, r *http.Request) {
 // call; enabling runs a full refresh cycle (fetch → parse → sidecar restart).
 func (s *Server) adminSubsSave(w http.ResponseWriter, r *http.Request) {
 	if s.subs == nil {
-		writeJSON(w, 503, map[string]any{"ok": false, "error": "订阅轮询未就绪"})
+		writeJSON(w, 503, map[string]any{"ok": false, "error": "Subscription rotation not ready"})
 		return
 	}
 	var in struct {
@@ -1035,7 +1035,7 @@ func (s *Server) adminSubsSave(w http.ResponseWriter, r *http.Request) {
 // adminSubsRefresh re-runs the fetch/parse/restart/probe cycle on demand.
 func (s *Server) adminSubsRefresh(w http.ResponseWriter, r *http.Request) {
 	if s.subs == nil {
-		writeJSON(w, 503, map[string]any{"ok": false, "error": "订阅轮询未就绪"})
+		writeJSON(w, 503, map[string]any{"ok": false, "error": "Subscription rotation not ready"})
 		return
 	}
 	go func() {
@@ -1054,7 +1054,7 @@ func (s *Server) adminSubsRefresh(w http.ResponseWriter, r *http.Request) {
 // auto-download of the official release.
 func (s *Server) adminSubsSingBox(w http.ResponseWriter, r *http.Request) {
 	if s.subs == nil {
-		writeJSON(w, 503, map[string]any{"ok": false, "error": "订阅轮询未就绪"})
+		writeJSON(w, 503, map[string]any{"ok": false, "error": "Subscription rotation not ready"})
 		return
 	}
 	var in struct {
@@ -1241,11 +1241,11 @@ func (s *Server) adminImport(w http.ResponseWriter, r *http.Request) {
 	}
 	var incoming store.Config
 	if err := json.Unmarshal(body, &incoming); err != nil {
-		writeJSON(w, 400, map[string]any{"ok": false, "error": "不是合法的 zen-gate 配置文件: " + err.Error()})
+		writeJSON(w, 400, map[string]any{"ok": false, "error": "Not a valid zen-gate config file: " + err.Error()})
 		return
 	}
 	if incoming.MainKey == "" || incoming.Port <= 0 || incoming.Port >= 65536 {
-		writeJSON(w, 400, map[string]any{"ok": false, "error": "配置缺少 MainKey 或端口不合法"})
+		writeJSON(w, 400, map[string]any{"ok": false, "error": "Config missing MainKey or invalid port"})
 		return
 	}
 	// Restoring a masked export (what 导出配置 produces by default) is the
@@ -1303,7 +1303,7 @@ func (s *Server) adminImport(w http.ResponseWriter, r *http.Request) {
 // their ids are private and the curated table plus live probes own them.
 func (s *Server) adminRetag(w http.ResponseWriter) {
 	if s.tagger == nil {
-		writeJSON(w, 503, map[string]any{"ok": false, "error": "AI 标注器未就绪"})
+		writeJSON(w, 503, map[string]any{"ok": false, "error": "AI tagger not ready"})
 		return
 	}
 	ids := []string{}
@@ -1329,11 +1329,11 @@ func (s *Server) adminCapabilityProbe(w http.ResponseWriter, r *http.Request) {
 	}
 	p, upstream, ok := s.providerRoute(in.ID)
 	if !ok {
-		writeJSON(w, 400, map[string]any{"ok": false, "error": "只支持自定义供应商模型（provider/模型名）"})
+		writeJSON(w, 400, map[string]any{"ok": false, "error": "Only custom provider models are supported (provider/model)"})
 		return
 	}
 	if !p.Enabled {
-		writeJSON(w, 400, map[string]any{"ok": false, "error": "供应商已停用，先到「自定义 API」开启"})
+		writeJSON(w, 400, map[string]any{"ok": false, "error": "Provider is disabled — enable it under Custom API first"})
 		return
 	}
 	t, fresh := s.probeTasks.begin("caps", in.ID)
@@ -1378,7 +1378,7 @@ func (s *Server) adminProbeOne(w http.ResponseWriter, model string) {
 	var upstream string
 	if p, up, ok := s.providerRoute(model); ok {
 		if !p.Enabled {
-			writeJSON(w, 400, map[string]any{"ok": false, "error": "供应商已停用，先到「自定义 API」开启"})
+			writeJSON(w, 400, map[string]any{"ok": false, "error": "Provider is disabled — enable it under Custom API first"})
 			return
 		}
 		prov, upstream = p, up
@@ -1447,11 +1447,11 @@ func (s *Server) customProbeOf(id string) (lane.ProbeResult, bool) {
 // must support an in-place swap.
 func (s *Server) adminUpdateApply(w http.ResponseWriter) {
 	if !s.updateAvailable || s.updateURL == "" {
-		writeJSON(w, 400, map[string]any{"ok": false, "error": "没有检测到可用更新"})
+		writeJSON(w, 400, map[string]any{"ok": false, "error": "No update available"})
 		return
 	}
 	if !update.SelfUpdateSupported {
-		writeJSON(w, 400, map[string]any{"ok": false, "error": "此平台不支持一键更新，请从发布页下载新版本"})
+		writeJSON(w, 400, map[string]any{"ok": false, "error": "One-click update is not supported on this platform — download the new version from the releases page"})
 		return
 	}
 	if _, err := update.Apply(s.updateURL, lane.Client()); err != nil {

@@ -58,7 +58,7 @@ func Run(o Options) {
 		// opaque here. Close the orphan frame and live on without the
 		// embedded window.
 		destroyOrphanWebview(o.Title)
-		runFallback(o, "WebView2 环境创建失败（运行时在，窗口起不来）", true)
+		runFallback(o, "WebView2 environment creation failed (runtime present but the window could not start)", true)
 		return
 	}
 	defer w.Destroy()
@@ -121,13 +121,13 @@ func bindWindowControls(w webview2.WebView, hwnd uintptr, onCloseButton func() b
 // make things worse than degrading on a bogus pre-flight.
 func embeddedDecision(version string, verr error, forced bool) (bool, string) {
 	if forced {
-		return false, "ZEN_GATE_NO_WEBVIEW2=1（手动跳过内嵌窗口）"
+		return false, "ZEN_GATE_NO_WEBVIEW2=1 (embedded window manually skipped)"
 	}
 	if verr != nil {
 		return true, ""
 	}
 	if version == "" {
-		return false, "WebView2 Runtime 未安装"
+		return false, "WebView2 Runtime is not installed"
 	}
 	return true, ""
 }
@@ -162,7 +162,7 @@ func runFallback(o Options, reason string, trayStarted bool) {
 	if !trayStarted {
 		startTray(o)
 	}
-	notify.Toast("内嵌窗口不可用", "管理页已在默认浏览器打开 · "+reason)
+	notify.Toast("Embedded window unavailable", "Dashboard opened in the default browser · "+reason)
 	if o.URL != "" {
 		tray.Open(o.URL)
 	}

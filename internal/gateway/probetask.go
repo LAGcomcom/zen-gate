@@ -68,8 +68,8 @@ func (r *taskRegistry) begin(kind, model string) (*ProbeTask, bool) {
 			t.Status = taskFailed
 			t.Updated = now
 			t.Steps = append(t.Steps, lane.ProbeStep{
-				At: now, Name: "已中止", Status: lane.StepUnknown,
-				Detail: fmt.Sprintf("这次运行超过 %d 分钟没有回报，按超时处理", int(staleTaskAfter.Minutes())),
+				At: now, Name: "Aborted", Status: lane.StepUnknown,
+				Detail: fmt.Sprintf("No update for over %d minutes — treated as timeout", int(staleTaskAfter.Minutes())),
 			})
 			continue
 		}
