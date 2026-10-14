@@ -378,28 +378,40 @@ func (l *Lane) wbMarkActivity(date string) {
 // The response's numeric layout is not contractual, so the reader accepts any
 // numeric field named like a balance anywhere under data and reports the
 // first one it finds; an empty string means "nothing recognizable".
+//
+// It rides the same refresh chain wbPost keeps: a near-expiry token is renewed
+// before the GET, and a 401 refreshes and retries once. Without it the card
+// reported "积分读不出" on a token the chat path still used fine (issue #46) —
+// the chat went through wbPost's refresh, this raw GET did not.
 func (l *Lane) WorkBuddyCredits(ctx context.Context) (string, error) {
 	acct, ok := l.workBuddyReady()
 	if !ok {
 		return "", errors.New("WorkBuddy 账号未登录")
 	}
-	done := make(chan struct{})
-	var (
-		outerCode int
-		body      []byte
-		getErr    error
-	)
-	go func() {
-		outerCode, body, getErr = wbGet(wbUserResourcePath, acct)
-		close(done)
-	}()
-	select {
-	case <-ctx.Done():
-		return "", ctx.Err()
-	case <-done:
+	if wbTokenNearExpiry(acct) {
+		if rerr := l.refreshWorkBuddy(ctx); rerr == nil {
+			if fresh, ok := l.workBuddyReady(); ok {
+				acct = fresh
+			}
+		}
 	}
-	if getErr != nil {
-		return "", getErr
+	outerCode, body, err := wbGetCancellable(ctx, wbUserResourcePath, acct)
+	if err != nil {
+		return "", err
+	}
+	if outerCode == 401 {
+		// A credential refusal: refresh once and retry — same one chance wbPost
+		// gives a rotated-but-unsaved pair.
+		if rerr := l.refreshWorkBuddy(ctx); rerr != nil {
+			return "", fmt.Errorf("WorkBuddy 登录态失效（刷新失败：%v）", rerr)
+		}
+		fresh, ok := l.workBuddyReady()
+		if !ok {
+			return "", errors.New("WorkBuddy 账号未登录")
+		}
+		if outerCode, body, err = wbGetCancellable(ctx, wbUserResourcePath, fresh); err != nil {
+			return "", err
+		}
 	}
 	if outerCode != 200 {
 		return "", fmt.Errorf("积分查询返回 HTTP %d", outerCode)
@@ -413,6 +425,27 @@ func (l *Lane) WorkBuddyCredits(ctx context.Context) (string, error) {
 		return v, nil
 	}
 	return "", nil
+}
+
+// wbGetCancellable runs one wbGet but honours ctx cancellation instead of the
+// bare 15s client timeout, so a status-card refresh cannot outlive its request.
+func wbGetCancellable(ctx context.Context, path string, acct WBAccount) (int, []byte, error) {
+	done := make(chan struct{})
+	var (
+		code int
+		body []byte
+		gerr error
+	)
+	go func() {
+		code, body, gerr = wbGet(path, acct)
+		close(done)
+	}()
+	select {
+	case <-ctx.Done():
+		return 0, nil, ctx.Err()
+	case <-done:
+		return code, body, gerr
+	}
 }
 
 func wbFindBalance(m map[string]any, depth int) string {
@@ -446,12 +479,17 @@ func (l *Lane) probeWorkBuddy(ctx context.Context, m ModelInfo) ProbeResult {
 		return res
 	}
 	body := map[string]any{
-		"model":         m.ID,
-		"stream":        true,
-		"stream_options": map[string]any{"include_usage": true},
-		"messages":      []map[string]any{{"role": RoleUser, "content": "ping"}},
-		"max_tokens":    10,
+		"model":      m.ID,
+		"stream":     true,
+		"messages":   []map[string]any{{"role": RoleUser, "content": "ping"}},
+		"max_tokens": 10,
 	}
+	// Same per-family quirks a real turn applies: deepseek needs the thinking
+	// switch plus its effort spelling, the hy family only accepts "high". A
+	// probe body without them is rejected by the upstream for reasons that
+	// look like an outage while live chat to the same model answers fine
+	// (issue #46: chat worked, manual probe said "探测不到上游").
+	wbApplyModelQuirks(body, m.ID, "")
 	start := time.Now()
 	firstAt := int64(0)
 	_, err := l.wbPost(ctx, body, func([]byte) error {
