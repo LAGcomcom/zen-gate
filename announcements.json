@@ -1,6 +1,15 @@
 {
   "announcements": [
     {
+      "id": "2026-10-14-v1.7.8-release",
+      "title": "v1.7.8 修正：WorkBuddy 渠道手动探测与积分读取（#46）",
+      "body": "本次修复 WorkBuddy 账号渠道（国际版免费模型）两个「看起来像上游挂了、其实是网关自查姿势不对」的问题（issue #46）：\n1. 修复：手动探测显示「探测不到上游」，但同一模型问答正常。探测请求漏带了模型家族的必选参数（hy 系列只接受 high 推理档、deepseek 强制 thinking），上游按参数错误拒绝，看起来就像宕机。现在探测与真实对话走同一套参数装配；\n2. 修复：状态卡读不出积分/余额。积分查询此前绕过了令牌自动续期链——访问令牌过期后对话不受影响（有 401 自动刷新重试），但积分读取直接失败，重新授权也只是推迟问题。现在积分读取同样先检查临近过期主动续期、401 再刷新重试一次；\n3. 若你的 WorkBuddy 之前显示异常：升级到本版后无需任何操作，网关会自动续期恢复积分与探测；仅当长期未运行导致续期令牌也失效时，才需要到「自定义 API」页重新点一次「授权登录」；\n4. 升级方式：总览页「一键更新」或 Releases 页下载。",
+      "level": "info",
+      "start": "2026-10-14",
+      "end": "2026-10-21",
+      "url": "https://github.com/LAGcomcom/zen-gate/releases/latest"
+    },
+    {
       "id": "2026-10-13-v1.7.7-release",
       "title": "v1.7.7 修正：Anthropic 客户端工具调用全废（#48）、OpenCode 免费档 403（#47）",
       "body": "本次是两个紧急修复（都来自 issue 实测定位，感谢 @Yuyaoshangjing 和 @rui08984-dot）：\n1. 修复（issue #48）：走 Anthropic /v1/messages 的客户端（Claude Code、Claude Desktop 及任何 Anthropic SDK）只要用到工具，模型就报告「所有工具被中断」。根因在协议转换层：Anthropic 把工具结果放在 user 轮里回传，而网关把它投给 chat 线路（Kilo 池、OpenRouter 等）的投影函数没有这个分支，内容被静默丢弃——上游收到空工具结果才补了那句报错。现在每个工具结果都如实转发；顺带修复流式响应缺 event: 行的问题（Anthropic SDK 按事件名识别，缺行导致流式全部失败、只能非流式兜底）。走 OpenAI 协议（/v1/chat/completions）的客户端此前不受影响，行为不变；\n2. 修复（issue #47）：OpenCode 免费模型全部报 403 FreeTierError。上游 10-11 起把免费档校验挪进推理代理，开始解码 x-opencode-session 前缀里的时间戳，而网关的会话 id 是哈希生成的、解不出时间戳。现在会话 id 改为按 OpenCode 客户端的形状铸造并一一对应记住（一个会话一个 id，额度与缓存不受影响），过期自动重铸；\n3. 升级方式：总览页「一键更新」或 Releases 页下载。",
