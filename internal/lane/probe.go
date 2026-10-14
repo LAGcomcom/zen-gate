@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"regexp"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 )
@@ -34,7 +35,7 @@ type ProbeResult struct {
 // stateTTL bounds how long one sampled verdict speaks for the model. Free
 // quota is counted per egress IP and moves on a seconds scale, so a refusal is
 // a snapshot of one exit at one moment — not a property of the model.
-const stateTTL = 30 * time.Minute
+const stateTTL = 10 * time.Minute
 
 // FreshState is the only way to act on a verdict. Past the TTL it reads
 // "unknown": the model stays listed and routable until a probe renews the
@@ -248,17 +249,38 @@ func probeSystemOne(ctx context.Context, m ModelInfo, res ProbeResult) ProbeResu
 	return res
 }
 
-// ProbeCatalog probes models strictly one at a time (the free lane and its
-// dashboard both prefer sequential, progressive results over parallel bursts).
+// ProbeCatalog probes models with bounded concurrency. A strictly serial probe
+// means the last model in a large catalog is only verified after the whole
+// round finished, so its "available" verdict is already up to stateTTL old by
+// the time routing reads it. A small worker pool keeps the round fast while
+// still delivering results progressively. onResult is serialized through a
+// mutex so callers need not be concurrency-safe.
 func ProbeCatalog(ctx context.Context, models []ModelInfo, onResult func(ProbeResult)) {
-	for _, m := range models {
-		if ctx.Err() != nil {
+	const concurrency = 8
+	sem := make(chan struct{}, concurrency)
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	emit := func(r ProbeResult) {
+		if onResult == nil {
 			return
 		}
-		if onResult != nil {
-			onResult(ProbeModel(ctx, m))
-		}
+		mu.Lock()
+		onResult(r)
+		mu.Unlock()
 	}
+	for _, m := range models {
+		if ctx.Err() != nil {
+			break
+		}
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(m ModelInfo) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			emit(ProbeModel(ctx, m))
+		}(m)
+	}
+	wg.Wait()
 }
 
 // Egress reports the machine's public exit IP and country.
