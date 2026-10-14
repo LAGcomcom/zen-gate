@@ -13,7 +13,7 @@ import (
 // real install: one stalled exit produced a 217-second request ending in
 // TRANSPORT, for a model that answered in ~15s through other exits.
 func TestEgressRetryableCoversExitShapedFailures(t *testing.T) {
-	for _, code := range []string{CodeQuota, CodeTransport, CodeServer, CodeTimeout} {
+	for _, code := range []string{CodeQuota, CodeTransport, CodeServer, CodeTimeout, CodeReset} {
 		if !egressRetryable(code) {
 			t.Errorf("egressRetryable(%s) = false, want true — this failure is about the exit", code)
 		}
@@ -33,7 +33,7 @@ func TestSwitchableFailureIncludesTransport(t *testing.T) {
 	if !switchableFailure(&UpstreamError{Code: CodeTransport}) {
 		t.Error("a transport failure must be switchable: another model plausibly answers it")
 	}
-	for _, code := range []string{CodeQuota, CodeRegion, CodeServer, CodeTimeout, CodeEmpty} {
+	for _, code := range []string{CodeQuota, CodeRegion, CodeServer, CodeTimeout, CodeEmpty, CodeReset} {
 		if !switchableFailure(&UpstreamError{Code: code}) {
 			t.Errorf("switchableFailure(%s) = false, want true", code)
 		}
@@ -77,7 +77,7 @@ func TestEgressBudgetIsPerFailureClass(t *testing.T) {
 	}
 	// The slow class needs room for at least one full attempt to answer, or the
 	// retry it is meant to enable cannot begin.
-	for _, code := range []string{CodeTransport, CodeServer, CodeTimeout} {
+	for _, code := range []string{CodeTransport, CodeServer, CodeTimeout, CodeReset} {
 		got := egressBudgetFor(code)
 		if got < responseHeaderTimeout {
 			t.Errorf("egressBudgetFor(%s) = %v, need at least one full attempt (%v) or the retry can never start", code, got, responseHeaderTimeout)

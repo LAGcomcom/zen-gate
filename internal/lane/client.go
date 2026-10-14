@@ -786,7 +786,7 @@ func egressBudgetFor(code string) time.Duration {
 
 func egressRetryable(code string) bool {
 	switch code {
-	case CodeQuota, CodeTransport, CodeServer, CodeTimeout:
+	case CodeQuota, CodeTransport, CodeServer, CodeTimeout, CodeReset:
 		return true
 	}
 	return false
@@ -799,7 +799,7 @@ func egressRetryable(code string) bool {
 // waiting for one request, attempts=1.
 func switchableFailure(uerr *UpstreamError) bool {
 	switch uerr.Code {
-	case CodeQuota, CodeRegion, CodeServer, CodeTimeout, CodeEmpty, CodeTransport:
+	case CodeQuota, CodeRegion, CodeServer, CodeTimeout, CodeEmpty, CodeTransport, CodeReset:
 		return true
 	}
 	return false
@@ -1016,7 +1016,7 @@ func (l *Lane) attemptModel(ctx context.Context, req Request, model, effort stri
 			ReportExit(plan.NodeID, base, "region")
 		case CodeQuota:
 			ReportExit(plan.NodeID, base, "limited")
-		case CodeTransport, CodeServer, CodeTimeout, CodeEmpty:
+		case CodeTransport, CodeServer, CodeTimeout, CodeEmpty, CodeReset:
 			ReportExit(plan.NodeID, base, "other")
 		}
 		// The caller decides what a 429 means: under rotation it re-asks the
