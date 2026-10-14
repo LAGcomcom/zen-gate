@@ -204,7 +204,30 @@ const responseHeaderTimeout = 90 * time.Second
 const streamIdleTimeout = 90 * time.Second
 
 func SetProxy(mode, url string) {
-	t := &http.Transport{ResponseHeaderTimeout: responseHeaderTimeout}
+	t := &http.Transport{
+		ResponseHeaderTimeout: responseHeaderTimeout,
+		// Pool tuning. Every upstream request funnels to a single host
+		// (opencode.ai / the model API), yet the global upstream semaphore
+		// allows up to maxConcurrentUpstream (6) in flight at once. Go's
+		// default MaxIdleConnsPerHost is 2, so four of those six must re-do the
+		// TCP+TLS handshake on every turn: handshake flapping, ECONNRESET, and
+		// first-byte latency spikes -- the more agents you run at once, the
+		// worse it gets.
+		MaxIdleConns:        128,
+		MaxIdleConnsPerHost: 128,
+		// Recycle idle connections instead of keeping them forever. Without
+		// this the conn the upstream closed during an idle pause is silently
+		// reused and the first request after a lull fails with a reset -- the
+		// "it works, then after sitting idle the next call just drops" pattern.
+		IdleConnTimeout: 90 * time.Second,
+		// Don't let a stalled TLS handshake or an expect-continue hang a turn.
+		TLSHandshakeTimeout:   15 * time.Second,
+		ExpectContinueTimeout: 1 * time.Second,
+		DialContext: (&net.Dialer{
+			Timeout:   30 * time.Second,
+			KeepAlive: 30 * time.Second,
+		}).DialContext,
+	}
 	switch mode {
 	case "direct":
 		t.Proxy = nil
