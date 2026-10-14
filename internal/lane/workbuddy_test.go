@@ -361,3 +361,92 @@ func TestWBApplyModelQuirks(t *testing.T) {
 		t.Fatal("usage-bearing streams are mandatory on this lane")
 	}
 }
+
+// Issue #46: the manual probe hand-wrote a plain chat body and skipped the
+// per-family quirks, so the upstream rejected it for thinking/effort reasons
+// while live chat to the same model answered fine — the card read
+// "探测不到上游" next to a working model. The probe must carry the same
+// quirk fields a real turn does.
+func TestProbeWorkBuddyCarriesModelQuirks(t *testing.T) {
+	var gotBody atomic.Value
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, wbChatPath) {
+			raw, _ := io.ReadAll(r.Body)
+			gotBody.Store(string(raw))
+			w.Header().Set("content-type", "text/event-stream")
+			fmt.Fprint(w, wbChatSSE(
+				`{"choices":[{"delta":{"content":"ok"}}]}`,
+				`{"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`,
+			))
+			return
+		}
+		w.WriteHeader(404)
+	}))
+	defer srv.Close()
+	old := WorkBuddyBase
+	WorkBuddyBase = srv.URL
+	t.Cleanup(func() { WorkBuddyBase = old })
+
+	l := NewLane()
+	l.SetWorkBuddyAccount(wbAcct())
+	res := l.probeWorkBuddy(context.Background(), ModelInfo{ID: "hy4-preview-f", Channel: ChannelWorkBuddy})
+	if res.State != StateAvailable {
+		t.Fatalf("probe state = %s (%s), want available", res.State, res.Detail)
+	}
+	var body map[string]any
+	if err := json.Unmarshal([]byte(gotBody.Load().(string)), &body); err != nil {
+		t.Fatalf("probe body is not JSON: %v", err)
+	}
+	if body["reasoning_effort"] != "high" {
+		t.Fatalf("probe reasoning_effort = %v, want high — the hy family rejects anything else", body["reasoning_effort"])
+	}
+	if _, ok := body["stream_options"]; !ok {
+		t.Fatal("probe body must carry usage-bearing stream_options like a real turn")
+	}
+}
+
+// Issue #46 second half: the credits card called wbGet raw — no near-expiry
+// renewal, no 401 refresh-and-retry — so a token the chat path still used
+// (wbPost refreshes transparently) showed "积分读不出" on the card. Credits
+// must ride the same refresh chain.
+func TestWorkBuddyCreditsRefreshesOn401(t *testing.T) {
+	var billingCalls, refreshCalls atomic.Int64
+	var lastAuth atomic.Value
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, wbAuthRefreshPath):
+			refreshCalls.Add(1)
+			fmt.Fprint(w, `{"code":0,"data":{"accessToken":"tok-2","refreshToken":"r2"}}`)
+		case strings.HasSuffix(r.URL.Path, wbUserResourcePath):
+			n := billingCalls.Add(1)
+			lastAuth.Store(r.Header.Get("authorization"))
+			if n == 1 {
+				w.WriteHeader(401) // openresty refuses the stale credential
+				return
+			}
+			fmt.Fprint(w, `{"code":0,"data":{"credit":123}}`)
+		default:
+			w.WriteHeader(404)
+		}
+	}))
+	defer srv.Close()
+	old := WorkBuddyBase
+	WorkBuddyBase = srv.URL
+	t.Cleanup(func() { WorkBuddyBase = old })
+
+	l := NewLane()
+	l.SetWorkBuddyAccount(wbAcct())
+	credits, err := l.WorkBuddyCredits(context.Background())
+	if err != nil {
+		t.Fatalf("credits read failed: %v", err)
+	}
+	if credits != "123" {
+		t.Fatalf("credits = %q, want 123", credits)
+	}
+	if refreshCalls.Load() != 1 {
+		t.Fatalf("refresh calls = %d, want exactly one", refreshCalls.Load())
+	}
+	if lastAuth.Load() != "Bearer tok-2" {
+		t.Fatalf("retry rode %v, want the refreshed token", lastAuth.Load())
+	}
+}
