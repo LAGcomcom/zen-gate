@@ -308,7 +308,22 @@ func (s *Server) safeRoute(w http.ResponseWriter, r *http.Request) {
 // interface when the user turned on 局域网访问.
 func (s *Server) Start() error {
 	addr := fmt.Sprintf("%s:%d", s.bindHost(), s.Store.Config().Port)
-	s.srv = &http.Server{Addr: addr, Handler: s.mux}
+	s.srv = &http.Server{
+		Addr:    addr,
+		Handler: s.mux,
+		// Reclaim keep-alive client connections (the AI agents talking to this
+		// gateway). Without IdleTimeout a client that vanishes mid-session --
+		// agent crash, laptop sleep, Wi-Fi blip -- leaves a half-open
+		// connection whose server goroutine and file descriptor are never
+		// released. They pile up until the gateway has to be restarted, which is
+		// exactly the reported "runs fine, then after a while the connection
+		// just drops until I restart the app" symptom.
+		IdleTimeout: 60 * time.Second,
+		// Bound how long we wait for a client to finish sending request
+		// headers, so a connect-without-request peer is reclaimed in seconds
+		// instead of lingering for the OS TCP keep-alive window.
+		ReadHeaderTimeout: 15 * time.Second,
+	}
 	ln, err := s.listen("tcp", addr)
 	if err != nil {
 		return err
