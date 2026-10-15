@@ -8,6 +8,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -44,14 +45,80 @@ const dateLayout = "2006-01-02"
 // API for announcements.json on the project's master branch. It rides
 // api.github.com — the same host the update checker already depends on —
 // because raw.githubusercontent.com is unreachable from some networks.
-const DefaultFeedURL = "https://api.github.com/repos/LAGcomcom/zen-gate/contents/announcements.json?ref=master"
+// rawFeedURL is its mirror for the opposite failure: the Contents API is
+// rate-limited per proxy IP (403 once a shared accelerator burns the
+// anonymous quota), and raw keeps serving when it does.
+const (
+	DefaultFeedURL = "https://api.github.com/repos/LAGcomcom/zen-gate/contents/announcements.json?ref=master"
+	rawFeedURL     = "https://raw.githubusercontent.com/LAGcomcom/zen-gate/master/announcements.json"
+)
 
-// Fetch pulls and parses the feed, returning every valid entry with its level
-// normalized. A 404 yields (nil, nil). Both shapes are accepted: the plain
-// {"announcements":[…]} file and the GitHub Contents-API envelope
-// ({"content":"<base64>","encoding":"base64"}) that the default URL returns.
-// Callers split the list with Active / EndedItems.
+// Fetch pulls and parses the feed. GitHub feeds fail in two opposite ways:
+// the Contents API answers 403 once the proxy's shared IP burns the
+// anonymous 60/hour quota, while raw.githubusercontent.com is unreachable
+// through no proxy at all on some networks. So this is a small ladder, not
+// one request: the configured URL, then the complementary GitHub host, then
+// each again with the proxy bypassed (a dead local proxy must not swallow
+// the feed either). All-404 means "nothing published" (nil, nil), same as
+// before; any other total failure returns the last error. Callers split the
+// list with Active / EndedItems.
 func Fetch(ctx context.Context, url string, client *http.Client) ([]Item, error) {
+	return FetchWithMirror(ctx, url, mirror(url), client)
+}
+
+// FetchWithMirror runs the ladder over an explicit mirror pair — the seam
+// the tests drive; Fetch wires the mirror from the URL itself. The proxy
+// bypass round only runs for the known GitHub pair: a user-customized feed
+// is fetched through their client, nothing else.
+func FetchWithMirror(ctx context.Context, url, mirrorURL string, client *http.Client) ([]Item, error) {
+	candidates := []string{url}
+	if mirrorURL != "" && mirrorURL != url {
+		candidates = append(candidates, mirrorURL)
+	}
+	clients := []*http.Client{client}
+	if mirrorURL != "" && client != directClient {
+		clients = append(clients, directClient)
+	}
+	var lastErr error
+	saw404 := false
+	for _, c := range clients {
+		for _, u := range candidates {
+			cctx, cancel := context.WithTimeout(ctx, 20*time.Second)
+			items, err := fetchOnce(cctx, u, c)
+			cancel()
+			switch {
+			case err == nil:
+				return items, nil
+			case errors.Is(err, errNotFound):
+				saw404 = true
+			default:
+				lastErr = err
+			}
+		}
+	}
+	if saw404 {
+		return nil, nil
+	}
+	return nil, lastErr
+}
+
+var errNotFound = errors.New("announce: 404")
+
+// directClient bypasses every proxy for the GitHub pair: the Contents-API
+// quota that 403s belongs to the proxy's shared IP, and the machine's own
+// IP usually holds a separate one (and reaches raw even when the proxy is
+// down). Idle conns are recycled by the per-attempt deadline; the pull runs
+// at boot and every 6h, so this small pool is never hot.
+var directClient = &http.Client{
+	Timeout:   20 * time.Second,
+	Transport: &http.Transport{Proxy: nil},
+}
+
+// fetchOnce is the single-URL pull behind Fetch: a 404 is the "no feed
+// published" state (errNotFound), a wrong status or an unparseable body is
+// an error. Both shapes parse: the plain {"announcements":[…]} file and the
+// GitHub Contents-API envelope.
+func fetchOnce(ctx context.Context, url string, client *http.Client) ([]Item, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, err
@@ -63,7 +130,7 @@ func Fetch(ctx context.Context, url string, client *http.Client) ([]Item, error)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode == http.StatusNotFound {
-		return nil, nil
+		return nil, errNotFound
 	}
 	data, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
@@ -73,6 +140,22 @@ func Fetch(ctx context.Context, url string, client *http.Client) ([]Item, error)
 		return nil, fmt.Errorf("HTTP %d", resp.StatusCode)
 	}
 	return Parse(data)
+}
+
+// mirror returns the complementary GitHub source for this project's feed
+// URLs — Contents API on api.github.com ↔ raw.githubusercontent.com — or ""
+// for anything else: a user-customized feed has no mirror and is fetched
+// through their client only. A wrong ref on one side (v1.3.0 wrote
+// ?ref=main) is recovered by the other, which always names master.
+func mirror(url string) string {
+	u := strings.ToLower(strings.TrimSpace(url))
+	switch {
+	case strings.Contains(u, "api.github.com") && strings.Contains(u, "/zen-gate/contents/announcements.json"):
+		return rawFeedURL
+	case strings.Contains(u, "raw.githubusercontent.com") && strings.Contains(u, "/zen-gate/") && strings.HasSuffix(u, "announcements.json"):
+		return DefaultFeedURL
+	}
+	return ""
 }
 
 // Parse decodes a feed payload in either shape and returns every valid entry.

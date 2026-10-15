@@ -44,6 +44,45 @@ func authHeaders(h http.Header, apiKey, protocol string) {
 	h.Set("authorization", "Bearer "+apiKey)
 }
 
+// identityHeaders adds the session identity an opencode.ai endpoint demands.
+// Its Go tier answers a session-less turn with 400 MissingSessionID ("cannot
+// be routed efficiently") regardless of a valid key — the same session header
+// the free lane already mints, so a user pointing a provider at OpenCode Go
+// stops tripping that gate (issue #55). Every other provider gets nothing:
+// unknown headers can upset a stricter upstream, and only this host asks.
+func identityHeaders(h http.Header, p *store.Provider, session string) {
+	if session == "" || !isOpenCodeHost(p.BaseURL) {
+		return
+	}
+	h.Set("x-opencode-session", session)
+}
+
+// isOpenCodeHost reports whether a provider points at opencode.ai (the Zen
+// free lane or the paid Go tier — both gate on the session header).
+func isOpenCodeHost(baseURL string) bool {
+	host := strings.ToLower(NormalizeBaseURL(baseURL))
+	return strings.Contains(host, "//opencode.ai") || strings.Contains(host, ".opencode.ai")
+}
+
+// relaySession derives the session identity a relayed turn presents to an
+// opencode.ai endpoint: the lane's own minted id for a per-conversation seed,
+// so it carries the timestamp-shaped prefix the gate expects (#47) and stays
+// stable across the turns of one conversation. Mirrors gateway.SessionSeed
+// without importing the gateway (which imports this package).
+func relaySession(agent string, messages []lane.Message) string {
+	first := ""
+	for _, m := range messages {
+		if m.Role == lane.RoleUser {
+			first = m.TextOf()
+			break
+		}
+	}
+	if len(first) > 500 {
+		first = first[:500]
+	}
+	return lane.SessionForConversation(agent + "\x00" + first)
+}
+
 // endpointOf returns the completion URL for one provider.
 func endpointOf(p *store.Provider) string {
 	base := NormalizeBaseURL(p.BaseURL)
@@ -114,6 +153,12 @@ type Turn struct {
 	Tools     []lane.ToolDef
 	MaxTokens int    // ≤ 0 → provider default
 	Agent     string // caller label for stats
+	// Session is a stable per-conversation identity. Only some upstreams want
+	// it: an opencode.ai endpoint rejects a turn that arrives without
+	// x-opencode-session ("cannot be routed efficiently", issue #55), and the
+	// value must repeat across a conversation for routing and prompt cache to
+	// hold. Empty is fine for every other provider.
+	Session string
 }
 
 // Complete streams one turn from the provider into lane chunks. Returns the
@@ -122,6 +167,10 @@ type Turn struct {
 // the chunks instead.
 func Complete(ctx context.Context, t Turn, emit func(lane.Chunk)) (lane.Usage, string, *lane.UpstreamError) {
 	p := t.Provider
+	session := t.Session
+	if session == "" {
+		session = relaySession(t.Agent, t.Messages)
+	}
 	protocol := p.Protocol
 	wire := "chat"
 	if protocol == store.ProtocolAnthropic {
@@ -160,7 +209,7 @@ func Complete(ctx context.Context, t Turn, emit func(lane.Chunk)) (lane.Usage, s
 	}
 
 	decoder := lane.NewDecoder(wire, nil, emit)
-	usage, err := postStreamed(ctx, p, body, func(payload []byte) error {
+	usage, err := postStreamed(ctx, p, session, body, func(payload []byte) error {
 		decoder.Decode(payload)
 		return nil
 	})
@@ -189,7 +238,7 @@ func ProbeTiming(ctx context.Context, p *store.Provider) (int64, error) {
 // postStreamed POSTs one completion and pumps `data:` frames to onData,
 // merging usage frames along the way. Mirrors lane.PostStreamed's contract
 // (idle-tolerant read owned by the request context) against an arbitrary URL.
-func postStreamed(ctx context.Context, p *store.Provider, body map[string]any, onData func([]byte) error) (*lane.Usage, *lane.UpstreamError) {
+func postStreamed(ctx context.Context, p *store.Provider, session string, body map[string]any, onData func([]byte) error) (*lane.Usage, *lane.UpstreamError) {
 	payload, err := json.Marshal(body)
 	if err != nil {
 		return nil, &lane.UpstreamError{Code: lane.CodeTransport, Message: err.Error()}
@@ -201,6 +250,7 @@ func postStreamed(ctx context.Context, p *store.Provider, body map[string]any, o
 	req.Header.Set("content-type", "application/json")
 	req.Header.Set("accept", "text/event-stream")
 	authHeaders(req.Header, p.APIKey, p.Protocol)
+	identityHeaders(req.Header, p, session)
 
 	resp, err := lane.Client().Do(req)
 	if err != nil {

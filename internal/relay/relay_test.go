@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"regexp"
+	"sync/atomic"
 	"testing"
 
 	"zen-gate/internal/lane"
@@ -281,5 +283,60 @@ func TestCompleteOpenAIWire(t *testing.T) {
 	}
 	if usage.Input != 9 || usage.Output != 1 {
 		t.Fatalf("usage = %+v", usage)
+	}
+}
+
+// Issue #55: an opencode.ai endpoint (the paid Go tier) rejects a session-less
+// turn with 400 MissingSessionID, so a relayed turn must carry
+// x-opencode-session — minted in the shape #47 established and stable across
+// the conversation's turns. Every other host must NOT receive the header.
+func TestCompleteSendsOpenCodeSessionOnlyToOpenCode(t *testing.T) {
+	var gotSession atomic.Value
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotSession.Store(r.Header.Get("x-opencode-session"))
+		w.Header().Set("content-type", "text/event-stream")
+		fmt.Fprintln(w, `data: {"choices":[{"delta":{"content":"ok"}}]}`)
+		fmt.Fprintln(w, `data: {"choices":[{"delta":{},"finish_reason":"stop"}]}`)
+		fmt.Fprintln(w, `data: [DONE]`)
+	}))
+	defer up.Close()
+
+	msgs := []lane.Message{{Role: lane.RoleUser, Parts: []lane.Part{lane.TextPart{Text: "hi"}}}}
+	// The provider points at the test server, but isOpenCodeHost keys on the
+	// host string; exercise the header writer directly for the opencode case
+	// and the end-to-end path for the negative case.
+	plain := &store.Provider{ID: "p", BaseURL: up.URL, APIKey: "sk", Protocol: store.ProtocolOpenAI, Enabled: true}
+	if _, _, uerr := Complete(context.Background(), Turn{Provider: plain, Model: "m", Messages: msgs, MaxTokens: 8}, func(lane.Chunk) {}); uerr != nil {
+		t.Fatalf("plain relay: %v", uerr)
+	}
+	if s, _ := gotSession.Load().(string); s != "" {
+		t.Fatalf("non-opencode host got session %q, want none", s)
+	}
+
+	h := http.Header{}
+	identityHeaders(h, plain, "ses_abcdef012345ABCDEFGHIJKLMN")
+	if h.Get("x-opencode-session") != "" {
+		t.Fatalf("identityHeaders must not touch a non-opencode provider")
+	}
+	goProv := &store.Provider{ID: "go", BaseURL: "https://opencode.ai/inference/go/v1", Protocol: store.ProtocolOpenAI}
+	identityHeaders(h, goProv, "ses_abcdef012345ABCDEFGHIJKLMN")
+	if h.Get("x-opencode-session") != "ses_abcdef012345ABCDEFGHIJKLMN" {
+		t.Fatalf("opencode host must get the session header, got %q", h.Get("x-opencode-session"))
+	}
+	if !isOpenCodeHost("https://opencode.ai/inference/go/v1") || isOpenCodeHost(up.URL) {
+		t.Fatal("isOpenCodeHost must accept opencode.ai and reject other hosts")
+	}
+
+	// Same conversation → same minted session; a different one differs.
+	a := relaySession("claude", msgs)
+	if b := relaySession("claude", msgs); a != b {
+		t.Fatalf("one conversation must map to one session: %s != %s", a, b)
+	}
+	if !regexp.MustCompile(`^ses_[0-9a-f]{12}[0-9A-Za-z]{14}$`).MatchString(a) {
+		t.Fatalf("session %q is not in the minted shape the gate decodes", a)
+	}
+	other := relaySession("claude", []lane.Message{{Role: lane.RoleUser, Parts: []lane.Part{lane.TextPart{Text: "different"}}}})
+	if other == a {
+		t.Fatal("different conversations must differ")
 	}
 }
