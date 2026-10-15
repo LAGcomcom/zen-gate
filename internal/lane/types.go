@@ -241,6 +241,7 @@ const (
 	CodeQuota      = "RATE_LIMIT"
 	CodeCredential = "INVALID_CREDENTIAL"
 	CodeTransport  = "TRANSPORT"
+	CodeReset      = "TRANSPORT_RESET"
 	CodeTimeout    = "TIMEOUT"
 	CodeServer     = "SERVER"
 	CodeClient     = "CLIENT_ERROR"

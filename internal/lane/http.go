@@ -325,6 +325,28 @@ func parseProxyURL(raw string) (*neturl.URL, error) {
 	return neturl.Parse(raw)
 }
 
+// classifyConnErr maps a transport-level error from laneHTTP.Do to a
+// fine-grained outcome code so the access log can separate a connection reset /
+// broken pipe (CodeReset) from a deadline (handshake / dial / idle ->
+// CodeTimeout) from any other transport failure (CodeTransport). Retry,
+// switch and budget behavior are unchanged: all three ride CodeTransport's
+// bucket.
+func classifyConnErr(err error) string {
+	if err == nil {
+		return CodeTransport
+	}
+	if ne, ok := err.(net.Error); ok && ne.Timeout() {
+		return CodeTimeout
+	}
+	msg := err.Error()
+	if strings.Contains(msg, "connection reset by peer") ||
+		strings.Contains(msg, "broken pipe") ||
+		strings.Contains(msg, "ECONNRESET") {
+		return CodeReset
+	}
+	return CodeTransport
+}
+
 // PostStreamed posts one completion request and delivers decoded `data:`
 // payloads to onData. The first ≤4 KiB are sniffed by body shape — the gateway
 // sometimes answers a stream request with SSE under an application/json
@@ -347,7 +369,7 @@ func PostStreamed(ctx context.Context, path string, body map[string]any, session
 		if ctx.Err() != nil {
 			return nil, &UpstreamError{Code: CodeAborted, Message: "cancelled"}
 		}
-		return nil, &UpstreamError{Code: CodeTransport, Message: err.Error()}
+		return nil, &UpstreamError{Code: classifyConnErr(err), Message: err.Error()}
 	}
 	defer resp.Body.Close()
 

@@ -683,7 +683,7 @@ func errorStatus(e *lane.UpstreamError) int {
 		return 400
 	case lane.CodeTimeout:
 		return 504
-	case lane.CodeTransport, lane.CodeServer, lane.CodeEmpty:
+	case lane.CodeTransport, lane.CodeServer, lane.CodeEmpty, lane.CodeReset:
 		return 502
 	default:
 		return 502
