@@ -87,6 +87,7 @@ func (m *Manager) probeNodes(ctx context.Context, nodes []NodeHealth) {
 					cur.IP, cur.Country = eg.IP, eg.Country
 					cur.LatencyMs = lat
 					cur.CoolUntil = 0 // a live egress is proof enough to rejoin rotation now
+					delete(m.nodeStreak, h.ID)
 				}
 			}
 		}(h)
@@ -142,22 +143,23 @@ func (m *Manager) Dial(ctx context.Context, network, addr string) (net.Conn, err
 		// resolved at the node (the CONNECT request carries the hostname).
 		dialer, derr := proxy.SOCKS5("tcp", fmt.Sprintf("127.0.0.1:%d", h.Port), nil, proxy.Direct)
 		if derr != nil {
-			m.park(h.ID)
+			m.coolNode(h.ID)
 			continue
 		}
 		cd, ok := dialer.(proxy.ContextDialer)
 		if !ok {
-			m.park(h.ID)
+			m.coolNode(h.ID)
 			continue
 		}
 		conn, derr := cd.DialContext(ctx, network, addr)
 		if derr != nil {
-			m.park(h.ID)
+			m.coolNode(h.ID)
 			if ctx.Err() != nil {
 				return nil, derr
 			}
 			continue
 		}
+		m.warmNode(h.ID)
 		return conn, nil
 	}
 	return nil, fmt.Errorf("所有订阅节点都拨号失败(%d 个健康节点)", m.Healthy())
@@ -186,6 +188,37 @@ func (m *Manager) park(id string) {
 		h.CoolUntil = time.Now().Add(coolDuration).UnixMilli()
 	}
 	m.mu.Unlock()
+}
+
+// coolNode parks a node after a dial failure, escalating the park duration with
+// consecutive failures so a persistently dead node stops costing a full
+// dialTimeout on every request. One failure parks for coolDuration; each repeat
+// doubles it (capped at 15m) -- the node-level mirror of the (exit, model)
+// ledger's adaptive delay in ledger.go.
+func (m *Manager) coolNode(id string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.nodeStreak == nil {
+		m.nodeStreak = make(map[string]int)
+	}
+	m.nodeStreak[id]++
+	n := m.nodeStreak[id]
+	d := coolDuration << min(n-1, 4) // 1m, 2m, 4m, 8m, 16m
+	if d > 15*time.Minute {
+		d = 15 * time.Minute
+	}
+	if h := m.health[id]; h != nil {
+		h.CoolUntil = time.Now().Add(d).UnixMilli()
+	}
+}
+
+// warmNode clears a node's consecutive-failure streak after a successful dial
+// (or a live probe / served request), so a node that recovers rejoins rotation
+// at the base cooldown instead of carrying stale escalation.
+func (m *Manager) warmNode(id string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.nodeStreak, id)
 }
 
 var _ lane.Rotator = (*Manager)(nil)

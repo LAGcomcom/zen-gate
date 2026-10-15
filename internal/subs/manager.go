@@ -54,11 +54,15 @@ type Manager struct {
 	// "known-good" pairs: preferring one pins every concurrent request onto
 	// the first success (measured in #23), so the ledger only ever removes
 	// candidates.
-	bans     map[string]time.Time
-	fails    map[string]int
-	failAt   map[string]time.Time
-	lastErr  string
-	version  string
+	bans   map[string]time.Time
+	fails  map[string]int
+	failAt map[string]time.Time
+	// nodeStreak counts consecutive dial failures per node, driving an
+	// escalating cooldown in coolNode so a persistently dead node stops costing
+	// a full dialTimeout on every request. Keyed by node ID.
+	nodeStreak map[string]int
+	lastErr    string
+	version    string
 
 	deathCancel context.CancelFunc // bounds the dead-node recheck loop
 }

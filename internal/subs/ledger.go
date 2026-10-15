@@ -99,6 +99,7 @@ func (m *Manager) Revive(nodeID, model string) {
 	if h := m.health[nodeID]; h != nil {
 		h.CoolUntil = 0
 		h.LastOKMs = now.UnixMilli()
+		delete(m.nodeStreak, nodeID)
 	}
 	if model == "" {
 		return
