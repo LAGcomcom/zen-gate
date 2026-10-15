@@ -81,6 +81,10 @@ var Presets = []Preset{
 		Protocol: store.ProtocolAnthropic,
 		Note:     "付费（演示 Anthropic 协议接法），claude-opus-4-6 等",
 		KeyURL:   "https://console.anthropic.com/settings/keys"},
+	{ID: "opencode-go", Name: "OpenCode Go", BaseURL: "https://opencode.ai/inference/go/v1",
+		Protocol: store.ProtocolOpenAI,
+		Note:     "OpenCode 官方付费档（月度订阅，需在 OpenCode 控制台取 Key）；网关会自动补上它要求的会话头，Claude Code / Codex 等客户端可直连",
+		KeyURL:   "https://opencode.ai/docs/go/"},
 }
 
 // recommendPatterns lists, per provider, the model-id patterns worth enabling
