@@ -437,8 +437,19 @@ func GetJSON(ctx context.Context, path string, session, requestID string, out an
 	for k, v := range GatewayHeaders(session, requestID, false, "application/json") {
 		req.Header.Set(k, v)
 	}
-	client := &http.Client{Timeout: 15 * time.Second, Transport: laneHTTP.Transport}
-	resp, err := client.Do(req)
+	// Reuse the shared, proxy-aware client (and its tuned connection pool)
+	// instead of allocating a fresh client -- and a hard 15s Timeout -- on
+	// every listing call. The 15s cap is what fails cold-start / under-load
+	// listings (#41/#36): the response is alive but slow to arrive. Bound the
+	// call with the caller's context; only when that context carries no
+	// deadline do we fall back to a 30s cap, so a hung listing is still
+	// reclaimed instead of blocking forever.
+	if _, hasDeadline := ctx.Deadline(); !hasDeadline {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, 30*time.Second)
+		defer cancel()
+	}
+	resp, err := laneHTTP.Do(req)
 	if err != nil {
 		return err
 	}
