@@ -16,70 +16,78 @@ func throttleAll(l *Lane, keep ...string) {
 	}
 }
 
-// Fallback catalog order: mimo-v2.6, mimo-v2.5, ling-3.0, nemotron-3-ultra,
-// nemotron-3.5-lightning, space-bunny, muse-1.3, muse-1.2. Vision carriers per
-// the curated table: mimo*, muse*, space-bunny; text-only: ling, nemotron.
+// Fallback catalog order: mimo-v2.6, deepseek-v4.1, space-bunny,
+// nemotron-3.5-lightning, nemotron-3.5-super-vl, ll-alpha, ...
+// Vision carriers per the measured table: mimo*, muse*, space-bunny,
+// deepseek-v4.1, ll-alpha, nemotron-super-vl; text-only: nemotron-lightning.
+// The strategy tests need samples with distinct traits, not specific
+// models: they were rewritten when ling-3.0 / nemotron-3-ultra left the
+// upstream roster, and keep using whichever roster members carry the
+// trait each assertion is about.
 
 func TestNextCandidateFiltersByNeeds(t *testing.T) {
 	l := NewLane()
-	throttleAll(l, "ling-3.0-flash-fin-free", "space-bunny-free")
+	// nemotron-lightning is text-only and sorts before the vision carriers.
+	throttleAll(l, "nemotron-3.5-lightning-free", "space-bunny-free")
 
-	// A vision request must skip the text-only ling even though it comes
+	// A vision request must skip the text-only nemotron even though it comes
 	// first in catalog order.
 	if got := l.nextCandidate(Needs{Image: true}, map[string]bool{}); got != "space-bunny-free" {
 		t.Fatalf("vision request: next = %q, want space-bunny-free", got)
 	}
-	// Without a modality footprint the same pool keeps catalog order.
-	if got := l.nextCandidate(Needs{}, map[string]bool{}); got != "ling-3.0-flash-fin-free" {
-		t.Fatalf("no needs: next = %q, want ling-3.0-flash-fin-free", got)
+	// Without a modality footprint the same pool keeps catalog order —
+	// space-bunny sits ahead of nemotron-lightning in the roster.
+	if got := l.nextCandidate(Needs{}, map[string]bool{}); got != "space-bunny-free" {
+		t.Fatalf("no needs: next = %q, want space-bunny-free", got)
 	}
 }
 
 func TestNextCandidateContextFit(t *testing.T) {
 	l := NewLane()
-	throttleAll(l, "nemotron-3-ultra-free") // 128k window, the smallest here
+	throttleAll(l, "nemotron-3.5-lightning-free") // 128k window, the smallest here
 	if got := l.nextCandidate(Needs{PromptTokens: 200000}, map[string]bool{}); got != "" {
 		t.Fatalf("oversized request: next = %q, want none", got)
 	}
-	if got := l.nextCandidate(Needs{PromptTokens: 1000}, map[string]bool{}); got != "nemotron-3-ultra-free" {
-		t.Fatalf("small request: next = %q, want nemotron-3-ultra-free", got)
+	if got := l.nextCandidate(Needs{PromptTokens: 1000}, map[string]bool{}); got != "nemotron-3.5-lightning-free" {
+		t.Fatalf("small request: next = %q, want nemotron-3.5-lightning-free", got)
 	}
 }
 
 func TestNextCandidateLatencyStrategy(t *testing.T) {
 	l := NewLane()
-	throttleAll(l, "ling-3.0-flash-fin-free", "nemotron-3-ultra-free")
+	throttleAll(l, "nemotron-3.5-lightning-free", "space-bunny-free")
 	l.SetStrategy(StrategyLatency)
 	l.SetTTFTSource(func(model string) int64 {
-		if model == "nemotron-3-ultra-free" {
+		if model == "space-bunny-free" {
 			return 120
 		}
 		return 900
 	})
 	// Both candidates are unprobed (same availability band); the measured-fast
-	// one wins even though ling comes first in catalog order.
-	if got := l.nextCandidate(Needs{}, map[string]bool{}); got != "nemotron-3-ultra-free" {
-		t.Fatalf("latency strategy: next = %q, want nemotron-3-ultra-free", got)
+	// one wins even though nemotron-lightning comes first in catalog order.
+	if got := l.nextCandidate(Needs{}, map[string]bool{}); got != "space-bunny-free" {
+		t.Fatalf("latency strategy: next = %q, want space-bunny-free", got)
 	}
 	// Catalog strategy on the same pool: listing order.
 	l.SetTTFTSource(nil)
 	l.SetStrategy(StrategyCatalog)
-	if got := l.nextCandidate(Needs{}, map[string]bool{}); got != "ling-3.0-flash-fin-free" {
-		t.Fatalf("catalog strategy: next = %q, want ling-3.0-flash-fin-free", got)
+	if got := l.nextCandidate(Needs{}, map[string]bool{}); got != "space-bunny-free" {
+		t.Fatalf("catalog strategy: next = %q, want space-bunny-free", got)
 	}
 }
 
 func TestSmartRoutingOffRestoresLegacy(t *testing.T) {
 	l := NewLane()
 	l.SetSmartRouting(false)
-	throttleAll(l, "ling-3.0-flash-fin-free", "space-bunny-free")
-	// Legacy ignores the modality filter: a vision request lands on ling.
-	if got := l.nextCandidate(Needs{Image: true}, map[string]bool{}); got != "ling-3.0-flash-fin-free" {
-		t.Fatalf("legacy: next = %q, want ling-3.0-flash-fin-free", got)
+	throttleAll(l, "ll-alpha-free", "space-bunny-free")
+	// Legacy ignores the modality filter: a vision request still lands on
+	// space-bunny purely by catalog position, which is exactly what "off" means.
+	if got := l.nextCandidate(Needs{Image: true}, map[string]bool{}); got != "space-bunny-free" {
+		t.Fatalf("legacy: next = %q, want space-bunny-free", got)
 	}
-	// Legacy skips the context check too: a 10M-token prompt still finds ling.
-	if got := l.nextCandidate(Needs{PromptTokens: 10 << 20}, map[string]bool{}); got != "ling-3.0-flash-fin-free" {
-		t.Fatalf("legacy oversized: next = %q, want ling-3.0-flash-fin-free", got)
+	// Legacy skips the context check too: a 10M-token prompt still finds one.
+	if got := l.nextCandidate(Needs{PromptTokens: 10 << 20}, map[string]bool{}); got != "space-bunny-free" {
+		t.Fatalf("legacy oversized: next = %q, want space-bunny-free", got)
 	}
 }
 
@@ -150,13 +158,13 @@ func TestSummarizeNeeds(t *testing.T) {
 
 func TestCandidatesHonorsNeeds(t *testing.T) {
 	l := NewLane()
-	throttleAll(l, "ling-3.0-flash-fin-free", "space-bunny-free")
+	throttleAll(l, "nemotron-3.5-lightning-free", "space-bunny-free")
 	got := l.Candidates(Needs{Image: true}, "nobody", 5)
 	if len(got) == 0 {
 		t.Fatal("expected vision-capable suggestions")
 	}
 	for _, id := range got {
-		if id == "ling-3.0-flash-fin-free" {
+		if id == "nemotron-3.5-lightning-free" {
 			t.Fatalf("suggestions include text-only model %q", id)
 		}
 	}
@@ -167,19 +175,19 @@ func TestCandidatesHonorsNeeds(t *testing.T) {
 // does, and it is what routing should rank on.
 func TestLatencyStrategyPrefersTheSampleRingOverTheLastProbe(t *testing.T) {
 	l := NewLane()
-	throttleAll(l, "ling-3.0-flash-fin-free", "nemotron-3-ultra-free")
+	throttleAll(l, "nemotron-3.5-lightning-free", "space-bunny-free")
 	l.SetStrategy(StrategyLatency)
-	l.availability["ling-3.0-flash-fin-free"] = ProbeResult{
-		Model: "ling-3.0-flash-fin-free", State: StateAvailable, TTFTMs: 1500}
-	l.availability["nemotron-3-ultra-free"] = ProbeResult{
-		Model: "nemotron-3-ultra-free", State: StateAvailable, TTFTMs: 169766}
+	l.availability["nemotron-3.5-lightning-free"] = ProbeResult{
+		Model: "nemotron-3.5-lightning-free", State: StateAvailable, TTFTMs: 1500}
+	l.availability["space-bunny-free"] = ProbeResult{
+		Model: "space-bunny-free", State: StateAvailable, TTFTMs: 169766}
 	l.SetTTFTSource(func(model string) int64 {
-		if model == "nemotron-3-ultra-free" {
+		if model == "space-bunny-free" {
 			return 1305 // the median of its samples; the probe caught a queue
 		}
 		return 0
 	})
-	if got := l.nextCandidate(Needs{}, map[string]bool{}); got != "nemotron-3-ultra-free" {
+	if got := l.nextCandidate(Needs{}, map[string]bool{}); got != "space-bunny-free" {
 		t.Fatalf("next = %q, want the model the ring measured fast", got)
 	}
 }

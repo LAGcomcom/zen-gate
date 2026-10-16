@@ -77,7 +77,7 @@ func TestListModelsCarriesCapabilityMetadata(t *testing.T) {
 
 	// A live probe says the table's text-only nemotron takes images, on a
 	// window the curated table does not know about.
-	s.Store.SetModelTag("nemotron-3-ultra-free", store.ModelTag{
+	s.Store.SetModelTag("nemotron-3.5-lightning-free", store.ModelTag{
 		Vision: true, Source: store.TagSourceProbe,
 		ContextWindow: 200000, MaxOutput: 40000,
 	})
@@ -98,18 +98,18 @@ func TestListModelsCarriesCapabilityMetadata(t *testing.T) {
 	}
 
 	entries := listModels(t, s)
-	probe := entries["nemotron-3-ultra-free"]
+	probe := entries["nemotron-3.5-lightning-free"]
 	if probe == nil {
-		t.Fatal("nemotron-3-ultra-free missing from /v1/models")
+		t.Fatal("nemotron-3.5-lightning-free missing from /v1/models")
 	}
-	if got := numField(entries, "nemotron-3-ultra-free", "context_window"); got != 200000 {
+	if got := numField(entries, "nemotron-3.5-lightning-free", "context_window"); got != 200000 {
 		t.Errorf("probed context window = %d, want the 实测 number to beat the table's 128000", got)
 	}
-	if got := numField(entries, "nemotron-3-ultra-free", "max_output_tokens"); got != 40000 {
+	if got := numField(entries, "nemotron-3.5-lightning-free", "max_output_tokens"); got != 40000 {
 		t.Errorf("probed max_output_tokens = %d, want 40000", got)
 	}
-	if !hasString(modsOf(entries, "nemotron-3-ultra-free"), "image") {
-		t.Errorf("input_modalities = %v, want image from the probe verdict", modsOf(entries, "nemotron-3-ultra-free"))
+	if !hasString(modsOf(entries, "nemotron-3.5-lightning-free"), "image") {
+		t.Errorf("input_modalities = %v, want image from the probe verdict", modsOf(entries, "nemotron-3.5-lightning-free"))
 	}
 	if src, _ := probe["capability_source"].(string); src != store.TagSourceProbe {
 		t.Errorf("capability_source = %q, want %q so a client knows the verdict was measured", src, store.TagSourceProbe)
@@ -169,18 +169,18 @@ func TestEffortVariantsCarryTheParentMetadata(t *testing.T) {
 	s := newTestServer(t, laneUp)
 
 	entries := listModels(t, s)
-	parent := entries["nemotron-3-ultra-free"]
-	variant := entries["nemotron-3-ultra-free (deep)"]
+	parent := entries["nemotron-3.5-lightning-free"]
+	variant := entries["nemotron-3.5-lightning-free (deep)"]
 	if parent == nil || variant == nil {
 		t.Fatalf("missing entries: parent=%v variant=%v", parent != nil, variant != nil)
 	}
 	for _, field := range []string{"context_window", "max_output_tokens"} {
-		if numField(entries, "nemotron-3-ultra-free (deep)", field) != numField(entries, "nemotron-3-ultra-free", field) {
+		if numField(entries, "nemotron-3.5-lightning-free (deep)", field) != numField(entries, "nemotron-3.5-lightning-free", field) {
 			t.Errorf("%s = %v on the variant, want the parent's %v", field,
 				variant[field], parent[field])
 		}
 	}
-	if mods := modsOf(entries, "nemotron-3-ultra-free (deep)"); !hasString(mods, "text") {
+	if mods := modsOf(entries, "nemotron-3.5-lightning-free (deep)"); !hasString(mods, "text") {
 		t.Errorf("variant input_modalities = %v", mods)
 	}
 }
@@ -249,7 +249,7 @@ func TestStoredTagsSurviveRestartIntoTheLane(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	st.SetModelTag("nemotron-3-ultra-free", store.ModelTag{Audio: true, Source: store.TagSourceProbe})
+	st.SetModelTag("nemotron-3.5-lightning-free", store.ModelTag{Audio: true, Source: store.TagSourceProbe})
 
 	// Fresh process: new store handle, new lane.
 	st2, err := store.Open()
@@ -259,14 +259,14 @@ func TestStoredTagsSurviveRestartIntoTheLane(t *testing.T) {
 	l := lane.NewLane()
 	New(l, st2)
 	for _, m := range l.ServableModels() {
-		if m.ID == "nemotron-3-ultra-free" {
+		if m.ID == "nemotron-3.5-lightning-free" {
 			if !m.AudioInput {
 				t.Fatalf("after a restart the lane forgot the 实测 audio verdict: %+v", m)
 			}
 			return
 		}
 	}
-	t.Fatal("nemotron-3-ultra-free is not on the lane")
+	t.Fatal("nemotron-3.5-lightning-free is not on the lane")
 }
 
 // 能力实测 answers the three modality questions and nothing about capacities,

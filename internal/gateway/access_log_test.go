@@ -92,15 +92,15 @@ func TestAccessLineOnRejectedRequest(t *testing.T) {
 // Failovers are the case where per-attempt detail pays for itself: one access
 // line, but one upstream line per model actually tried.
 func TestUpstreamLinePerAttempt(t *testing.T) {
-	up := laneUpstreamByModel(t, map[string]bool{"nemotron-3-ultra-free": true})
+	up := laneUpstreamByModel(t, map[string]bool{"nemotron-3.5-lightning-free": true})
 	defer up.Close()
 	s := newTestServer(t, up)
 	l := wireLog(t, s)
 	l.SetCategories(map[string]bool{"access": true, "upstream": true})
 	s.Lane.MarkThrottled("mimo-v2.6-flash-free", 120)
-	s.Lane.MarkThrottled("mimo-v2.5-free", 120)
+	s.Lane.MarkThrottled("deepseek-v4.1-flash-free", 120)
 
-	resp := postChat(t, s, `{"model":"nemotron-3-ultra-free","stream":false,`+
+	resp := postChat(t, s, `{"model":"nemotron-3.5-lightning-free","stream":false,`+
 		`"messages":[{"role":"user","content":"hi"}]}`)
 	rid := resp.Header.Get("x-zen-gate-request-id")
 
@@ -108,7 +108,7 @@ func TestUpstreamLinePerAttempt(t *testing.T) {
 	if len(up1) != 2 {
 		t.Fatalf("upstream lines = %d, want 2 (refused model + failover): %+v", len(up1), up1)
 	}
-	if !strings.Contains(up1[0].Msg, "model=nemotron-3-ultra-free") ||
+	if !strings.Contains(up1[0].Msg, "model=nemotron-3.5-lightning-free") ||
 		!strings.Contains(up1[0].Msg, "RATE_LIMIT") {
 		t.Errorf("first upstream line %q, want the refused model and its error code", up1[0].Msg)
 	}
