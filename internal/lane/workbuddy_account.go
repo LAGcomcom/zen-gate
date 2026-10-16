@@ -76,7 +76,7 @@ func (l *Lane) wbPersistLocked() {
 // close to expiry before spending it, and on a credential refusal refreshes
 // once and retries — a rotated-but-unsaved pair would otherwise fail the turn
 // even though a valid refresh token is sitting right there.
-func (l *Lane) wbPost(ctx context.Context, body map[string]any, onData func(payload []byte) error) (*Usage, error) {
+func (l *Lane) wbPost(ctx context.Context, body map[string]any, conversationID string, onData func(payload []byte) error) (*Usage, error) {
 	acct, ok := l.workBuddyReady()
 	if !ok {
 		return nil, &UpstreamError{Code: CodeCredential, Message: "WorkBuddy 账号未登录或已停用"}
@@ -90,11 +90,11 @@ func (l *Lane) wbPost(ctx context.Context, body map[string]any, onData func(payl
 		// A failed proactive refresh is not fatal: the old token may still
 		// answer, and the 401 path below gets one more chance.
 	}
-	usage, err := PostWorkBuddyStreamed(ctx, body, acct, onData)
+	usage, err := PostWorkBuddyStreamed(ctx, body, acct, conversationID, onData)
 	if ue := asUpstream(err); ue != nil && ue.Code == CodeCredential {
 		if rerr := l.refreshWorkBuddy(ctx); rerr == nil {
 			if fresh, ok := l.workBuddyReady(); ok {
-				return PostWorkBuddyStreamed(ctx, body, fresh, onData)
+				return PostWorkBuddyStreamed(ctx, body, fresh, conversationID, onData)
 			}
 		}
 	}
@@ -237,9 +237,9 @@ func (l *Lane) WorkBuddyLoginPoll() (string, error) {
 		return "", fmt.Errorf("登录轮询返回 HTTP %d", httpStatus)
 	}
 	var payload struct {
-		Code    int             `json:"code"`
-		Msg     string          `json:"msg"`
-		Data    wbTokenResponse `json:"data"`
+		Code int             `json:"code"`
+		Msg  string          `json:"msg"`
+		Data wbTokenResponse `json:"data"`
 	}
 	if err := json.Unmarshal(body, &payload); err != nil {
 		return "", err
@@ -353,7 +353,7 @@ func (l *Lane) WorkBuddyDailyActivity(ctx context.Context) (bool, error) {
 		"max_tokens":       10,
 		"reasoning_effort": "none",
 	}
-	_, err := l.wbPost(ctx, body, func([]byte) error { return nil })
+	_, err := l.wbPost(ctx, body, "", func([]byte) error { return nil })
 	if ue := asUpstream(err); err != nil && (ue == nil || ue.Code != CodeQuota) {
 		// Transient trouble (transport, 5xx, refresh failure): leave the day
 		// open so the next hourly tick retries.
@@ -492,7 +492,7 @@ func (l *Lane) probeWorkBuddy(ctx context.Context, m ModelInfo) ProbeResult {
 	wbApplyModelQuirks(body, m.ID, "")
 	start := time.Now()
 	firstAt := int64(0)
-	_, err := l.wbPost(ctx, body, func([]byte) error {
+	_, err := l.wbPost(ctx, body, "", func([]byte) error {
 		if firstAt == 0 {
 			firstAt = atLeastMS(start)
 			res.TTFTMs = firstAt

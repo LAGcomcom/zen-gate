@@ -90,7 +90,7 @@ func TestPostWorkBuddyStreamedHappyPath(t *testing.T) {
 	t.Cleanup(func() { WorkBuddyBase = old })
 
 	var payloads []string
-	usage, err := PostWorkBuddyStreamed(context.Background(), map[string]any{}, wbAcct(), func(p []byte) error {
+	usage, err := PostWorkBuddyStreamed(context.Background(), map[string]any{}, wbAcct(), "", func(p []byte) error {
 		payloads = append(payloads, string(p))
 		return nil
 	})
@@ -154,7 +154,7 @@ func TestPostWorkBuddyStreamedSanitizesFingerprintsOn403(t *testing.T) {
 		{"role": "system", "content": "You are Claude Code. Main branch (you will usually use this for PRs). x-anthropic-billing-header: cc_entrypoint=cli"},
 		{"role": "user", "content": "hi"},
 	}}
-	_, err := PostWorkBuddyStreamed(context.Background(), body, wbAcct(), func([]byte) error { return nil })
+	_, err := PostWorkBuddyStreamed(context.Background(), body, wbAcct(), "", func([]byte) error { return nil })
 	if err != nil {
 		t.Fatalf("the sanitized retry must clear the WAF hit: %v", err)
 	}
@@ -208,7 +208,7 @@ func TestWBPostRefreshesOn401AndRetries(t *testing.T) {
 	l.SetWorkBuddyAccount(wbAcct())
 	l.SetWorkBuddyPersist(func(a WBAccount) { persisted <- a })
 
-	usage, err := l.wbPost(context.Background(), map[string]any{}, func([]byte) error { return nil })
+	usage, err := l.wbPost(context.Background(), map[string]any{}, "", func([]byte) error { return nil })
 	if err != nil {
 		t.Fatalf("wbPost: %v", err)
 	}
@@ -448,5 +448,87 @@ func TestWorkBuddyCreditsRefreshesOn401(t *testing.T) {
 	}
 	if lastAuth.Load() != "Bearer tok-2" {
 		t.Fatalf("retry rode %v, want the refreshed token", lastAuth.Load())
+	}
+}
+
+// The v2 gate fingerprints the envelope, not the body: /v2/chat/completions
+// answers 400 code 11128 "conversation id missing" unless X-Conversation-ID
+// and the B3 trace quartet ride along (found in the community's CodeBuddy
+// clients; measured against the live upstream 2026-10-16).
+func TestWBChatHeadersCarryTheConversationProtocol(t *testing.T) {
+	h := wbChatHeaders(wbAcct(), "req-1", "0123456789abcdef0123456789abcdef", "hy3")
+	if h["X-Conversation-ID"] != "0123456789abcdef0123456789abcdef" {
+		t.Errorf("X-Conversation-ID = %q", h["X-Conversation-ID"])
+	}
+	if h["X-Request-ID"] != "req-1" || h["X-Conversation-Request-ID"] != "req-1" ||
+		h["X-Conversation-Message-ID"] != "req-1" {
+		t.Errorf("request ids must agree: %+v", h)
+	}
+	if h["X-Model-ID"] != "hy3" {
+		t.Errorf("X-Model-ID = %q, want the model id", h["X-Model-ID"])
+	}
+	trace := h["X-Request-Trace-Id"]
+	if len(trace) != 32 {
+		t.Fatalf("trace id = %q, want 32 hex", trace)
+	}
+	if h["X-B3-TraceId"] != trace || h["X-B3-SpanId"] != trace[:16] ||
+		h["X-B3-ParentSpanId"] != trace[16:32] || h["X-B3-Sampled"] != "1" {
+		t.Errorf("B3 quartet inconsistent with the trace id: %+v", h)
+	}
+	if want := trace + "-" + trace[:16] + "-1-" + trace[16:32]; h["b3"] != want {
+		t.Errorf("b3 = %q, want %q", h["b3"], want)
+	}
+	// The account identity still rides along: the gate reads both.
+	if h["x-machine-id"] == "" || h["authorization"] != "Bearer tok-1" {
+		t.Errorf("identity headers lost: %+v", h)
+	}
+}
+
+// One conversation keeps one id (prompt cache); a fresh seed gets a fresh id,
+// and a seedless turn (a probe) never reuses one.
+func TestWBConversationIDIsStablePerConversation(t *testing.T) {
+	a := wbConversationID("conv-1")
+	if len(a) != 32 {
+		t.Fatalf("id = %q, want 32 hex", a)
+	}
+	if wbConversationID("conv-1") != a {
+		t.Error("the same conversation must keep one id for the upstream prompt cache")
+	}
+	if wbConversationID("conv-2") == a {
+		t.Error("different conversations must not share an id")
+	}
+	if wbConversationID("") == wbConversationID("") {
+		t.Error("a seedless turn must get a fresh id, not a shared one")
+	}
+}
+
+// The gate also refuses a turn whose first message is not a system prompt
+// (400 code 11128 "first message is not system prompt").
+func TestWBEnsureSystemFirstLeadsWithASystemMessage(t *testing.T) {
+	body := map[string]any{
+		"model":    "hy3",
+		"messages": []map[string]any{{"role": RoleUser, "content": "hi"}},
+	}
+	wbEnsureSystemFirst(body)
+	msgs, _ := body["messages"].([]map[string]any)
+	if len(msgs) != 2 || msgs[0]["role"] != RoleSystem {
+		t.Fatalf("messages = %+v, want a system message first", msgs)
+	}
+	if msgs[0]["content"] != wbSystemPreamble || msgs[1]["content"] != "hi" {
+		t.Errorf("caller content must survive: %+v", msgs)
+	}
+
+	// A caller that already leads with its own system prompt keeps it.
+	own := map[string]any{
+		"model": "hy3",
+		"messages": []map[string]any{
+			{"role": RoleSystem, "content": "You are a careful assistant."},
+			{"role": RoleUser, "content": "hi"},
+		},
+	}
+	wbEnsureSystemFirst(own)
+	got, _ := own["messages"].([]map[string]any)
+	if len(got) != 2 || got[0]["content"] != "You are a careful assistant." {
+		t.Errorf("an existing leading system prompt must not be replaced or duplicated: %+v", got)
 	}
 }
