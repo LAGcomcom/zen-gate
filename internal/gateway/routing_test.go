@@ -143,16 +143,17 @@ func TestProviderFallbackOffByDefault(t *testing.T) {
 
 func TestVisionAwareFailover(t *testing.T) {
 	// mimo* are parked; the requested nemotron refuses. Smart routing must
-	// skip the text-only ling and land on space-bunny (vision-capable).
+	// skip the text-only nemotron-lightning and land on space-bunny
+	// (vision-capable).
 	laneUp := laneUpstreamByModel(t, map[string]bool{
-		"nemotron-3-ultra-free": true,
+		"nemotron-3.5-lightning-free": true,
 	})
 	defer laneUp.Close()
 	s := newTestServer(t, laneUp)
 	s.Lane.MarkThrottled("mimo-v2.6-flash-free", 120)
-	s.Lane.MarkThrottled("mimo-v2.5-free", 120)
+	s.Lane.MarkThrottled("deepseek-v4.1-flash-free", 120)
 
-	body := `{"model":"nemotron-3-ultra-free","stream":false,"messages":[{"role":"user","content":[
+	body := `{"model":"nemotron-3.5-lightning-free","stream":false,"messages":[{"role":"user","content":[
 		{"type":"text","text":"这是什么"},
 		{"type":"image_url","image_url":{"url":"data:image/png;base64,iVBORw0KGgo="}}]}]}`
 	resp := postChat(t, s, body)
@@ -168,20 +169,22 @@ func TestSmartRoutingOffDropsModalityFilter(t *testing.T) {
 	// Same scenario with the master switch off: legacy behaviour picks the
 	// next catalog model regardless of the image in the request.
 	laneUp := laneUpstreamByModel(t, map[string]bool{
-		"nemotron-3-ultra-free": true,
+		"nemotron-3.5-lightning-free": true,
 	})
 	defer laneUp.Close()
 	s := newTestServer(t, laneUp)
 	s.Lane.SetSmartRouting(false)
 	s.Lane.MarkThrottled("mimo-v2.6-flash-free", 120)
-	s.Lane.MarkThrottled("mimo-v2.5-free", 120)
+	s.Lane.MarkThrottled("deepseek-v4.1-flash-free", 120)
 
-	body := `{"model":"nemotron-3-ultra-free","stream":false,"messages":[{"role":"user","content":[
+	body := `{"model":"nemotron-3.5-lightning-free","stream":false,"messages":[{"role":"user","content":[
 		{"type":"text","text":"这是什么"},
 		{"type":"image_url","image_url":{"url":"data:image/png;base64,iVBORw0KGgo="}}]}]}`
 	resp := postChat(t, s, body)
-	if got := resp.Header.Get("x-zen-gate-served-by"); got != "ling-3.0-flash-fin-free" {
-		t.Fatalf("legacy served-by = %q, want ling-3.0-flash-fin-free", got)
+	// Legacy ignores the modality filter, so the next roster member wins on
+	// catalog order alone (space-bunny sits ahead of nemotron-lightning).
+	if got := resp.Header.Get("x-zen-gate-served-by"); got != "space-bunny-free" {
+		t.Fatalf("legacy served-by = %q, want space-bunny-free", got)
 	}
 }
 

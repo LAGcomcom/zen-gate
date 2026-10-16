@@ -64,23 +64,42 @@ type capability struct {
 // actually accepted under a direct probe, not what a model card claims.
 // audio/file stay false until verified (a live probe or the AI tagger upgrades
 // them) — an unverified modality must never receive that modality's traffic.
+//
+// The 2026-10-15 rows (deepseek-v4.1-flash-free, ll-alpha-free,
+// nemotron-3.5-super-vl-free, glm-5.3-flash-free) are measured, not guessed:
+// each was probed against the live lane with the v2 fingerprint — context by
+// sweeping prompt sizes until the upstream refused, output by raising
+// max_tokens until it refused, vision by sending a 1×1 PNG. Context figures
+// are the largest accepted size rounded down to a sane boundary; where the
+// sweep was inconclusive (glm's large requests kept drawing transient 429s)
+// the row carries only what was actually proven.
 var capabilities = []capability{
 	{regexp.MustCompile(`^mimo.*v2\.6`), true, false, false, true, 1048576, 131072, false},
 	{regexp.MustCompile(`^mimo.*v2\.5`), true, false, false, true, 1048576, 131072, false},
 	{regexp.MustCompile(`^mimo`), true, false, false, true, 262144, 131072, true},
 	{regexp.MustCompile(`^muse.?spark`), true, false, false, true, 1048576, 943718, true},
 	{regexp.MustCompile(`^step`), false, false, false, true, 1000000, 64000, true},
+	{regexp.MustCompile(`^nemotron.*super.?vl`), true, false, false, true, 1048576, 262144, true},
 	{regexp.MustCompile(`^nemotron`), false, false, false, true, 128000, 32768, true},
 	{regexp.MustCompile(`^ling`), false, false, false, true, 262144, 32768, true},
 	{regexp.MustCompile(`^space.?bunny`), true, false, false, true, 1048576, 65536, true},
 	{regexp.MustCompile(`^union`), true, false, false, false, 262144, 131072, true},
+	{regexp.MustCompile(`^deepseek.*v4\.1`), true, false, false, true, 1048576, 262144, true},
 	{regexp.MustCompile(`^deepseek`), false, false, false, true, 1048576, 65536, true},
+	{regexp.MustCompile(`^ll.?alpha`), true, false, false, true, 1048576, 131072, true},
+	{regexp.MustCompile(`^glm`), false, false, false, true, 524288, 262144, true},
 	{regexp.MustCompile(`^longcat`), true, false, false, true, 1048576, 262144, true},
 	{regexp.MustCompile(`^fledge`), false, false, false, true, 131072, 32768, true},
 	{regexp.MustCompile(`^jev`), false, false, false, false, 32768, 4096, true},
 }
 
-var regionSensitiveRes = []*regexp.Regexp{regexp.MustCompile(`^muse.?spark`)}
+// regionSensitiveRes marks models a CN egress cannot reach: the upstream
+// answers RegionError rather than a quota refusal, and routing to them just
+// wastes a turn. beam-free refused from a CN probe on 2026-10-15.
+var regionSensitiveRes = []*regexp.Regexp{
+	regexp.MustCompile(`^muse.?spark`),
+	regexp.MustCompile(`^beam`),
+}
 
 var displayNames = map[string]string{
 	"mimo-v2.6-flash-free":            "MiMo V2.6 Flash",
@@ -89,10 +108,15 @@ var displayNames = map[string]string{
 	"muse-spark-1.2-contributor-free": "Muse Spark 1.2",
 	"nemotron-3-ultra-free":           "Nemotron 3 Ultra",
 	"nemotron-3.5-lightning-free":     "Nemotron 3.5 Lightning",
+	"nemotron-3.5-super-vl-free":      "Nemotron 3.5 Super VL",
 	"ling-3.0-flash-fin-free":         "Ling 3.0 Flash Fin",
 	"space-bunny-free":                "Space Bunny",
 	"union-alpha":                     "Union Alpha",
 	"deepseek-v4-flash-free":          "DeepSeek V4 Flash",
+	"deepseek-v4.1-flash-free":        "DeepSeek V4.1 Flash",
+	"ll-alpha-free":                   "LL Alpha",
+	"glm-5.3-flash-free":              "GLM 5.3 Flash",
+	"beam-free":                       "Beam",
 	"jev-1.13-free":                   "Jev 1.13",
 }
 
@@ -111,6 +135,11 @@ var blurbs = map[string]string{
 	"space-bunny-free":                "匿名 1M 上下文模型，OpenCode 用量榜第一（周 63T tokens）、社区口碑好，来头未公开。推荐 ★★★★☆",
 	"union-alpha":                     "r/opencode 社区常推的免费模型，综合约 GPT-4.5+ 水平。推荐 ★★★★",
 	"deepseek-v4-flash-free":          "DeepSeek V4 Flash：速度优先，首字快 40-60%、输出 ~214 tok/s，1M 上下文，官方称体验全面超越自家 Pro，综合对位 GPT-5 级。推荐 ★★★★★（速度之王）",
+	"deepseek-v4.1-flash-free":        "DeepSeek V4.1 Flash：10-15 天下架的新旗舰，实测 1M+ 上下文、256K 输出上限、接受图片输入，是目前免费车道里上下文与输出都给得最大方的模型之一。推荐 ★★★★★（长文档 / 大输出一首选）",
+	"ll-alpha-free":                   "来路不明的免费模型，实测 1M 上下文、128K 输出、接受图片；能力未标定，先按 GPT-4.5~5 之间试水。推荐 ★★★（尝鲜）",
+	"nemotron-3.5-super-vl-free":      "NVIDIA 的多模态加强版（VL = Vision-Language）：实测 1M 上下文、256K 输出、接受图片，看图与长文档都能吃。推荐 ★★★★（多模态性价比）",
+	"glm-5.3-flash-free":              "智谱 GLM 5.3 Flash 轻量版，实测 256K 输出上限；实测期间上游间歇性返回 429（Endpoint unavailable），可用性波动较大。推荐 ★★★（看状态再用）",
+	"beam-free":                       "新上架模型，但 CN 出口直接被上游地区门拦下（RegionError），只有海外出口才用得上。推荐 ★★（有海外出口再开）",
 	"longcat-2.5-preview-free":        "美团 LongCat 2.5 预览：万亿级动态稀疏 MoE、百万上下文，国产算力全流程训练。推荐 ★★★★",
 	"fledge-alpha-free":               "新上架的神秘面孔，社区评价还少；先按 GPT-4.5 级试水。推荐 ★★★（尝鲜）",
 	"jev-1.13-free":                   "TypeSafe AI 的 System One 判定模型：只答 choice/score/noul 三类结构化决策，不做内容生成，给 Agent 当意图/情绪判定层。推荐 ★★（别拿来聊天）",
@@ -200,11 +229,15 @@ func BuildCatalog(ids []string) []ModelInfo {
 	return entries
 }
 
-// FallbackCatalogIDs covers a cold start with no network.
+// FallbackCatalogIDs covers a cold start with no network. Mirrors the live
+// free roster as of 2026-10-15 (mimo-v2.5 / ling-3.0-flash-fin / nemotron-3-ultra
+// / deepseek-v4-flash have since left the upstream listing).
 var FallbackCatalogIDs = []string{
-	"mimo-v2.6-flash-free", "mimo-v2.5-free", "ling-3.0-flash-fin-free",
-	"nemotron-3-ultra-free", "nemotron-3.5-lightning-free", "space-bunny-free",
+	"mimo-v2.6-flash-free", "deepseek-v4.1-flash-free", "space-bunny-free",
+	"nemotron-3.5-lightning-free", "nemotron-3.5-super-vl-free",
+	"ll-alpha-free", "glm-5.3-flash-free", "longcat-2.5-preview-free",
 	"muse-spark-1.3-contributor-free", "muse-spark-1.2-contributor-free",
+	"union-alpha", "beam-free", "jev-1.13-free",
 }
 
 // ListingMeta is one upstream model row: its id plus whatever the provider
