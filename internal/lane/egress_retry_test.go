@@ -13,14 +13,19 @@ import (
 // real install: one stalled exit produced a 217-second request ending in
 // TRANSPORT, for a model that answered in ~15s through other exits.
 func TestEgressRetryableCoversExitShapedFailures(t *testing.T) {
-	for _, code := range []string{CodeQuota, CodeTransport, CodeServer, CodeTimeout, CodeReset} {
+	for _, code := range []string{CodeQuota, CodeRegion, CodeTransport, CodeServer, CodeTimeout, CodeReset} {
 		if !egressRetryable(code) {
 			t.Errorf("egressRetryable(%s) = false, want true — this failure is about the exit", code)
 		}
 	}
-	// Not exit-shaped: a region block is deterministic, an aborted request is the
-	// caller's own cancellation, and empty is a content verdict.
-	for _, code := range []string{CodeRegion, CodeAborted, CodeEmpty, ""} {
+	// Not exit-shaped: an aborted request is the caller's own cancellation and
+	// empty is a content verdict. A region block USED to be listed here as
+	// "deterministic"; it is not. The refusal says "not available in your
+	// country" — a verdict on the exit IP — and on a mixed pool the same model
+	// answered 200 at 14:28:57 and REGION_BLOCKED at 14:31:10 with only the exit
+	// changed (then 6/6 200 on the next burst). Retrying through another exit is
+	// exactly the lever that turns that 403 back into a 200.
+	for _, code := range []string{CodeAborted, CodeEmpty, ""} {
 		if egressRetryable(code) {
 			t.Errorf("egressRetryable(%s) = true, want false", code)
 		}
