@@ -730,6 +730,15 @@ func (s *Server) commitSettings(next *store.Config, dirty map[string]bool) {
 		if dirty["openRefEnabled"] {
 			c.OpenRefEnabled = next.OpenRefEnabled
 		}
+		// The WorkBuddy switch needs its own branch: the handler sets
+		// cfg.WorkBuddy.Enabled and marks the field dirty, so without this the
+		// dashboard answered {"changed":true} and the next boot read the old
+		// value back — a toggle that only looked like it worked. Only Enabled
+		// is copied: the persisted credential must never be replaced by the
+		// masked copy the settings snapshot carries.
+		if dirty["workBuddyEnabled"] {
+			c.WorkBuddy.Enabled = next.WorkBuddy.Enabled
+		}
 		if dirty["allowLan"] {
 			c.AllowLan = next.AllowLan
 		}
