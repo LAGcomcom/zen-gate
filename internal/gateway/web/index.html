@@ -1146,8 +1146,36 @@ async function renderQoderCard(){
     '</div>';
 }
 
+async function renderCodeartsCard(){
+  const st = await fetch("/admin/api/codearts/status").then(r=>r.json()).catch(()=>null);
+  const stateEl = $("#ca-state"), body = $("#ca-body");
+  if(!stateEl || !body) return;
+  const loginEl = $("#ca-login");
+  if(loginEl) loginEl.href = (st && st.loginUrl) || "http://127.0.0.1:8096/";
+  if(!st || !st.running){
+    stateEl.textContent = "未运行";
+    body.innerHTML = '内置 CodeArts 网关没有启动——通常是 8096 端口被其他 codearts2api 实例占用' +
+      '（关掉那个实例并重启 zen-gate 即可）。';
+    return;
+  }
+  if(!st.loggedIn){
+    stateEl.textContent = "未登录";
+    body.innerHTML = '网关在线但还没有华为云账号（'+ (st.detail||'未登录') +'）。' +
+      '点下面的「授权登录」完成一次华为云 OAuth，账号文件落在 zen-gate 数据目录里，重启不丢。' +
+      (st.loginUrl ? ' 也可以直接打开 <a href="'+st.loginUrl+'" target="_blank">内置登录页</a>。' : '');
+    return;
+  }
+  stateEl.textContent = "已登录 · " + (st.models||[]).length + " 个模型";
+  body.innerHTML = '模型已进入所有 Agent 选择器（<code>codearts/模型名</code>）。' +
+    (st.accounts>1 ? '当前账号池 ' + st.accounts + ' 个，自动轮转与续期。' : '令牌自动续期，签到积分自动领取。') +
+    '<div style="margin-top:6px;display:flex;flex-wrap:wrap;gap:4px">' +
+    (st.models||[]).map(m=>'<span class="badge">'+m.replace(/^codearts\//,'')+'</span>').join('') +
+    '</div>';
+}
+
 function renderProviders(s){
   renderQoderCard();
+  renderCodeartsCard();
   const el = $("#page-providers");
   if(!el.dataset.rendered){
     el.innerHTML = `
@@ -1155,6 +1183,13 @@ function renderProviders(s){
       <div class="card" id="qoder-card">
         <h3>Qoder 账号渠道 <span class="muted" style="font-size:11px" id="qoder-state"></span></h3>
         <div class="muted" style="font-size:12px; line-height:1.7" id="qoder-body"></div>
+      </div>
+      <div class="card" id="ca-card">
+        <h3>CodeArts 账号渠道（华为云） <span class="muted" style="font-size:11px" id="ca-state"></span></h3>
+        <div class="muted" style="font-size:12px; line-height:1.7" id="ca-body">加载中…</div>
+        <div style="margin-top:8px; display:flex; gap:8px; flex-wrap:wrap; align-items:center">
+          <a class="act" id="ca-login" href="#" target="_blank" style="text-decoration:none">授权登录</a>
+        </div>
       </div>
       <div class="card" id="wb-card">
         <h3>WorkBuddy 账号渠道（国际版） <span class="muted" style="font-size:11px" id="wb-state"></span></h3>

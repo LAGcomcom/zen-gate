@@ -19,6 +19,7 @@ import (
 
 	"zen-gate/internal/agents"
 	"zen-gate/internal/announce"
+	"zen-gate/internal/codeartshub"
 	"zen-gate/internal/autotag"
 	"zen-gate/internal/gateway"
 	"zen-gate/internal/lane"
@@ -293,6 +294,16 @@ func main() {
 	} else {
 		logger.Infof("内置 Qoder 网关就绪 (127.0.0.1:8095)")
 	}
+
+	// Embedded CodeArts2API gateway (CodeArts 账号渠道): same arrangement on
+	// 127.0.0.1:8096. Accounts, pool state and the conversation map live under
+	// the zen-gate data directory, so a reinstall never loses a login.
+	codeartsHub, codeartsHubErr := codeartshub.Start(st.Home)
+	if codeartsHubErr != nil {
+		logger.Infof("内置 CodeArts 网关未启动: %v", codeartsHubErr)
+	} else {
+		logger.Infof("内置 CodeArts 网关就绪 (127.0.0.1:8096)")
+	}
 	if lan := gw.LANBaseURL(); lan != "" {
 		logger.Infof("局域网 API 可用: %s", lan)
 	}
@@ -438,6 +449,7 @@ func main() {
 		gw.Stop()
 		mgr.Stop()
 		qoderHub.Stop()
+	codeartsHub.Stop()
 		_ = st.FlushStats()
 		return
 	}
@@ -460,6 +472,7 @@ func main() {
 				gw.Stop()
 				mgr.Stop() // before os.Exit — the deferred path never runs here
 				qoderHub.Stop()
+	codeartsHub.Stop()
 				_ = st.FlushStats()
 				os.Exit(0)
 			},
@@ -505,6 +518,7 @@ func main() {
 	gw.Stop()
 	mgr.Stop()
 	qoderHub.Stop()
+	codeartsHub.Stop()
 	_ = st.FlushStats()
 	logger.Infof("zen-gate 已退出")
 }
