@@ -2,7 +2,10 @@ package gateway
 
 import (
 	"context"
+	"encoding/json"
+	"io"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -55,15 +58,58 @@ func (s *Server) adminWorkBuddyStatus(w http.ResponseWriter, r *http.Request) {
 		"nickname":         acct.Nickname,
 		"expiresAtMs":      acct.ExpiresAtMS,
 		"lastActivityDate": acct.LastActivityDate,
-		"credits":          credits,
-		"detail":           detail,
+		"lastCheckinDate":  acct.LastCheckinDate,
+		"realm":            acct.Realm,
+		// canCheckin is the card's cue to show the 签到 button: only the CN
+		// publishment publishes the endpoint, and only for non-enterprise
+		// accounts. False never hides a button that would have worked — the
+		// lane re-checks on the click itself.
+		"canCheckin": acct.Realm == lane.WBRealmCN && acct.AccessToken != "",
+		"credits": credits,
+		"detail":  detail,
 	})
 }
 
+// adminWorkBuddyCheckin runs the CN daily checkin on demand. The scheduler
+// claims it once a day on its own; this is the "did it actually land?" button.
+func (s *Server) adminWorkBuddyCheckin(w http.ResponseWriter) {
+	ran, err := s.Lane.WorkBuddyDailyCheckin(context.Background())
+	if err != nil {
+		writeJSON(w, 502, map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
+	if !ran {
+		// Either not logged in, not a CN account, or already claimed today.
+		writeJSON(w, 200, map[string]any{"ok": true, "skipped": true})
+		return
+	}
+	if s.logger != nil {
+		s.logger.Infof("WorkBuddy 国内版每日签到已完成")
+	}
+	writeJSON(w, 200, map[string]any{"ok": true})
+}
+
 // adminWorkBuddyLoginStart mints a login state and hands the auth URL back;
-// the card opens it in a new tab and starts polling.
-func (s *Server) adminWorkBuddyLoginStart(w http.ResponseWriter) {
-	authURL, err := s.Lane.WorkBuddyLoginStart()
+// the card opens it in a new tab and starts polling. ?realm=cn opens the
+// login against the CN publishment instead — the two do not share a login
+// state, so the choice has to be made before the browser is sent anywhere.
+// the card posts it (api() sends a JSON body); both accepted so the endpoint
+// does not care which way the caller talks.
+func (s *Server) adminWorkBuddyLoginStart(w http.ResponseWriter, r *http.Request) {
+	realm := strings.TrimSpace(r.URL.Query().Get("realm"))
+	if realm == "" {
+		var in struct {
+			Realm string `json:"realm"`
+		}
+		if data, err := io.ReadAll(io.LimitReader(r.Body, 1<<20)); err == nil {
+			_ = json.Unmarshal(data, &in)
+		}
+		realm = strings.TrimSpace(in.Realm)
+	}
+	if realm != lane.WBRealmCN {
+		realm = lane.WBRealmIntl
+	}
+	authURL, err := s.Lane.WorkBuddyLoginStart(realm)
 	if err != nil {
 		writeJSON(w, 502, map[string]any{"ok": false, "error": err.Error()})
 		return
@@ -74,7 +120,11 @@ func (s *Server) adminWorkBuddyLoginStart(w http.ResponseWriter) {
 	// mechanism as the tray's 打开管理页.
 	tray.Open(authURL)
 	if s.logger != nil {
-		s.logger.Infof("WorkBuddy 登录已开始，授权页已在默认浏览器打开")
+		if realm == lane.WBRealmCN {
+			s.logger.Infof("WorkBuddy 国内版登录已开始，授权页已在默认浏览器打开")
+		} else {
+			s.logger.Infof("WorkBuddy 登录已开始，授权页已在默认浏览器打开")
+		}
 	}
 	writeJSON(w, 200, map[string]any{"ok": true, "authUrl": authURL})
 }

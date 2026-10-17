@@ -243,23 +243,29 @@ func main() {
 	ln.OnChange = syncEndpoints
 	gw.SetModelsSync(syncEndpoints)
 	ln.StartLoops(ctx, time.Duration(cfg.ProbeIntervalMinutes)*time.Minute)
-	// WorkBuddy 每日活跃：本地日历日一次，用免费模型发一条极小对话领取活跃
-	// 积分。启动 90s 后先查一次（覆盖"当天已登录"的场景），之后每小时补查；
-	// 已完成/未登录的检查是纯日期比较，重复触发没有成本。
+	// WorkBuddy 每日任务：本地日历日一次，按版本各走各的路 —— 国际版用免费
+	// 模型发一条极小对话领活跃积分，国内版直接调 daily-checkin 签到（国际版
+	// 没有这个端点）。启动 90s 后先查一次（覆盖"当天已登录"的场景），之后每
+	// 小时补查；已完成/未登录的判断是纯日期比较，重复触发没有成本。
 	go func() {
 		time.Sleep(90 * time.Second)
-		runWBActivity := func() {
-			ran, err := ln.WorkBuddyDailyActivity(ctx)
-			if !ran {
-				return
+		runWBDaily := func() {
+			if ran, err := ln.WorkBuddyDailyActivity(ctx); ran {
+				if err != nil {
+					logger.Infof("WorkBuddy 每日活跃未完成（下个小时重试）: %v", err)
+				} else {
+					logger.Infof("WorkBuddy 每日活跃已完成")
+				}
 			}
-			if err != nil {
-				logger.Infof("WorkBuddy 每日活跃未完成（下个小时重试）: %v", err)
-				return
+			if ran, err := ln.WorkBuddyDailyCheckin(ctx); ran {
+				if err != nil {
+					logger.Infof("WorkBuddy 国内版签到未完成（下个小时重试）: %v", err)
+				} else {
+					logger.Infof("WorkBuddy 国内版每日签到已完成")
+				}
 			}
-			logger.Infof("WorkBuddy 每日活跃已完成")
 		}
-		runWBActivity()
+		runWBDaily()
 		t := time.NewTicker(time.Hour)
 		defer t.Stop()
 		for {
@@ -267,7 +273,7 @@ func main() {
 			case <-ctx.Done():
 				return
 			case <-t.C:
-				runWBActivity()
+				runWBDaily()
 			}
 		}
 	}()

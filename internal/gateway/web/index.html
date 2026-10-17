@@ -1239,10 +1239,15 @@ function renderProviders(s){
         </div>
       </div>
       <div class="card" id="wb-card">
-        <h3>WorkBuddy 账号渠道（国际版） <span class="muted" style="font-size:11px" id="wb-state"></span></h3>
+        <h3>WorkBuddy 账号渠道 <span class="muted" style="font-size:11px" id="wb-state"></span></h3>
         <div class="muted" style="font-size:12px; line-height:1.7" id="wb-body">加载中…</div>
         <div style="margin-top:8px; display:flex; gap:8px; flex-wrap:wrap; align-items:center">
+          <select id="wb-realm" style="font-size:12px; padding:4px 6px">
+            <option value="intl">国际版 workbuddy.ai</option>
+            <option value="cn">国内版 codebuddy.cn</option>
+          </select>
           <button class="act" id="wb-login">授权登录</button>
+          <button class="ghost" id="wb-checkin" style="display:none">立即签到</button>
           <button class="ghost" id="wb-logout">退出登录</button>
           <button class="act off" id="tg-workbuddy">关闭</button>
         </div>
@@ -1397,15 +1402,24 @@ async function renderWorkBuddyCard(){
   setToggle("#tg-workbuddy", !!st.enabled);
   const lg = $("#wb-logout");
   if(lg) lg.style.display = st.loggedIn ? "" : "none";
+  const realmSel = $("#wb-realm");
+  if(realmSel) realmSel.style.display = st.loggedIn ? "none" : "";
+  const ck = $("#wb-checkin");
+  if(ck) ck.style.display = st.canCheckin ? "" : "none";
   if(!st.loggedIn){
     state.textContent = "未登录";
-    body.innerHTML = '用 WorkBuddy（www.workbuddy.ai）账号授权后，三个免费模型（hy4-preview-f / hy3 / deepseek-v4.1-flash）直接进入「模型」页和所有 Agent 选择器，每日自动活跃领取积分。免费模型走 24h 窗口限量；提示词可能被上游记录，别交机密内容。';
+    body.innerHTML = '用 WorkBuddy / CodeBuddy 账号授权后，免费模型（hy4-preview-f / hy3 / deepseek-v4.1-flash）直接进入「模型」页和所有 Agent 选择器。国际版每日自动发一条极小对话领活跃积分，国内版每日自动签到。免费模型走 24h 窗口限量；提示词可能被上游记录，别交机密内容。';
     return;
   }
   state.textContent = st.enabled ? "已启用" : "已停用";
   const exp = st.expiresAtMs ? new Date(st.expiresAtMs).toLocaleString() : "未知";
-  body.innerHTML = '账号 <b>' + (st.nickname || st.uid || "-") + '</b> · 登录有效期至 ' + exp +
-    ' · 积分 <b>' + (st.credits === "" ? "—" : st.credits) + '</b> · 上次活跃 ' + (st.lastActivityDate || "—") +
+  const realmLabel = st.realm === "cn" ? "国内版 codebuddy.cn" : "国际版 workbuddy.ai";
+  const dailyLabel = st.realm === "cn"
+    ? ' · 上次签到 ' + (st.lastCheckinDate || "—")
+    : ' · 上次活跃 ' + (st.lastActivityDate || "—");
+  body.innerHTML = '账号 <b>' + (st.nickname || st.uid || "-") + '</b> · ' + realmLabel +
+    ' · 登录有效期至 ' + exp +
+    ' · 积分 <b>' + (st.credits === "" ? "—" : st.credits) + '</b>' + dailyLabel +
     (st.detail ? '<br><span style="color:#c88">' + st.detail + '</span>' : '');
 }
 function bindWorkBuddyCard(){
@@ -1415,7 +1429,8 @@ function bindWorkBuddyCard(){
   $("#wb-login").onclick = async () => {
     const b = $("#wb-login");
     b.disabled = true;
-    const j = await api("/workbuddy/login/start", {});
+    const realm = ($("#wb-realm") && $("#wb-realm").value) || "intl";
+    const j = await api("/workbuddy/login/start", { realm });
     b.disabled = false;
     if (!j || !j.authUrl) return;
     // 服务端已用系统默认浏览器打开授权页（复用你已有的 workbuddy.ai 登录态）；
@@ -1440,6 +1455,15 @@ function bindWorkBuddyCard(){
         renderWorkBuddyCard();
       }
     }, 2000);
+  };
+  $("#wb-checkin").onclick = async () => {
+    const b = $("#wb-checkin");
+    b.disabled = true;
+    const j = await api("/workbuddy/checkin", {});
+    b.disabled = false;
+    if (!j) { renderWorkBuddyCard(); return; }
+    toast(j.skipped ? "今日已签到（每日一次）" : "国内版每日签到已完成");
+    renderWorkBuddyCard();
   };
   $("#wb-logout").onclick = async () => {
     const j = await api("/workbuddy/logout", {});
