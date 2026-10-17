@@ -675,7 +675,7 @@ func errorStatus(e *lane.UpstreamError) int {
 	switch e.Code {
 	case lane.CodeQuota:
 		return 429
-	case lane.CodeRegion:
+	case lane.CodeRegion, lane.CodeFreeTier:
 		return 403
 	case lane.CodeCredential:
 		return 401
@@ -694,7 +694,7 @@ func errorType(e *lane.UpstreamError) string {
 	switch e.Code {
 	case lane.CodeQuota:
 		return "rate_limit_error"
-	case lane.CodeRegion, lane.CodeCredential:
+	case lane.CodeRegion, lane.CodeFreeTier, lane.CodeCredential:
 		return "authentication_error"
 	case lane.CodeClient:
 		return "invalid_request_error"

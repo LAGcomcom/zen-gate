@@ -55,13 +55,17 @@ func ClassifyFailure(status int, payload string, retryAfterSec int) *UpstreamErr
 	case freeTierRe.MatchString(payload):
 		// The lane-wide free-tier gate, not this caller's credential: it is
 		// answered before the key is looked at (an invalid key draws the same
-		// document) and hits every model at once. Filing it as
-		// CodeCredential told the client "your key is wrong" and stopped
-		// failover dead, so an upstream gate change surfaced as a hard 401
-		// with no route out (ZCode: "Provider authentication failed"). As a
-		// region-shaped lane verdict it now fails over — another exit first,
-		// then the Kilo pool / user providers when the lane has nothing left.
-		e.Code = CodeRegion
+		// document) and hits every model at once. Filing it as CodeCredential
+		// told the client "your key is wrong" and stopped failover dead, so an
+		// upstream gate change surfaced as a hard 401 with no route out (ZCode:
+		// "Provider authentication failed").
+		//
+		// Its own code, not CodeRegion: both are switchable (which is what lets
+		// the turn fall through to the Kilo pool), but a region block is an
+		// exit verdict worth retrying on another exit, while this gate answers
+		// identically on every exit — retrying them would only spend the
+		// budget before reaching the fallback.
+		e.Code = CodeFreeTier
 		e.Unavailable = true
 	case regionRe.MatchString(payload):
 		e.Code = CodeRegion

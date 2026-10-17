@@ -765,14 +765,22 @@ func TestBuildKiloCatalog(t *testing.T) {
 func TestFreeTierErrorIsALaneVerdictNotACredentialOne(t *testing.T) {
 	body := `{"type":"error","error":{"type":"FreeTierError","message":"OpenCode's free tier can only be used from within OpenCode. Download it at https://opencode.ai and keep building."}}`
 	ue := ClassifyFailure(403, body, 0)
-	if ue.Code != CodeRegion {
-		t.Fatalf("FreeTierError classified as %s, want REGION_BLOCKED (a switchable lane verdict)", ue.Code)
+	if ue.Code != CodeFreeTier {
+		t.Fatalf("FreeTierError classified as %s, want FREE_TIER_BLOCKED", ue.Code)
 	}
 	if !ue.Unavailable {
 		t.Error("a gate refusal marks the model unavailable for this exit")
 	}
+	// Switchable: the turn must be able to fall through to the Kilo pool
+	// instead of surfacing as a 401 to the client.
 	if !switchableFailure(ue) {
 		t.Fatal("the lane must be allowed to fail over past a free-tier gate refusal")
+	}
+	// NOT egress-retryable: unlike a region block (a verdict about the exit
+	// IP's country), this gate answers identically on every exit, so retrying
+	// them only spends the budget before the fallback is reached.
+	if egressRetryable(ue.Code) {
+		t.Fatal("a free-tier gate refusal must not spend the budget retrying exits")
 	}
 	// A genuine credential refusal must still read as one: this change must not
 	// turn "your key is wrong" into a silent failover.

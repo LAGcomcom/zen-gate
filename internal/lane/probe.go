@@ -137,7 +137,7 @@ func probeModelInner(ctx context.Context, m ModelInfo) ProbeResult {
 			ue = &UpstreamError{Code: CodeTransport, Message: err.Error()}
 		}
 		switch ue.Code {
-		case CodeRegion:
+		case CodeRegion, CodeFreeTier:
 			res.State = StateRegionBlock
 		case CodeQuota:
 			res.State = StateThrottled
@@ -228,7 +228,7 @@ func probeSystemOne(ctx context.Context, m ModelInfo, res ProbeResult) ProbeResu
 			ue = &UpstreamError{Code: CodeTransport, Message: err.Error()}
 		}
 		switch ue.Code {
-		case CodeRegion:
+		case CodeRegion, CodeFreeTier:
 			res.State = StateRegionBlock
 		case CodeQuota:
 			res.State = StateThrottled
