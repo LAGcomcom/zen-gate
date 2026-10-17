@@ -306,6 +306,53 @@ func TestWorkBuddyDailyActivityRunsOncePerDay(t *testing.T) {
 	}
 }
 
+// The daily claim has to look like a chat turn on the wire: the gate's
+// content checks never see an empty X-Conversation-ID or a hand-written
+// reasoning_effort from real traffic, and answering those with CLIENT_ERROR
+// every hour was issue #85.
+func TestWorkBuddyDailyActivityUsesTheChatEnvelope(t *testing.T) {
+	var convID, modelHeader string
+	var payload struct {
+		ReasoningEffort string         `json:"reasoning_effort"`
+		Thinking        map[string]any `json:"thinking"`
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		convID = r.Header.Get("X-Conversation-ID")
+		modelHeader = r.Header.Get("X-Model-ID")
+		data, _ := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+		_ = json.Unmarshal(data, &payload)
+		w.Header().Set("content-type", "text/event-stream")
+		fmt.Fprint(w, wbChatSSE(`{"choices":[{"delta":{},"finish_reason":"stop"}]}`))
+	}))
+	defer srv.Close()
+	old := WorkBuddyBase
+	WorkBuddyBase = srv.URL
+	t.Cleanup(func() { WorkBuddyBase = old })
+
+	l := NewLane()
+	l.SetWorkBuddyAccount(wbAcct())
+	l.SetWorkBuddyPersist(func(WBAccount) {})
+
+	if ran, err := l.WorkBuddyDailyActivity(context.Background()); err != nil || !ran {
+		t.Fatalf("run = (%v, %v)", ran, err)
+	}
+	if len(convID) != 32 {
+		t.Fatalf("X-Conversation-ID = %q, want a 32-hex envelope like a chat turn sends", convID)
+	}
+	if _, err := hex.DecodeString(convID); err != nil {
+		t.Fatalf("X-Conversation-ID = %q, not hex: %v", convID, err)
+	}
+	if modelHeader != "deepseek-v4.1-flash" {
+		t.Fatalf("X-Model-ID = %q", modelHeader)
+	}
+	if payload.ReasoningEffort != "low" {
+		t.Fatalf("reasoning_effort = %q, want the light rung mapped through the model quirks", payload.ReasoningEffort)
+	}
+	if payload.Thinking["type"] != "enabled" {
+		t.Fatalf("thinking = %v, want the deepseek thinking switch on", payload.Thinking)
+	}
+}
+
 func TestWorkBuddyDailyActivitySpentWindowClosesTheDay(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(429)
