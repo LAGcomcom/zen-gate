@@ -346,14 +346,18 @@ func (l *Lane) WorkBuddyDailyActivity(ctx context.Context) (bool, error) {
 		return false, nil
 	}
 	body := map[string]any{
-		"model":            "deepseek-v4.1-flash",
-		"stream":           true,
-		"stream_options":   map[string]any{"include_usage": true},
-		"messages":         []map[string]any{{"role": RoleUser, "content": "Hi"}},
-		"max_tokens":       10,
-		"reasoning_effort": "none",
+		"model":      "deepseek-v4.1-flash",
+		"stream":     true,
+		"messages":   []map[string]any{{"role": RoleUser, "content": "Hi"}},
+		"max_tokens": 10,
 	}
-	_, err := l.wbPost(ctx, body, "", func([]byte) error { return nil })
+	// Ride the same envelope and model quirks as a chat turn (issue #85): a
+	// bare conversation id of "" and a hand-written reasoning_effort are both
+	// shapes the gate never sees from real traffic, and every hourly retry
+	// answered CLIENT_ERROR because of it. "light" keeps the forced deepseek
+	// thinking at its cheapest rung.
+	wbApplyModelQuirks(body, "deepseek-v4.1-flash", "light")
+	_, err := l.wbPost(ctx, body, wbConversationID("wb-daily-activity"), func([]byte) error { return nil })
 	if ue := asUpstream(err); err != nil && (ue == nil || ue.Code != CodeQuota) {
 		// Transient trouble (transport, 5xx, refresh failure): leave the day
 		// open so the next hourly tick retries.
