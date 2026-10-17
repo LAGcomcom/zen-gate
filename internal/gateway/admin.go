@@ -113,6 +113,8 @@ func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request, rest string
 		s.adminAgent(w, r, strings.TrimPrefix(rest, "agent/"))
 	case rest == "qoder/status" && r.Method == http.MethodGet:
 		s.adminQoderStatus(w, r)
+	case rest == "codearts/status" && r.Method == http.MethodGet:
+		s.adminCodeartsStatus(w, r)
 	case rest == "workbuddy/status" && r.Method == http.MethodGet:
 		s.adminWorkBuddyStatus(w, r)
 	case rest == "workbuddy/login/start" && r.Method == http.MethodPost:
