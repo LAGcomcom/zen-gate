@@ -24,6 +24,11 @@ var (
 	quotaRe    = regexp.MustCompile(`(?i)FreeUsageLimitError|usage limit|rate limit`)
 	modelErrRe = regexp.MustCompile(`(?i)ModelError|model is unavailable|model is not supported|not supported|Endpoint is unavailable`)
 	htmlPageRe = regexp.MustCompile(`(?i)^\s*<(!doctype|html[\s>])`)
+	// freeTierRe is the free-tier gate refusing the whole lane: "OpenCode's
+	// free tier can only be used from within OpenCode". It is answered before
+	// the credential is consulted — an invalid key draws the identical
+	// document — and it lands on every model at once.
+	freeTierRe = regexp.MustCompile(`(?i)FreeTierError|free tier can only be used`)
 )
 
 // isHTMLPage reports whether an upstream failure body is a front proxy's HTML
@@ -47,6 +52,17 @@ const htmlPageHint = "the gateway's front proxy answered with an HTML error page
 func ClassifyFailure(status int, payload string, retryAfterSec int) *UpstreamError {
 	e := &UpstreamError{Message: truncate(payload, 300), RetryAfter: retryAfterSec}
 	switch {
+	case freeTierRe.MatchString(payload):
+		// The lane-wide free-tier gate, not this caller's credential: it is
+		// answered before the key is looked at (an invalid key draws the same
+		// document) and hits every model at once. Filing it as
+		// CodeCredential told the client "your key is wrong" and stopped
+		// failover dead, so an upstream gate change surfaced as a hard 401
+		// with no route out (ZCode: "Provider authentication failed"). As a
+		// region-shaped lane verdict it now fails over — another exit first,
+		// then the Kilo pool / user providers when the lane has nothing left.
+		e.Code = CodeRegion
+		e.Unavailable = true
 	case regionRe.MatchString(payload):
 		e.Code = CodeRegion
 	case status == 429 || quotaRe.MatchString(payload):
