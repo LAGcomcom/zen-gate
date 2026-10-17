@@ -992,7 +992,9 @@ func (l *Lane) attemptModel(ctx context.Context, req Request, model, effort stri
 	requestID := RequestIdFor(session, req.TurnSeed)
 	post := func(cctx context.Context, body map[string]any, onData func(payload []byte) error) (*Usage, error) {
 		if wb {
-			return l.wbPost(cctx, body, onData)
+			// One downstream conversation keeps one upstream conversation id
+			// (prompt cache), and the gate sees the id it fingerprints for.
+			return l.wbPost(cctx, body, wbConversationID(req.SessionSeed), onData)
 		}
 		if kilo {
 			return PostKiloStreamed(cctx, body, onData)

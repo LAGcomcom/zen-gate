@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/md5"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -57,11 +58,11 @@ const (
 	wbOrigin     = "https://www.workbuddy.ai"
 	wbDomain     = "www.workbuddy.ai"
 
-	wbLoginPending  = 11217 // upstream code: the browser login is not finished yet
-	wbLoginTTL      = 10 * time.Minute
-	wbRefreshEarly  = 2 * time.Hour // refresh proactively this close to expiry
-	wbSoftCooldown  = 60            // seconds; the soft-limit single-model window
-	wbCapDefaultWait = 600          // seconds when 6004 carries no parsable reset clock
+	wbLoginPending   = 11217 // upstream code: the browser login is not finished yet
+	wbLoginTTL       = 10 * time.Minute
+	wbRefreshEarly   = 2 * time.Hour // refresh proactively this close to expiry
+	wbSoftCooldown   = 60            // seconds; the soft-limit single-model window
+	wbCapDefaultWait = 600           // seconds when 6004 carries no parsable reset clock
 )
 
 // wbCodeSanitize is the internal sentinel for "the WAF matched a client
@@ -209,6 +210,78 @@ func workBuddyHeaders(acct WBAccount, requestID string) map[string]string {
 	}
 }
 
+// wbConversationProtocol is the header family the v2 gate fingerprints. Found
+// by reading the community's CodeBuddy/WorkBuddy clients (pi-codebuddy-oauth,
+// opencode-codebuddy-oauth): the same /v2/chat/completions surface, but with
+// X-Conversation-ID and the B3 trace quartet attached. Without it the upstream
+// answers 400 code 11128 "conversation id missing" — a verdict about the
+// envelope, not the body, so no amount of prompt rewriting can satisfy it.
+func wbConversationProtocol(requestID, conversationID, model string) map[string]string {
+	trace := wbRequestID() // 32 hex: the shape the client's dashless UUID has
+	span, parent := trace[:16], trace[16:32]
+	h := map[string]string{
+		"X-Request-ID":              requestID,
+		"X-Conversation-ID":         conversationID,
+		"X-Conversation-Request-ID": requestID,
+		"X-Conversation-Message-ID": requestID,
+		"X-Request-Trace-Id":        trace,
+		"b3":                        trace + "-" + span + "-1-" + parent,
+		"X-B3-TraceId":              trace,
+		"X-B3-SpanId":               span,
+		"X-B3-ParentSpanId":         parent,
+		"X-B3-Sampled":              "1",
+	}
+	if model != "" {
+		h["X-Model-ID"] = model
+	}
+	return h
+}
+
+// wbConversationID maps one downstream conversation onto one upstream
+// conversation id. The gate wants a 32-hex id, and one conversation must keep
+// the same one for the upstream prompt cache to hit, so it is derived from the
+// conversation seed instead of cached: no table to bound, no eviction policy.
+// An empty seed — a probe, or a client that sends no session hint — gets a
+// fresh id per turn.
+func wbConversationID(seed string) string {
+	seed = strings.TrimSpace(seed)
+	if seed == "" {
+		return wbRequestID()
+	}
+	sum := sha256.Sum256([]byte("wb-conversation\x00" + seed))
+	return hex.EncodeToString(sum[:16])
+}
+
+// wbChatHeaders is the header set for one chat turn: the desktop identity the
+// WAF knows, plus the conversation protocol above.
+func wbChatHeaders(acct WBAccount, requestID, conversationID, model string) map[string]string {
+	h := workBuddyHeaders(acct, requestID)
+	for k, v := range wbConversationProtocol(requestID, conversationID, model) {
+		h[k] = v
+	}
+	return h
+}
+
+// wbSystemPreamble opens every WorkBuddy turn. The gate's second check is
+// "first message is not system prompt" (400, code 11128) — the upstream
+// refuses a conversation that starts with the user, which is exactly what a
+// plain OpenAI-shaped request looks like. The wording is deliberately neutral:
+// a caller's own system prompt is preserved when it already leads the turn.
+const wbSystemPreamble = "You are WorkBuddy, an AI assistant for everyday office work."
+
+// wbEnsureSystemFirst makes the turn open with a system message, leaving an
+// existing leading system prompt untouched.
+func wbEnsureSystemFirst(body map[string]any) {
+	msgs, _ := body["messages"].([]map[string]any)
+	if len(msgs) > 0 {
+		if role, _ := msgs[0]["role"].(string); role == RoleSystem {
+			return
+		}
+	}
+	lead := map[string]any{"role": RoleSystem, "content": wbSystemPreamble}
+	body["messages"] = append([]map[string]any{lead}, msgs...)
+}
+
 // wbApplyModelQuirks layers this source's body extensions onto a chat body:
 // forced streaming with usage, and per-family thinking fields (deepseek wants
 // the thinking switch plus its own effort spelling; the hy family only
@@ -259,7 +332,12 @@ func wbBackfillReasoning(body map[string]any) {
 // wbPostOnce performs one physical POST and decodes the stream, following the
 // same sniff-and-replay discipline as the other post paths. Non-2xx answers go
 // through the WorkBuddy-specific classifier.
-func wbPostOnce(ctx context.Context, body map[string]any, acct WBAccount, onData func(payload []byte) error) (*Usage, error) {
+func wbPostOnce(ctx context.Context, body map[string]any, acct WBAccount, conversationID string, onData func(payload []byte) error) (*Usage, error) {
+	// The gate refuses a turn whose first message is not a system prompt, and
+	// the rule is enforced here — the one place every WorkBuddy POST goes
+	// through — so the hand-built probe and daily-activity bodies obey it
+	// exactly like a chat turn does.
+	wbEnsureSystemFirst(body)
 	payload, err := json.Marshal(body)
 	if err != nil {
 		return nil, &UpstreamError{Code: CodeTransport, Message: err.Error()}
@@ -268,7 +346,8 @@ func wbPostOnce(ctx context.Context, body map[string]any, acct WBAccount, onData
 	if err != nil {
 		return nil, &UpstreamError{Code: CodeTransport, Message: err.Error()}
 	}
-	for k, v := range workBuddyHeaders(acct, wbRequestID()) {
+	model, _ := body["model"].(string)
+	for k, v := range wbChatHeaders(acct, wbRequestID(), conversationID, model) {
 		req.Header.Set(k, v)
 	}
 	resp, err := laneHTTP.Do(req)
@@ -338,8 +417,8 @@ func wbPostOnce(ctx context.Context, body map[string]any, acct WBAccount, onData
 // with the marker strings rewritten. A second hit surfaces as a plain client
 // error — the request is the caller's own fingerprint, replaying it more
 // cannot help.
-func PostWorkBuddyStreamed(ctx context.Context, body map[string]any, acct WBAccount, onData func(payload []byte) error) (*Usage, error) {
-	usage, err := wbPostOnce(ctx, body, acct, onData)
+func PostWorkBuddyStreamed(ctx context.Context, body map[string]any, acct WBAccount, conversationID string, onData func(payload []byte) error) (*Usage, error) {
+	usage, err := wbPostOnce(ctx, body, acct, conversationID, onData)
 	if err == nil {
 		return usage, nil
 	}
@@ -347,7 +426,7 @@ func PostWorkBuddyStreamed(ctx context.Context, body map[string]any, acct WBAcco
 	if ue == nil || ue.Code != wbCodeSanitize {
 		return usage, err
 	}
-	usage2, err2 := wbPostOnce(ctx, wbSanitizeFingerprints(body), acct, onData)
+	usage2, err2 := wbPostOnce(ctx, wbSanitizeFingerprints(body), acct, conversationID, onData)
 	if err2 == nil {
 		return usage2, nil
 	}
