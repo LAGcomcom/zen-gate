@@ -112,6 +112,16 @@ type Lane struct {
 	wbLoginState  string
 	wbLoginAt     time.Time
 
+	// CodeArts 账号渠道 state. caMu serializes the STS refresh — the refresh
+	// token is bound to a DPoP keypair and the login's code_verifier, so a
+	// half-written rotation locks the account out — and guards the snapshot.
+	caMu          sync.Mutex
+	caAcct        CAAccount
+	caPersist     func(CAAccount)
+	caRefreshedAt time.Time
+	// The in-flight login: PKCE + ticket the browser round-trip completes.
+	caLogin       *caPendingLogin
+
 	probing         atomicFlag
 	lastProbeAt     time.Time
 	backoffRounds   int
@@ -350,13 +360,15 @@ func (l *Lane) RefreshCatalog(ctx context.Context) {
 	prev := l.catalog
 	l.mu.Unlock()
 
-	var zen, kilo, wb []ModelInfo
+	var zen, kilo, wb, ca []ModelInfo
 	for _, m := range prev {
 		switch m.Channel {
 		case ChannelKilo:
 			kilo = append(kilo, m)
 		case ChannelWorkBuddy:
 			wb = append(wb, m)
+		case ChannelCodeArts:
+			ca = append(ca, m)
 		default:
 			zen = append(zen, m)
 		}
@@ -376,10 +388,26 @@ func (l *Lane) RefreshCatalog(ctx context.Context) {
 	} else {
 		wb = nil
 	}
-	cat := make([]ModelInfo, 0, len(zen)+len(kilo)+len(wb))
+	// CodeArts is the fourth source: a fetched roster (builtin + rotating
+	// benefit models), so it follows the zen/kilo discipline — a failed fetch
+	// keeps the previous bucket rather than emptying it, and only a logged-out
+	// account subtracts. Logged in, discovery also seeds the per-account
+	// benefit flags the post path reads back, so this call is load-bearing,
+	// not just a name list.
+	if acct, ok := l.codeArtsReady(); ok {
+		if fresh, err := fetchListingWithColdBootRetry(ctx, len(ca), func(context.Context) ([]ModelInfo, error) {
+			return caFetchModels(acct)
+		}); err == nil && len(fresh) > 0 {
+			ca = fresh
+		}
+	} else {
+		ca = nil
+	}
+	cat := make([]ModelInfo, 0, len(zen)+len(kilo)+len(wb)+len(ca))
 	cat = append(cat, zen...)
 	cat = append(cat, kilo...)
 	cat = append(cat, wb...)
+	cat = append(cat, ca...)
 	if len(cat) == 0 {
 		return
 	}
@@ -587,6 +615,9 @@ func (l *Lane) ProbeOneCtx(ctx context.Context, model string) ProbeResult {
 func (l *Lane) probeModelFor(ctx context.Context, m ModelInfo) ProbeResult {
 	if m.Channel == ChannelWorkBuddy {
 		return l.probeWorkBuddy(ctx, m)
+	}
+	if m.Channel == ChannelCodeArts {
+		return l.probeCodeArts(ctx, m)
 	}
 	return ProbeModel(ctx, m)
 }
@@ -933,11 +964,21 @@ func (l *Lane) attemptModel(ctx context.Context, req Request, model, effort stri
 	// caller's tools exactly as declared, and a plain POST per turn. The
 	// WorkBuddy channel is like Kilo on the fingerprint front (its identity
 	// headers are account-derived, not session-minted) but carries its own
-	// account credential and body quirks.
+	// account credential and body quirks. CodeArts is likewise fingerprint-
+	// free (an OpenAI-compatible endpoint) but keys on a per-conversation chat
+	// id and demands the canonical (case-sensitive) registered model name.
 	kilo := entry.Channel == ChannelKilo
 	wb := entry.Channel == ChannelWorkBuddy
+	ca := entry.Channel == ChannelCodeArts
+	baseRequested := base
+	if ca {
+		// CodeArts matches registered names case-sensitively; the catalog row
+		// may carry a lowercase alias the user typed, so resolve it to the
+		// exact id before building the body.
+		baseRequested = caCanonicalModel(base)
+	}
 	buildBody := func(msgs []Message, tools []ToolDef, maxTokens int) map[string]any {
-		body := map[string]any{"model": base, "stream": true}
+		body := map[string]any{"model": baseRequested, "stream": true}
 		switch wire {
 		case "responses":
 			instructions, items := ToResponseInput(msgs)
@@ -990,11 +1031,17 @@ func (l *Lane) attemptModel(ctx context.Context, req Request, model, effort stri
 	// caller's tools exactly as declared, and a plain POST per turn.
 	session := SessionForExit(req.SessionSeed, plan.ExitKey)
 	requestID := RequestIdFor(session, req.TurnSeed)
+	caChatID := caChatID(req.SessionSeed)
 	post := func(cctx context.Context, body map[string]any, onData func(payload []byte) error) (*Usage, error) {
 		if wb {
 			// One downstream conversation keeps one upstream conversation id
 			// (prompt cache), and the gate sees the id it fingerprints for.
 			return l.wbPost(cctx, body, wbConversationID(req.SessionSeed), onData)
+		}
+		if ca {
+			// Same discipline: one conversation, one 32-hex chat id, so the
+			// upstream's prompt cache holds across the conversation's turns.
+			return l.caPost(cctx, body, caChatID, onData)
 		}
 		if kilo {
 			return PostKiloStreamed(cctx, body, onData)
@@ -1004,7 +1051,7 @@ func (l *Lane) attemptModel(ctx context.Context, req Request, model, effort stri
 
 	body := buildBody(messages, req.Tools, budget)
 	rename := map[string]string{}
-	if !kilo {
+	if !kilo && !ca {
 		rename = ApplyFingerprint(body, style)
 	}
 

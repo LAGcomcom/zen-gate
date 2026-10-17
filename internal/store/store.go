@@ -162,7 +162,11 @@ type Config struct {
 	// writes rotated token pairs and activity dates back through its persist
 	// callback; Masked() hides both tokens from config exports.
 	WorkBuddy lane.WBAccount `json:"workBuddy"`
-	Window    WindowState    `json:"window"`
+	// CodeArts is the CodeArts 账号渠道 credential set (Huawei Cloud STS
+	// pair + the refresh binding). Rotated in place via the lane's persist
+	// callback; Masked() hides every secret field from config exports.
+	CodeArts lane.CAAccount `json:"codeArts"`
+	Window   WindowState    `json:"window"`
 }
 
 // DayStat aggregates one calendar day.
@@ -644,6 +648,27 @@ func (s *Store) Masked() *Config {
 	if cfg.WorkBuddy.RefreshToken != "" {
 		cfg.WorkBuddy.RefreshToken = MaskedValue
 	}
+	// CodeArts carries four secret material fields plus the DPoP key map; the
+	// identity fields (user/domain) and the public client id stay visible so a
+	// shared config still says which account it was.
+	if cfg.CodeArts.SecurityToken != "" {
+		cfg.CodeArts.SecurityToken = MaskedValue
+	}
+	if cfg.CodeArts.AccessKeyID != "" {
+		cfg.CodeArts.AccessKeyID = MaskedValue
+	}
+	if cfg.CodeArts.SecretAccessKey != "" {
+		cfg.CodeArts.SecretAccessKey = MaskedValue
+	}
+	if cfg.CodeArts.RefreshToken != "" {
+		cfg.CodeArts.RefreshToken = MaskedValue
+	}
+	if cfg.CodeArts.CodeVerifier != "" {
+		cfg.CodeArts.CodeVerifier = MaskedValue
+	}
+	if len(cfg.CodeArts.DPoPKey) > 0 {
+		cfg.CodeArts.DPoPKey = map[string]string{"_": MaskedValue}
+	}
 	return cfg
 }
 
@@ -657,6 +682,12 @@ func (c *Config) clone() *Config {
 	next.SeenAnnouncements = cloneSlice(c.SeenAnnouncements)
 	next.HiddenModels = cloneSlice(c.HiddenModels)
 	next.Subscriptions = cloneSlice(c.Subscriptions)
+	// The CodeArts credential carries a DPoP key map; aliasing it across
+	// snapshots would let a later refresh mutate the value a prior export (or
+	// the old snapshot still being read) points at, so copy it.
+	if c.CodeArts.DPoPKey != nil {
+		next.CodeArts.DPoPKey = cloneMap(c.CodeArts.DPoPKey)
+	}
 	if c.Providers != nil {
 		next.Providers = make([]Provider, len(c.Providers))
 		for i, p := range c.Providers {

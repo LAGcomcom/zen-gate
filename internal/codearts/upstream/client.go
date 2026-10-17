@@ -160,6 +160,39 @@ func NewWithChatEndpoint(timeout time.Duration, endpoint string) *Client {
 	return c
 }
 
+// NewWithTransport 用调用方提供的 transport 构造客户端，端点走生产默认。
+// zen-gate 的 lane 用它注入自己的代理/轮询栈，所以这个渠道和其它上游共用
+// 同一套出口策略，而不是自带一套 dial 设置。
+func NewWithTransport(tr http.RoundTripper) *Client {
+	return newWithTransportBases(tr, SnapEngineApiHost, BenefitHost, "")
+}
+
+// NewWithBases is the lane's constructor: the caller's transport (the lane's
+// proxy/rotation stack, so this channel shares one egress policy with every
+// other source) with the two upstream roots overridable as one pair — an
+// httptest stub answers both paths. The chat endpoint derives from snapBase.
+func NewWithBases(tr http.RoundTripper, snapBase, benefitBase string) *Client {
+	return newWithTransportBases(tr, snapBase, benefitBase, "")
+}
+
+// newWithTransportBases wires the shared transport into both clients (short
+// calls carry the total timeout, the SSE stream must not).
+func newWithTransportBases(tr http.RoundTripper, snapBase, benefitBase, chatURL string) *Client {
+	if tr == nil {
+		tr = http.DefaultTransport
+	}
+	c := &Client{
+		http:        &http.Client{Timeout: 120 * time.Second, Transport: tr},
+		streamHTTP:  &http.Client{Transport: tr},
+		snapBase:    snapBase,
+		benefitBase: benefitBase,
+		chatURL:     chatURL,
+		srcFail:     map[string]time.Time{},
+	}
+	c.claimAuto.Store(true)
+	return c
+}
+
 // chatEndpoint 返回本次请求要用的 chat-completions 地址。
 func (c *Client) chatEndpoint() string {
 	if c.chatURL != "" {
@@ -544,6 +577,13 @@ func sessionIDFor(chatID string) string {
 // 计入 SignedHeaders。
 func (c *Client) SendChatV2(ctx context.Context, body map[string]any, traceID string, cred SignCredential, userToken string, benefit bool) (io.ReadCloser, error) {
 	return c.sendChatV2(ctx, body, traceID, cred, userToken, "", "", benefit)
+}
+
+// SendChatV2Chat adds the conversation affinity headers (Chat-Id / Session-Id)
+// on top of SendChatV2: one conversation keeps one id so the upstream's prompt
+// cache can hold across turns.
+func (c *Client) SendChatV2Chat(ctx context.Context, body map[string]any, traceID string, cred SignCredential, userToken, chatID string, benefit bool) (io.ReadCloser, error) {
+	return c.sendChatV2(ctx, body, traceID, cred, userToken, chatID, sessionIDFor(chatID), benefit)
 }
 
 // sendChatV2 发送聊天请求并返回 SSE 流。

@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"zen-gate/internal/codeartshub/auth"
+	"zen-gate/internal/codearts/auth"
 )
 
 func TestCanonicalModelKnownIndex(t *testing.T) {

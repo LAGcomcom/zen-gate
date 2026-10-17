@@ -113,8 +113,6 @@ func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request, rest string
 		s.adminAgent(w, r, strings.TrimPrefix(rest, "agent/"))
 	case rest == "qoder/status" && r.Method == http.MethodGet:
 		s.adminQoderStatus(w, r)
-	case rest == "codearts/status" && r.Method == http.MethodGet:
-		s.adminCodeartsStatus(w, r)
 	case rest == "workbuddy/status" && r.Method == http.MethodGet:
 		s.adminWorkBuddyStatus(w, r)
 	case rest == "workbuddy/login/start" && r.Method == http.MethodPost:
@@ -123,6 +121,14 @@ func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request, rest string
 		s.adminWorkBuddyLoginPoll(w)
 	case rest == "workbuddy/logout" && r.Method == http.MethodPost:
 		s.adminWorkBuddyLogout(w)
+	case rest == "codearts/status" && r.Method == http.MethodGet:
+		s.adminCodeartsStatus(w, r)
+	case rest == "codearts/login/start" && r.Method == http.MethodPost:
+		s.adminCodeartsLoginStart(w)
+	case rest == "codearts/login/poll" && r.Method == http.MethodGet:
+		s.adminCodeartsLoginPoll(w, r)
+	case rest == "codearts/logout" && r.Method == http.MethodPost:
+		s.adminCodeartsLogout(w)
 	case rest == "providers" && r.Method == http.MethodPost:
 		s.adminProviderSave(w, r)
 	case rest == "providers/delete" && r.Method == http.MethodPost:
@@ -350,6 +356,7 @@ func (s *Server) adminState(w http.ResponseWriter) {
 		"autoTagEnabled":          cfg.AutoTagEnabled,
 		"openRefEnabled":          cfg.OpenRefEnabled,
 		"workBuddyEnabled":        cfg.WorkBuddy.Enabled,
+		"codeArtsEnabled":         cfg.CodeArts.Enabled,
 		"allowLan":                cfg.AllowLan,
 	}
 	for k, v := range logSettingsView(cfg) {
@@ -441,6 +448,7 @@ func (s *Server) adminSettings(w http.ResponseWriter, r *http.Request) {
 		AutoTagEnabled          *bool            `json:"autoTagEnabled"`
 		OpenRefEnabled          *bool            `json:"openRefEnabled"`
 		WorkBuddyEnabled        *bool            `json:"workBuddyEnabled"`
+		CodeArtsEnabled         *bool            `json:"codeArtsEnabled"`
 		AllowLan                *bool            `json:"allowLan"`
 		LogCategories           *map[string]bool `json:"logCategories"`
 		LogLevel                *string          `json:"logLevel"`
@@ -598,6 +606,11 @@ func (s *Server) adminSettings(w http.ResponseWriter, r *http.Request) {
 		changed = true
 		dirty["workBuddyEnabled"] = true
 	}
+	if in.CodeArtsEnabled != nil {
+		cfg.CodeArts.Enabled = *in.CodeArtsEnabled
+		changed = true
+		dirty["codeArtsEnabled"] = true
+	}
 	if in.AllowLan != nil && *in.AllowLan != cfg.AllowLan {
 		cfg.AllowLan = *in.AllowLan
 		changed = true
@@ -641,6 +654,10 @@ func (s *Server) adminSettings(w http.ResponseWriter, r *http.Request) {
 		// The published copy is the account of record; push it into the lane
 		// and let the catalog rebuild decide whether the roster appears.
 		s.Lane.SetWorkBuddyAccount(cfg.WorkBuddy)
+		go s.Lane.RefreshCatalog(context.Background())
+	}
+	if dirty["codeArtsEnabled"] {
+		s.Lane.SetCodeArtsAccount(cfg.CodeArts)
 		go s.Lane.RefreshCatalog(context.Background())
 	}
 	if openRefOn {
@@ -740,6 +757,12 @@ func (s *Server) commitSettings(next *store.Config, dirty map[string]bool) {
 		// masked copy the settings snapshot carries.
 		if dirty["workBuddyEnabled"] {
 			c.WorkBuddy.Enabled = next.WorkBuddy.Enabled
+		}
+		if dirty["codeArtsEnabled"] {
+			// Same discipline as WorkBuddy: only Enabled is copied, so the
+			// settings write never overwrites the stored STS/refresh secrets
+			// with the masked copy the snapshot carries.
+			c.CodeArts.Enabled = next.CodeArts.Enabled
 		}
 		if dirty["allowLan"] {
 			c.AllowLan = next.AllowLan
