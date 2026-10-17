@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	neturl "net/url"
@@ -61,7 +62,13 @@ func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request, rest string
 	case rest == "reprobe" && r.Method == http.MethodPost:
 		// r.Context() is cancelled the instant this handler returns; a detached
 		// background job must not ride it (same defect as subs/probe below).
+		//
+		// Two independent rounds: the free lane and the user-added providers.
+		// The 重新探测可用性 button used to drive only the lane, which left
+		// every custom-provider model parked on the placeholder "custom" state
+		// until it was clicked one card at a time.
 		go s.Lane.ProbeRound(context.Background(), true)
+		go s.probeCustomProviders(context.Background())
 		writeJSON(w, 200, map[string]any{"ok": true})
 	case rest == "update/apply" && r.Method == http.MethodPost:
 		s.adminUpdateApply(w)
@@ -1428,14 +1435,7 @@ func (s *Server) adminProbeOne(w http.ResponseWriter, model string) {
 	if prov != nil {
 		s.customProbing.Store(model)
 		defer s.customProbing.Store("")
-		r := relay.ProbeModel(ctx, prov, upstream)
-		r.Model = model
-		s.setCustomProbe(model, r)
-		if r.TTFTMs > 0 {
-			s.Store.AddTTFTSample(model, r.TTFTMs)
-		}
-		s.logCat(logx.CatProbe, "info", "探测自定义模型 %s → %s (首字 %dms)", model, r.State, r.TTFTMs)
-		s.probeTasks.conclude(t, taskDone, &r, nil)
+		r := s.probeCustomOne(ctx, prov, upstream, model, t)
 		writeJSON(w, 200, map[string]any{"ok": true, "result": r})
 		return
 	}
@@ -1447,9 +1447,93 @@ func (s *Server) adminProbeOne(w http.ResponseWriter, model string) {
 	writeJSON(w, 200, map[string]any{"ok": true, "result": r})
 }
 
+// probeCustomOne runs one custom-provider probe and files its verdict. Both
+// the per-card 测试 button and the 重新探测可用性 round go through here, so a
+// model tested by hand and one tested in bulk cannot disagree about what the
+// upstream answered.
+//
+// The task is supplied by the caller: it is the only progress channel a bulk
+// run gets, since it has no single model to name.
+func (s *Server) probeCustomOne(ctx context.Context, prov *store.Provider, upstream, id string, t *ProbeTask) lane.ProbeResult {
+	r := relay.ProbeModel(ctx, prov, upstream)
+	r.Model = id
+	s.setCustomProbe(id, r)
+	if r.TTFTMs > 0 {
+		s.Store.AddTTFTSample(id, r.TTFTMs)
+	}
+	s.logCat(logx.CatProbe, "info", "探测自定义模型 %s → %s (首字 %dms)", id, r.State, r.TTFTMs)
+	s.probeTasks.conclude(t, taskDone, &r, nil)
+	return r
+}
+
+// probeCustomProviders runs the 可用性 probe across every model of every
+// enabled custom provider. The 重新探测可用性 button used to drive the free
+// lane alone, which parked every user-added model on the placeholder
+// "custom" state until each card was clicked by hand.
+//
+// Models the user unchecked are skipped: they are not served to agent
+// pickers, so their verdict is not worth an upstream call. Concurrency stays
+// below the lane's because these upstreams bill per request and one round can
+// span several providers at once.
+func (s *Server) probeCustomProviders(ctx context.Context) {
+	cfg := s.Store.Config()
+	hidden := s.hiddenSet()
+	type target struct {
+		prov     *store.Provider
+		upstream string
+		id       string
+	}
+	targets := []target{}
+	for i := range cfg.Providers {
+		p := &cfg.Providers[i]
+		if !p.Enabled {
+			continue
+		}
+		for _, mid := range p.Models {
+			id := p.ID + "/" + mid
+			if hidden[id] {
+				continue
+			}
+			targets = append(targets, target{prov: p, upstream: mid, id: id})
+		}
+	}
+	if len(targets) == 0 {
+		return
+	}
+	const concurrency = 4
+	sem := make(chan struct{}, concurrency)
+	var wg sync.WaitGroup
+	started := 0
+	for _, tg := range targets {
+		if ctx.Err() != nil {
+			break
+		}
+		// begin doubles as the de-duplicator: a model already under probe --
+		// from a per-card click, or from a second press of 重新探测可用性 --
+		// keeps its run instead of buying a second upstream call.
+		t, fresh := s.probeTasks.begin("probe", tg.id)
+		if !fresh {
+			continue
+		}
+		started++
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(tg target, t *ProbeTask) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			s.probeCustomOne(ctx, tg.prov, tg.upstream, tg.id, t)
+		}(tg, t)
+	}
+	wg.Wait()
+	s.logCat(logx.CatProbe, "info", "自定义供应商探测完成：%d 个模型（%d 个已在探测中）", started, len(targets)-started)
+}
+
 // currentProbingModel merges the free-lane and custom-provider probe states:
 // whichever model is under a probe right now, so the dashboard can show
 // 探测中… during a long NVIDIA queue instead of looking frozen.
+//
+// A bulk custom round is deliberately invisible here: it has no single model
+// to name, and every card it touches reports through its own task.
 func (s *Server) currentProbingModel() string {
 	if v, ok := s.customProbing.Load().(string); ok && v != "" {
 		return v
