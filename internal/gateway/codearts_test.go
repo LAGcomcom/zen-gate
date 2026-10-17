@@ -66,6 +66,23 @@ func TestCodeartsProviderFollowsTheAccountState(t *testing.T) {
 	}
 }
 
+// The vendored /status answers `accounts` as an array of account objects.
+// Decoding it into an int used to fail silently, Accounts stayed 0, and the
+// channel judged itself logged out forever (issue #84).
+func TestParseCodeartsAccountsReadsTheArray(t *testing.T) {
+	body := []byte(`{"accounts":[{"nickname":"a","uid":"1"},{"nickname":"b","uid":"2"}]}`)
+	n, err := parseCodeartsAccounts(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 2 {
+		t.Fatalf("accounts = %d, want 2", n)
+	}
+	if _, err := parseCodeartsAccounts([]byte(`not json`)); err == nil {
+		t.Fatal("a non-JSON answer must surface as an error, not a silent zero")
+	}
+}
+
 // parseCodeartsCatalog must mark rows it describes as declared, otherwise the
 // capability chain discards the context window the upstream just published.
 func TestParseCodeartsCatalogKeepsDeclaredContext(t *testing.T) {

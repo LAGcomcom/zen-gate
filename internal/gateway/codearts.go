@@ -93,6 +93,20 @@ func probeCodeartsCached(force bool) codeartsStatus {
 	return st
 }
 
+// parseCodeartsAccounts reads the embedded hub's /status answer. The field is
+// an array of account objects, not a count: decoding it into an int failed
+// silently and kept the channel logged out forever after a successful OAuth
+// (issue #84).
+func parseCodeartsAccounts(body []byte) (int, error) {
+	var status struct {
+		Accounts []json.RawMessage `json:"accounts"`
+	}
+	if err := json.Unmarshal(body, &status); err != nil {
+		return 0, err
+	}
+	return len(status.Accounts), nil
+}
+
 // probeCodearts observes the embedded gateway: running? accounts loaded? which
 // models? Liveness is judged by what matters — can it list models — never by a
 // cosmetic endpoint.
@@ -105,11 +119,12 @@ func probeCodearts() codeartsStatus {
 	}
 	st.Running = true
 
-	var status struct {
-		Accounts int `json:"accounts"`
+	n, err := parseCodeartsAccounts(body)
+	if err != nil {
+		st.Detail = "内置 CodeArts 网关状态无法解析: " + err.Error()
+		return st
 	}
-	_ = json.Unmarshal(body, &status)
-	st.Accounts = status.Accounts
+	st.Accounts = n
 
 	code, body, err = codeartsGet("/v1/models")
 	if err != nil {
