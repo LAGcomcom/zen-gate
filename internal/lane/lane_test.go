@@ -485,9 +485,12 @@ func TestBudgetForAlwaysThinkingDoubled(t *testing.T) {
 	if got := BudgetFor("light", m2, 0, 0); got != 2048 {
 		t.Fatalf("light on normal model must be 2048, got %d", got)
 	}
-	// A zero/negative requested ceiling is *no* ceiling, not zero.
-	if got := BudgetFor("deep", m2, 0, 0); got != 131072 {
-		t.Fatalf("deep must inherit capacity, got %d", got)
+	// A zero/negative requested ceiling is *no* ceiling, not zero. Deep takes
+	// the model's measured capacity widened by the headroom factor: a probe
+	// reads a floor (it stops at the first size it did not try), so the raw
+	// table value must not become a hard cap.
+	if got := BudgetFor("deep", m2, 0, 0); got != 131072*3/2 {
+		t.Fatalf("deep must inherit capacity with headroom, got %d", got)
 	}
 }
 
@@ -507,10 +510,18 @@ func TestBudgetForExplicitRequestWins(t *testing.T) {
 	if got := BudgetFor("balanced", guessed, 128000, 32768); got != 8192 {
 		t.Fatalf("balanced must stay 8192 despite the request, got %d", got)
 	}
-	// No explicit request: the fallback caps the table value from above.
+	// No explicit request: a KNOWN capacity speaks for itself. The configured
+	// fallback used to cap it from above, which made a model measured at 256K
+	// answer with 32K whenever the client stated nothing — the user sees a
+	// model that "hits the output limit immediately".
 	table := ModelInfo{MaxOutput: 131072, Reasoning: true, CanDisableThinking: true}
-	if got := BudgetFor("deep", table, 0, 32768); got != 32768 {
-		t.Fatalf("fallback must cap an unset request, got %d", got)
+	if got := BudgetFor("deep", table, 0, 32768); got != 131072*3/2 {
+		t.Fatalf("known capacity must not be capped by the fallback, got %d", got)
+	}
+	// Unknown capacity: the fallback is what keeps it sane.
+	unknown := ModelInfo{Reasoning: true, CanDisableThinking: true}
+	if got := BudgetFor("deep", unknown, 0, 32768); got != 32768 {
+		t.Fatalf("unknown capacity must be bounded by the fallback, got %d", got)
 	}
 	// Unknown table (MaxOutput 0) + no request: conservative default stands.
 	if got := BudgetFor("deep", ModelInfo{Reasoning: true}, 0, 0); got != defaultUnknownCapacity {

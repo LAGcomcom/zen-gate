@@ -33,6 +33,33 @@ const MinBudget = 512
 // request.max_tokens outranks it (see BudgetFor).
 const defaultUnknownCapacity = 32768
 
+// headroomNumerator/headroomDenominator widen a measured capacity before it
+// becomes a ceiling: measured × 1.5.
+//
+// A measured number is a FLOOR, not the truth: the probe stops at the first
+// size the upstream refuses, so the real limit sits somewhere between the last
+// accepted size and that refusal — and a probe can under-read for reasons that
+// have nothing to do with capacity (a transient 429, a queue, a conservative
+// per-request cap on one exit). Treating the measured value as the hard ceiling
+// makes a model that genuinely handles more look capped the moment a user asks
+// for it. 1.5× keeps the probe's answer as the baseline while leaving room for
+// what it could not see; the upstream still refuses anything truly over the
+// line, and an explicit request.max_tokens outranks this entirely.
+const (
+	headroomNumerator   = 3
+	headroomDenominator = 2
+)
+
+// applyHeadroom widens a measured capacity. Only positive values are widened:
+// 0 means "nothing measured", and inventing a number there would be worse than
+// leaving the unknown-model default in charge.
+func applyHeadroom(measured int) int {
+	if measured <= 0 {
+		return 0
+	}
+	return measured * headroomNumerator / headroomDenominator
+}
+
 // AlwaysThinkingFactor widens every rung for models whose thinking cannot be
 // switched off — thinking and the visible answer share one ceiling.
 const AlwaysThinkingFactor = 2
@@ -70,18 +97,29 @@ func usableTokens(v int) int {
 // capacity is the deep-rung ceiling — but it is a curated local guess, so a
 // caller that states max_tokens outright overrides it rather than being
 // silently clamped back to a guessed 32768 (issue #27: a real 128K deep-think
-// request never reached the upstream). With no explicit request, the
-// defaultMaxTokens fallback still caps the guess from above ("只压低不抬高" —
-// the intended semantics, see #23).
+// request never reached the upstream).
+//
+// The curated capacity is a MEASURED FLOOR, so it is widened by applyHeadroom
+// before use: a model whose probe stopped at 128K may well take 192K, and
+// pinning it at the probe's last accepted size turns "we only checked this far"
+// into "the model cannot do more". An explicit request still wins outright, and
+// the upstream is the final authority either way.
+//
+// The configured fallback bounds UNKNOWN models only. It used to cap every
+// model from above ("只压低不抬高", #23), which meant a model measured at 256K
+// still answered with 32K whenever the client stated nothing — the user sees a
+// model that "hits the output limit immediately" while its real ceiling is
+// eight times higher. A known capacity now speaks for itself.
 func BudgetFor(level string, m ModelInfo, requested, fallback int) int {
-	capacity := m.MaxOutput
+	capacity := applyHeadroom(m.MaxOutput)
 	if capacity <= 0 {
 		capacity = defaultUnknownCapacity
+		if f := usableTokens(fallback); f < capacity {
+			capacity = f
+		}
 	}
 	if requested > 0 {
 		capacity = requested
-	} else if f := usableTokens(fallback); f < capacity {
-		capacity = f
 	}
 	lvl := ResolveLevel(level, m)
 	if lvl == nil || lvl.Ceiling == 0 {
