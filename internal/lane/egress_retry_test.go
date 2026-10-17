@@ -13,14 +13,14 @@ import (
 // real install: one stalled exit produced a 217-second request ending in
 // TRANSPORT, for a model that answered in ~15s through other exits.
 func TestEgressRetryableCoversExitShapedFailures(t *testing.T) {
-	for _, code := range []string{CodeQuota, CodeTransport, CodeServer, CodeTimeout, CodeReset} {
+	for _, code := range []string{CodeQuota, CodeRegion, CodeTransport, CodeServer, CodeTimeout, CodeReset} {
 		if !egressRetryable(code) {
 			t.Errorf("egressRetryable(%s) = false, want true — this failure is about the exit", code)
 		}
 	}
 	// Not exit-shaped: a region block is deterministic, an aborted request is the
 	// caller's own cancellation, and empty is a content verdict.
-	for _, code := range []string{CodeRegion, CodeAborted, CodeEmpty, ""} {
+	for _, code := range []string{CodeAborted, CodeEmpty, ""} {
 		if egressRetryable(code) {
 			t.Errorf("egressRetryable(%s) = true, want false", code)
 		}

@@ -773,6 +773,16 @@ func (l *Lane) Complete(ctx context.Context, req Request, emit func(Chunk)) (Out
 // exit-shaped: the request never got an answer, so asking another exit costs
 // nothing and can turn a 502 into a 200. Before this, only CodeQuota retried,
 // so a single stalling exit failed the turn while the rest of the pool idled.
+// CodeRegion belongs here too, and it was measured rather than reasoned: the
+// upstream refusal reads "not available in your country", i.e. it is a verdict
+// about the exit IP's country, not about the model. On a rotating pool that
+// mixes regions, cat-jam-free answered 200 at 14:28:57 and REGION_BLOCKED at
+// 14:31:10 with nothing changed but the chosen exit, and a six-request burst
+// right after came back 6/6 200. Treating it as deterministic left those turns
+// as a 403 to the caller with a pool of healthy exits idle. ReportExit already
+// books the (exit, model) pair, so the retry moves on instead of re-picking the
+// same blocked country.
+//
 // egressBudgetFor is the extra time this failure class may spend retrying
 // before the loop gives up. 429s need almost none; slow failures need a full
 // attempt's worth, because their per-attempt cost IS the reason they failed.
@@ -786,7 +796,7 @@ func egressBudgetFor(code string) time.Duration {
 
 func egressRetryable(code string) bool {
 	switch code {
-	case CodeQuota, CodeTransport, CodeServer, CodeTimeout, CodeReset:
+	case CodeQuota, CodeRegion, CodeTransport, CodeServer, CodeTimeout, CodeReset:
 		return true
 	}
 	return false
