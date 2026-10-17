@@ -799,7 +799,7 @@ func egressRetryable(code string) bool {
 // waiting for one request, attempts=1.
 func switchableFailure(uerr *UpstreamError) bool {
 	switch uerr.Code {
-	case CodeQuota, CodeRegion, CodeServer, CodeTimeout, CodeEmpty, CodeTransport, CodeReset:
+	case CodeQuota, CodeRegion, CodeFreeTier, CodeServer, CodeTimeout, CodeEmpty, CodeTransport, CodeReset:
 		return true
 	}
 	return false

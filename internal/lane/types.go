@@ -247,6 +247,15 @@ const (
 	CodeClient     = "CLIENT_ERROR"
 	CodeEmpty      = "EMPTY_RESPONSE"
 	CodeAborted    = "ABORTED"
+	// CodeFreeTier is the upstream free-tier gate refusing the whole lane
+	// ("free tier can only be used from within OpenCode"). It is its own code
+	// rather than a flavour of CodeRegion because the two need opposite
+	// treatment on the egress axis: a region block is a verdict about the exit
+	// IP's country, so another exit can answer it; this gate is decided before
+	// the request body is even read, so it lands on every exit identically and
+	// retrying them only burns the budget. Both stay switchable, which is what
+	// lets the turn fall through to the Kilo pool instead of surfacing as 401.
+	CodeFreeTier = "FREE_TIER_BLOCKED"
 )
 
 // traceKey carries the gateway's correlation id for one logical client request
