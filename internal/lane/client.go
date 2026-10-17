@@ -856,7 +856,13 @@ func (l *Lane) nextCandidate(needs Needs, tried map[string]bool) string {
 			if !satisfiesNeeds(m, needs) {
 				continue
 			}
-			if needs.PromptTokens > 0 && m.ContextWindow > 0 && needs.PromptTokens > m.ContextWindow {
+			// The curated window is a measured floor (the probe stops at the
+			// first size it did not try, not the true ceiling), so widen it
+			// before excluding a candidate: a request slightly over the table
+			// value is far more likely to fit than to overflow, and letting
+			// the upstream be the judge costs one turn, while dropping the
+			// model silently costs the whole request.
+			if window := applyHeadroom(m.ContextWindow); needs.PromptTokens > 0 && window > 0 && needs.PromptTokens > window {
 				continue
 			}
 		}
