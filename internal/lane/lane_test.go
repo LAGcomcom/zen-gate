@@ -755,3 +755,32 @@ func TestBuildKiloCatalog(t *testing.T) {
 		t.Fatal("effort rung mapping wrong")
 	}
 }
+
+// The free-tier gate is a LANE verdict, not a credential verdict. It is
+// answered before the key is consulted (an invalid key draws the identical
+// document) and it lands on every model at once. Filing it as CodeCredential
+// stopped failover dead and surfaced upstream gate changes as a hard 401 in
+// the client — ZCode reported "Provider authentication failed" while the
+// gateway still had a working Kilo pool.
+func TestFreeTierErrorIsALaneVerdictNotACredentialOne(t *testing.T) {
+	body := `{"type":"error","error":{"type":"FreeTierError","message":"OpenCode's free tier can only be used from within OpenCode. Download it at https://opencode.ai and keep building."}}`
+	ue := ClassifyFailure(403, body, 0)
+	if ue.Code != CodeRegion {
+		t.Fatalf("FreeTierError classified as %s, want REGION_BLOCKED (a switchable lane verdict)", ue.Code)
+	}
+	if !ue.Unavailable {
+		t.Error("a gate refusal marks the model unavailable for this exit")
+	}
+	if !switchableFailure(ue) {
+		t.Fatal("the lane must be allowed to fail over past a free-tier gate refusal")
+	}
+	// A genuine credential refusal must still read as one: this change must not
+	// turn "your key is wrong" into a silent failover.
+	auth := ClassifyFailure(401, `{"error":{"message":"invalid api key"}}`, 0)
+	if auth.Code != CodeCredential {
+		t.Fatalf("a real 401 = %s, want INVALID_CREDENTIAL", auth.Code)
+	}
+	if switchableFailure(auth) {
+		t.Fatal("a real credential error must not fail over")
+	}
+}
