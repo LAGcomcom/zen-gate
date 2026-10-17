@@ -25,7 +25,7 @@ import (
 	"sync"
 	"time"
 
-	"zen-gate/internal/codeartshub/auth"
+	"zen-gate/internal/codearts/auth"
 )
 
 // CatalogTTL 账号模型目录的有效期（超过则建议重新发现）。

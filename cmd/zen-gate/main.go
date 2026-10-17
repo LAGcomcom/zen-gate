@@ -19,7 +19,6 @@ import (
 
 	"zen-gate/internal/agents"
 	"zen-gate/internal/announce"
-	"zen-gate/internal/codeartshub"
 	"zen-gate/internal/autotag"
 	"zen-gate/internal/gateway"
 	"zen-gate/internal/lane"
@@ -144,6 +143,14 @@ func main() {
 		st.Mutate(func(c *store.Config) { c.WorkBuddy = a })
 		_ = st.Save()
 	})
+	// CodeArts 账号渠道：同一套账号快照 + 轮换回写。STS 临时凭证到期前由
+	// lane 用 refresh token 换新（refresh 绑定 DPoP 密钥与 code_verifier，
+	// 这三样与凭证同存同灭）。
+	ln.SetCodeArtsAccount(cfg.CodeArts)
+	ln.SetCodeArtsPersist(func(a lane.CAAccount) {
+		st.Mutate(func(c *store.Config) { c.CodeArts = a })
+		_ = st.Save()
+	})
 	// 订阅轮询:sidecar manager wires into the gateway, the lane rotator and
 	// every shutdown path below.
 	mgr := subs.NewManager(st, logger.Infof)
@@ -264,6 +271,34 @@ func main() {
 			}
 		}
 	}()
+	// CodeArts 每日签到：华为云官方活动（每日 1000 积分，30 天有效），本地
+	// 日历日一次。领取是幂等的（已领取只补确认），启动 100s 后先查一次，
+	// 之后每小时补查；未登录/已完成的检查是纯日期比较，重复触发没有成本。
+	go func() {
+		time.Sleep(100 * time.Second)
+		runCACheckin := func() {
+			ran, err := ln.CodeArtsDailyCheckin(ctx)
+			if !ran {
+				return
+			}
+			if err != nil {
+				logger.Infof("CodeArts 每日签到未完成（下个小时重试）: %v", err)
+				return
+			}
+			logger.Infof("CodeArts 每日签到已完成")
+		}
+		runCACheckin()
+		t := time.NewTicker(time.Hour)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				runCACheckin()
+			}
+		}
+	}()
 	gw.StartOpenRefLoop(ctx)
 	syncEndpoints()
 
@@ -295,15 +330,6 @@ func main() {
 		logger.Infof("内置 Qoder 网关就绪 (127.0.0.1:8095)")
 	}
 
-	// Embedded CodeArts2API gateway (CodeArts 账号渠道): same arrangement on
-	// 127.0.0.1:8096. Accounts, pool state and the conversation map live under
-	// the zen-gate data directory, so a reinstall never loses a login.
-	codeartsHub, codeartsHubErr := codeartshub.Start(st.Home)
-	if codeartsHubErr != nil {
-		logger.Infof("内置 CodeArts 网关未启动: %v", codeartsHubErr)
-	} else {
-		logger.Infof("内置 CodeArts 网关就绪 (127.0.0.1:8096)")
-	}
 	if lan := gw.LANBaseURL(); lan != "" {
 		logger.Infof("局域网 API 可用: %s", lan)
 	}
@@ -449,7 +475,6 @@ func main() {
 		gw.Stop()
 		mgr.Stop()
 		qoderHub.Stop()
-	codeartsHub.Stop()
 		_ = st.FlushStats()
 		return
 	}
@@ -472,7 +497,6 @@ func main() {
 				gw.Stop()
 				mgr.Stop() // before os.Exit — the deferred path never runs here
 				qoderHub.Stop()
-	codeartsHub.Stop()
 				_ = st.FlushStats()
 				os.Exit(0)
 			},
@@ -518,7 +542,6 @@ func main() {
 	gw.Stop()
 	mgr.Stop()
 	qoderHub.Stop()
-	codeartsHub.Stop()
 	_ = st.FlushStats()
 	logger.Infof("zen-gate 已退出")
 }

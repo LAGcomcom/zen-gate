@@ -1146,31 +1146,76 @@ async function renderQoderCard(){
     '</div>';
 }
 
+/* CodeArts 账号渠道卡（华为云）：状态读 /admin/api/codearts/status，登录是
+   PKCE + 回调/轮询双通道——服务端在默认浏览器打开授权页，这里两秒一探。
+   与 WorkBuddy 卡同一套形态：登录、退出、启用开关。 */
+let caPollTimer = null;
 async function renderCodeartsCard(){
   const st = await fetch("/admin/api/codearts/status").then(r=>r.json()).catch(()=>null);
-  const stateEl = $("#ca-state"), body = $("#ca-body");
-  if(!stateEl || !body) return;
-  const loginEl = $("#ca-login");
-  if(loginEl) loginEl.href = (st && st.loginUrl) || "http://127.0.0.1:8096/";
-  if(!st || !st.running){
-    stateEl.textContent = "未运行";
-    body.innerHTML = '内置 CodeArts 网关没有启动——通常是 8096 端口被其他 codearts2api 实例占用' +
-      '（关掉那个实例并重启 zen-gate 即可）。';
-    return;
-  }
+  const state = $("#ca-state"), body = $("#ca-body");
+  if(!state || !body || !st){ if(state) state.textContent = "状态获取失败"; return; }
+  setToggle("#tg-codearts", !!st.enabled);
+  const lg = $("#ca-logout");
+  if(lg) lg.style.display = st.loggedIn ? "" : "none";
+  const lb = $("#ca-login");
+  if(lb) lb.style.display = st.loggedIn ? "none" : "";
   if(!st.loggedIn){
-    stateEl.textContent = "未登录";
-    body.innerHTML = '网关在线但还没有华为云账号（'+ (st.detail||'未登录') +'）。' +
-      '点下面的「授权登录」完成一次华为云 OAuth，账号文件落在 zen-gate 数据目录里，重启不丢。' +
-      (st.loginUrl ? ' 也可以直接打开 <a href="'+st.loginUrl+'" target="_blank">内置登录页</a>。' : '');
+    state.textContent = "未登录";
+    body.innerHTML = '用华为云账号授权后，CodeArts Agent 的免费模型（GLM / DeepSeek / Qwen-VL 与轮换的限时福利套餐）'+
+      '直接进入「模型」页和所有 Agent 选择器，每日自动签到领积分（官方活动截至 2026-12-31）。'+
+      '提示词可能被上游记录，别交机密内容。';
     return;
   }
-  stateEl.textContent = "已登录 · " + (st.models||[]).length + " 个模型";
-  body.innerHTML = '模型已进入所有 Agent 选择器（<code>codearts/模型名</code>）。' +
-    (st.accounts>1 ? '当前账号池 ' + st.accounts + ' 个，自动轮转与续期。' : '令牌自动续期，签到积分自动领取。') +
-    '<div style="margin-top:6px;display:flex;flex-wrap:wrap;gap:4px">' +
-    (st.models||[]).map(m=>'<span class="badge">'+m.replace(/^codearts\//,'')+'</span>').join('') +
-    '</div>';
+  state.textContent = st.enabled ? "已启用" : "已停用";
+  const exp = st.expiresAtMs ? new Date(st.expiresAtMs).toLocaleString() : "未知";
+  body.innerHTML = '账号 <b>' + (st.nickname || st.uid || "-") + '</b> · STS 凭证有效期至 ' + exp +
+    ' · 目录模型 <b>' + (st.models || 0) + '</b> · 上次签到 ' + (st.lastCheckinDate || "—") +
+    (st.canRefresh ? '' : '<br><span style="color:#c88">缺少可续期凭据，重新授权一次</span>');
+}
+function bindCodeartsCard(){
+  const card = $("#ca-card");
+  if(!card || card.dataset.bound) return;
+  card.dataset.bound = "1";
+  $("#ca-login").onclick = async () => {
+    const b = $("#ca-login");
+    b.disabled = true;
+    const j = await api("/codearts/login/start", {});
+    b.disabled = false;
+    if (!j || !j.authUrl) return;
+    // 服务端已用系统默认浏览器打开授权页；这里给出链接兜底并两秒轮询。
+    const state = $("#ca-state"), body = $("#ca-body");
+    state.textContent = "等待授权…";
+    body.innerHTML = '授权页已在你的默认浏览器打开（华为云账号登录 + 账号授权）。' +
+      '没有自动弹出时 <a href="' + j.authUrl + '" target="_blank" rel="noopener">点这里打开授权页</a>。' +
+      '完成后这里自动换 STS 凭证并拉取模型目录（有效期最长 5 分钟）。';
+    const deadline = Date.now() + 5*60*1000;
+    if (caPollTimer) clearInterval(caPollTimer);
+    caPollTimer = setInterval(async () => {
+      if (Date.now() > deadline) { clearInterval(caPollTimer); caPollTimer = null; renderCodeartsCard(); return; }
+      const p = await fetch("/admin/api/codearts/login/poll").then(r=>r.json()).catch(()=>null);
+      if (p && p.state === "ok") {
+        clearInterval(caPollTimer); caPollTimer = null;
+        toast("CodeArts 授权成功，免费模型进入目录中");
+        renderCodeartsCard();
+      } else if (p && p.state === "error") {
+        clearInterval(caPollTimer); caPollTimer = null;
+        toast("CodeArts 登录未完成：" + (p.error || "请重试"));
+        renderCodeartsCard();
+      }
+    }, 2000);
+  };
+  $("#ca-logout").onclick = async () => {
+    const j = await api("/codearts/logout", {});
+    if (j) toast("已退出 CodeArts 账号");
+    renderCodeartsCard();
+  };
+  const tgb = $("#tg-codearts");
+  tgb.onclick = async () => {
+    const on = tgb.dataset.on !== "1";
+    const j = await api("/settings", { codeArtsEnabled: on });
+    if(j){ setToggle("#tg-codearts", on); toast(on ? "CodeArts 渠道已启用" : "CodeArts 渠道已停用"); }
+    renderCodeartsCard();
+  };
 }
 
 function renderProviders(s){
@@ -1188,7 +1233,9 @@ function renderProviders(s){
         <h3>CodeArts 账号渠道（华为云） <span class="muted" style="font-size:11px" id="ca-state"></span></h3>
         <div class="muted" style="font-size:12px; line-height:1.7" id="ca-body">加载中…</div>
         <div style="margin-top:8px; display:flex; gap:8px; flex-wrap:wrap; align-items:center">
-          <a class="act" id="ca-login" href="#" target="_blank" style="text-decoration:none">授权登录</a>
+          <button class="act" id="ca-login">授权登录</button>
+          <button class="ghost" id="ca-logout">退出登录</button>
+          <button class="act off" id="tg-codearts">关闭</button>
         </div>
       </div>
       <div class="card" id="wb-card">
@@ -1337,6 +1384,7 @@ function renderProviders(s){
   renderProviderList(s);
   renderWorkBuddyCard();
   bindWorkBuddyCard();
+  bindCodeartsCard();
 }
 
 /* WorkBuddy 账号渠道卡：状态读 /admin/api/workbuddy/status，登录走 state 轮询
