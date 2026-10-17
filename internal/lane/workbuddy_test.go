@@ -306,6 +306,165 @@ func TestWorkBuddyDailyActivityRunsOncePerDay(t *testing.T) {
 	}
 }
 
+// The CN daily reward is a real endpoint rather than a conversation, and it
+// lives on the meter host — asking the chat host for it is what answers 404.
+func TestWorkBuddyDailyCheckinClaimsOnTheCNMeter(t *testing.T) {
+	var gotPath, gotBody string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		data, _ := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+		gotBody = strings.TrimSpace(string(data))
+		fmt.Fprint(w, `{"code":0,"msg":"ok"}`)
+	}))
+	defer srv.Close()
+	old := WorkBuddyCNBilling
+	WorkBuddyCNBilling = srv.URL
+	t.Cleanup(func() { WorkBuddyCNBilling = old })
+
+	acct := wbAcct()
+	acct.Realm = WBRealmCN
+	l := NewLane()
+	l.SetWorkBuddyAccount(acct)
+	l.SetWorkBuddyPersist(func(WBAccount) {})
+
+	ran, err := l.WorkBuddyDailyCheckin(context.Background())
+	if err != nil || !ran {
+		t.Fatalf("run = (%v, %v), want one claim", ran, err)
+	}
+	if gotPath != wbCheckinPath {
+		t.Fatalf("path = %q, want %q", gotPath, wbCheckinPath)
+	}
+	if gotBody != "{}" {
+		t.Fatalf("body = %q, want the empty object the meter expects", gotBody)
+	}
+	if got := l.WorkBuddySnapshot().LastCheckinDate; got != time.Now().Format("2006-01-02") {
+		t.Fatalf("LastCheckinDate = %q, want today", got)
+	}
+}
+
+// "Already claimed today" arrives as an HTTP 400 carrying code 10001. It is
+// the same outcome as a fresh claim — reading the status line alone would
+// leave the day open and retry hourly against a wall.
+func TestWorkBuddyDailyCheckinAlreadyClaimedClosesTheDay(t *testing.T) {
+	var hits int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&hits, 1)
+		w.WriteHeader(http.StatusBadRequest)
+		fmt.Fprint(w, `{"code":10001,"msg":"今天已签到"}`)
+	}))
+	defer srv.Close()
+	old := WorkBuddyCNBilling
+	WorkBuddyCNBilling = srv.URL
+	t.Cleanup(func() { WorkBuddyCNBilling = old })
+
+	acct := wbAcct()
+	acct.Realm = WBRealmCN
+	l := NewLane()
+	l.SetWorkBuddyAccount(acct)
+	l.SetWorkBuddyPersist(func(WBAccount) {})
+
+	ran, err := l.WorkBuddyDailyCheckin(context.Background())
+	if err != nil || !ran {
+		t.Fatalf("run = (%v, %v), want the day closed, not an error", ran, err)
+	}
+	// The day is closed, so the hourly tick must not ask again.
+	if ran2, err2 := l.WorkBuddyDailyCheckin(context.Background()); ran2 || err2 != nil {
+		t.Fatalf("second run = (%v, %v), want a silent skip", ran2, err2)
+	}
+	if got := atomic.LoadInt32(&hits); got != 1 {
+		t.Fatalf("meter hits = %d, want the one claim", got)
+	}
+}
+
+// intl has no checkin endpoint; its daily is the activity conversation. A CN
+// checkin fired at an intl account would be a request to a path that does not
+// exist there.
+func TestWorkBuddyDailyCheckinSkipsIntlAccounts(t *testing.T) {
+	var hits int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&hits, 1)
+		fmt.Fprint(w, `{"code":0}`)
+	}))
+	defer srv.Close()
+	old := WorkBuddyBase
+	WorkBuddyBase = srv.URL
+	t.Cleanup(func() { WorkBuddyBase = old })
+
+	l := NewLane()
+	l.SetWorkBuddyAccount(wbAcct()) // no Realm: intl
+	l.SetWorkBuddyPersist(func(WBAccount) {})
+
+	ran, err := l.WorkBuddyDailyCheckin(context.Background())
+	if ran || err != nil {
+		t.Fatalf("run = (%v, %v), want a silent skip on intl", ran, err)
+	}
+	if got := atomic.LoadInt32(&hits); got != 0 {
+		t.Fatalf("upstream hits = %d, want none", got)
+	}
+}
+
+// A CN token must chat on the CN host. Sending it to workbuddy.ai is not a
+// slower route, it is a refused one: the WAF reads the pair of token and
+// headers as one fingerprint.
+func TestWorkBuddyCNChatGoesToTheCNHost(t *testing.T) {
+	var cnHits, intlHits int32
+	sse := func(w http.ResponseWriter) {
+		w.Header().Set("content-type", "text/event-stream")
+		fmt.Fprint(w, wbChatSSE(`{"choices":[{"delta":{},"finish_reason":"stop"}]}`))
+	}
+	cn := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&cnHits, 1)
+		sse(w)
+	}))
+	defer cn.Close()
+	intl := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&intlHits, 1)
+		sse(w)
+	}))
+	defer intl.Close()
+	oldCN, oldIntl := WorkBuddyCNBase, WorkBuddyBase
+	WorkBuddyCNBase, WorkBuddyBase = cn.URL, intl.URL
+	t.Cleanup(func() { WorkBuddyCNBase, WorkBuddyBase = oldCN, oldIntl })
+
+	acct := wbAcct()
+	acct.Realm = WBRealmCN
+	l := NewLane()
+	l.SetWorkBuddyAccount(acct)
+	l.SetWorkBuddyPersist(func(WBAccount) {})
+
+	_, _ = l.wbPost(context.Background(), map[string]any{
+		"model": "deepseek-v4.1-flash", "stream": true,
+		"messages": []map[string]any{{"role": RoleUser, "content": "hi"}},
+	}, "conv-1", func([]byte) error { return nil })
+
+	if got := atomic.LoadInt32(&intlHits); got != 0 {
+		t.Fatalf("intl hits = %d, want 0 — a CN account must not land on workbuddy.ai", got)
+	}
+	if got := atomic.LoadInt32(&cnHits); got != 1 {
+		t.Fatalf("CN hits = %d, want 1", got)
+	}
+}
+
+// The realm comes from the issuer when it names one, and from the login the
+// user opened when it does not — a silent issuer must not silently downgrade
+// a CN account to intl.
+func TestWBRealmFromIss(t *testing.T) {
+	cases := []struct {
+		iss  string
+		want string
+	}{
+		{"https://www.workbuddy.ai", WBRealmIntl},
+		{"codebuddy", WBRealmCN},
+		{"https://copilot.tencent.com", WBRealmCN},
+		{"internal-issuer", ""},
+	}
+	for _, c := range cases {
+		if got := wbRealmFromIss(c.iss); got != c.want {
+			t.Errorf("wbRealmFromIss(%q) = %q, want %q", c.iss, got, c.want)
+		}
+	}
+}
+
 func TestWorkBuddyDailyActivitySpentWindowClosesTheDay(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(429)

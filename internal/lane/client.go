@@ -111,6 +111,10 @@ type Lane struct {
 	wbRefreshedAt time.Time
 	wbLoginState  string
 	wbLoginAt     time.Time
+	// wbLoginRealm is the region the in-flight login was opened against. The
+	// browser finishes the login on that publishment, so the state poll and
+	// the token it mints must both go back to the same one.
+	wbLoginRealm string
 
 	probing         atomicFlag
 	lastProbeAt     time.Time

@@ -118,9 +118,11 @@ func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request, rest string
 	case rest == "workbuddy/status" && r.Method == http.MethodGet:
 		s.adminWorkBuddyStatus(w, r)
 	case rest == "workbuddy/login/start" && r.Method == http.MethodPost:
-		s.adminWorkBuddyLoginStart(w)
+		s.adminWorkBuddyLoginStart(w, r)
 	case rest == "workbuddy/login/poll" && r.Method == http.MethodGet:
 		s.adminWorkBuddyLoginPoll(w)
+	case rest == "workbuddy/checkin" && r.Method == http.MethodPost:
+		s.adminWorkBuddyCheckin(w)
 	case rest == "workbuddy/logout" && r.Method == http.MethodPost:
 		s.adminWorkBuddyLogout(w)
 	case rest == "providers" && r.Method == http.MethodPost:
