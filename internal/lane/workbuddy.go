@@ -40,6 +40,72 @@ import (
 // WorkBuddyBase is the intl gateway root; override for tests.
 var WorkBuddyBase = "https://www.workbuddy.ai"
 
+// The CN publishment does not live on one host: it chats on
+// copilot.tencent.com but bills and checks in on www.codebuddy.cn, so a
+// single "base per realm" cannot express it. Both are vars for the same
+// reason WorkBuddyBase is — tests point them at a stub.
+var (
+	WorkBuddyCNBase    = "https://copilot.tencent.com"
+	WorkBuddyCNBilling = "https://www.codebuddy.cn"
+)
+
+// The two publishments this lane can log into. Everything that used to be a
+// hard-coded intl constant now funnels through wbRealmConfig, so adding a
+// region is one table entry rather than a hunt through every call site.
+const (
+	WBRealmIntl = "intl"
+	WBRealmCN   = "cn"
+)
+
+// wbRealm is one region's endpoints and desktop identity. The WAF reads the
+// Origin/X-Domain/UA family as a fingerprint, so a CN token presented with
+// intl headers is refused on shape alone — the fields travel together or not
+// at all.
+type wbRealm struct {
+	ChatBase    string
+	BillingBase string
+	Origin      string
+	Domain      string
+	IDEVersion  string
+	DesktopUA   string
+	// HasCheckin: only CN publishes /v2/billing/meter/daily-checkin. The
+	// intl daily is an activity conversation instead (WorkBuddyDailyActivity).
+	HasCheckin bool
+}
+
+func wbRealmConfig(realm string) wbRealm {
+	if realm == WBRealmCN {
+		return wbRealm{
+			ChatBase:    WorkBuddyCNBase,
+			BillingBase: WorkBuddyCNBilling,
+			Origin:      "https://www.codebuddy.cn",
+			Domain:      "copilot.tencent.com",
+			IDEVersion:  wbIDEVersionCN,
+			DesktopUA:   wbDesktopUACN,
+			HasCheckin:  true,
+		}
+	}
+	return wbRealm{
+		ChatBase:    WorkBuddyBase,
+		BillingBase: WorkBuddyBase,
+		Origin:      wbOrigin,
+		Domain:      wbDomain,
+		IDEVersion:  wbIDEVersion,
+		DesktopUA:   wbDesktopUA,
+		HasCheckin:  false,
+	}
+}
+
+// wbRealmOf resolves an account's region. Accounts minted before the CN lane
+// existed carry no realm at all; they are intl, which is what the field would
+// have said.
+func wbRealmOf(acct WBAccount) string {
+	if acct.Realm == WBRealmCN {
+		return WBRealmCN
+	}
+	return WBRealmIntl
+}
+
 const (
 	wbTurnTimeout = streamIdleTimeout // shares the lane-wide silence bound (PR #40)
 
@@ -50,6 +116,14 @@ const (
 	wbAuthRefreshPath  = "/v2/plugin/auth/token/refresh"
 	wbLoginAccountPath = "/v2/plugin/login/account"
 	wbUserResourcePath = "/v2/billing/meter/get-user-resource"
+	// wbCheckinPath is CN-only: the daily reward endpoint. Answering
+	// code 0 means claimed; 10001 (or any 已签到 text) means it was already
+	// claimed today, which is the same outcome for our purposes.
+	wbCheckinPath = "/v2/billing/meter/daily-checkin"
+	// wbCheckinAlready is the meter's "you already claimed today" code. It
+	// arrives as an HTTP 400 with a 已签到 message, so it reads as a failure
+	// to any caller that only checks the status line.
+	wbCheckinAlready = 10001
 
 	// The desktop identity the WAF fingerprints: version constants move with
 	// the client, so they live here as one edit-point.
@@ -57,6 +131,12 @@ const (
 	wbDesktopUA  = "WorkBuddy/5.5.2 WorkBuddy AI/5.5.2 CLI/5.5.2"
 	wbOrigin     = "https://www.workbuddy.ai"
 	wbDomain     = "www.workbuddy.ai"
+
+	// The CN client's own identity. No packet capture of the CN build was
+	// available, so these mirror the intl shape with the CN product name —
+	// wrong-but-plausible beats intl headers against a CN token.
+	wbIDEVersionCN = "5.5.2"
+	wbDesktopUACN  = "WorkBuddy/5.5.2 WorkBuddy AI/5.5.2 CLI/5.5.2"
 
 	wbLoginPending   = 11217 // upstream code: the browser login is not finished yet
 	wbLoginTTL       = 10 * time.Minute
@@ -83,6 +163,13 @@ type WBAccount struct {
 	ExpiresAtMS      int64  `json:"expiresAtMs,omitempty"`
 	Enabled          bool   `json:"enabled"`
 	LastActivityDate string `json:"lastActivityDate,omitempty"`
+	// Realm is which publishment issued this token: "intl" or "cn". Empty
+	// means intl — the field did not exist when intl was the only lane.
+	Realm string `json:"realm,omitempty"`
+	// LastCheckinDate is the local calendar day the CN daily-checkin last
+	// succeeded; CN only, and independent of LastActivityDate (which is the
+	// intl activity conversation's day).
+	LastCheckinDate string `json:"lastCheckinDate,omitempty"`
 }
 
 // wbDeriveID derives the machine/session/request ids the upstream expects:
@@ -187,26 +274,34 @@ func buildWorkBuddyCatalog() []ModelInfo {
 // request: the base web layer, the identity layer, and the uid-derived
 // machine/session ids. No cookies, no signatures — the JWT is the credential.
 func workBuddyHeaders(acct WBAccount, requestID string) map[string]string {
+	rc := wbRealmConfig(wbRealmOf(acct))
 	return map[string]string{
 		"content-type":        "application/json",
 		"accept":              "application/json, text/plain, */*",
 		"x-requested-with":    "XMLHttpRequest",
-		"origin":              wbOrigin,
-		"referer":             wbOrigin + "/",
+		"origin":              rc.Origin,
+		"referer":             rc.Origin + "/",
 		"x-codebuddy-request": "1",
-		"accept-language":     "en-US",
-		"x-machine-id":        wbDeriveID(acct.UID, "machine"),
-		"x-session-id":        wbDeriveID(acct.UID, "session"),
-		"x-agent-purpose":     "conversation",
-		"x-ide-name":          "WorkBuddy",
-		"x-ide-type":          "WorkBuddy",
-		"x-ide-version":       wbIDEVersion,
-		"x-product":           "WorkBuddy",
-		"x-domain":            wbDomain,
-		"user-agent":          wbDesktopUA,
-		"x-user-id":           acct.UID,
-		"authorization":       "Bearer " + acct.AccessToken,
-		"x-request-id":        requestID,
+		// CN answers zh-CN; the intl build sends en-US. Wrong locale is not
+		// fatal but is one more mismatch in a fingerprint the WAF scores.
+		"accept-language": func() string {
+			if wbRealmOf(acct) == WBRealmCN {
+				return "zh-CN"
+			}
+			return "en-US"
+		}(),
+		"x-machine-id":    wbDeriveID(acct.UID, "machine"),
+		"x-session-id":    wbDeriveID(acct.UID, "session"),
+		"x-agent-purpose": "conversation",
+		"x-ide-name":      "WorkBuddy",
+		"x-ide-type":      "WorkBuddy",
+		"x-ide-version":   rc.IDEVersion,
+		"x-product":       "WorkBuddy",
+		"x-domain":        rc.Domain,
+		"user-agent":      rc.DesktopUA,
+		"x-user-id":       acct.UID,
+		"authorization":   "Bearer " + acct.AccessToken,
+		"x-request-id":    requestID,
 	}
 }
 
@@ -342,7 +437,7 @@ func wbPostOnce(ctx context.Context, body map[string]any, acct WBAccount, conver
 	if err != nil {
 		return nil, &UpstreamError{Code: CodeTransport, Message: err.Error()}
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, WorkBuddyBase+wbChatPath, bytes.NewReader(payload))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, wbRealmConfig(wbRealmOf(acct)).ChatBase+wbChatPath, bytes.NewReader(payload))
 	if err != nil {
 		return nil, &UpstreamError{Code: CodeTransport, Message: err.Error()}
 	}

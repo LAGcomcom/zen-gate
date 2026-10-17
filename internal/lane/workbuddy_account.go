@@ -114,12 +114,13 @@ func (l *Lane) refreshWorkBuddy(ctx context.Context) error {
 	if !wbTokenNearExpiry(acct) && time.Since(l.wbRefreshedAt) < time.Minute {
 		return nil // someone just refreshed; the pair is current
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, WorkBuddyBase+wbAuthRefreshPath, strings.NewReader("{}"))
+	rc := wbRealmConfig(wbRealmOf(acct))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, rc.ChatBase+wbAuthRefreshPath, strings.NewReader("{}"))
 	if err != nil {
 		return err
 	}
 	req.Header.Set("content-type", "application/json")
-	req.Header.Set("user-agent", wbDesktopUA)
+	req.Header.Set("user-agent", rc.DesktopUA)
 	req.Header.Set("x-codebuddy-request", "1")
 	req.Header.Set("x-refresh-token", acct.RefreshToken)
 	req.Header.Set("x-auth-refresh-source", "plugin")
@@ -170,14 +171,19 @@ func (l *Lane) refreshWorkBuddy(ctx context.Context) error {
 // WorkBuddyLoginStart opens a login: the upstream mints a state and an
 // authUrl, and the user finishes the login in their browser. There is no
 // callback — completion is observed by polling with the state.
-func (l *Lane) WorkBuddyLoginStart() (string, error) {
+//
+// realm picks the publishment: "cn" for codebuddy (copilot.tencent.com),
+// anything else for the intl workbuddy.ai flow. The choice is remembered for
+// the poll, because the two publishments do not share a login state.
+func (l *Lane) WorkBuddyLoginStart(realm string) (string, error) {
+	rc := wbRealmConfig(realm)
 	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost,
-		WorkBuddyBase+wbAuthStatePath+"?platform=CLI", strings.NewReader("{}"))
+		rc.ChatBase+wbAuthStatePath+"?platform=CLI", strings.NewReader("{}"))
 	if err != nil {
 		return "", err
 	}
 	req.Header.Set("content-type", "application/json")
-	req.Header.Set("user-agent", wbDesktopUA)
+	req.Header.Set("user-agent", rc.DesktopUA)
 	req.Header.Set("x-codebuddy-request", "1")
 	client := &http.Client{Timeout: 15 * time.Second, Transport: laneHTTP.Transport}
 	resp, err := client.Do(req)
@@ -207,6 +213,7 @@ func (l *Lane) WorkBuddyLoginStart() (string, error) {
 	}
 	l.wbMu.Lock()
 	l.wbLoginState = payload.Data.State
+	l.wbLoginRealm = realm
 	l.wbLoginAt = time.Now()
 	l.wbMu.Unlock()
 	return payload.Data.AuthURL, nil
@@ -218,6 +225,7 @@ func (l *Lane) WorkBuddyLoginStart() (string, error) {
 func (l *Lane) WorkBuddyLoginPoll() (string, error) {
 	l.wbMu.Lock()
 	state := l.wbLoginState
+	realm := l.wbLoginRealm
 	startedAt := l.wbLoginAt
 	l.wbMu.Unlock()
 	if state == "" {
@@ -226,10 +234,11 @@ func (l *Lane) WorkBuddyLoginPoll() (string, error) {
 	if time.Since(startedAt) > wbLoginTTL {
 		l.wbMu.Lock()
 		l.wbLoginState = ""
+		l.wbLoginRealm = ""
 		l.wbMu.Unlock()
 		return "", errors.New("登录已超时，请重新开始")
 	}
-	httpStatus, body, err := wbGet(wbAuthTokenPath+"?state="+state, WBAccount{})
+	httpStatus, body, err := wbGet(wbAuthTokenPath+"?state="+state, WBAccount{Realm: realm})
 	if err != nil {
 		return "", err
 	}
@@ -250,13 +259,14 @@ func (l *Lane) WorkBuddyLoginPoll() (string, error) {
 	if payload.Code != 0 || payload.Data.AccessToken == "" {
 		return "", fmt.Errorf("登录未完成（code %d）%s", payload.Code, strings.TrimSpace(payload.Msg))
 	}
-	acct, err := wbAccountFromToken(payload.Data)
+	acct, err := wbAccountFromToken(payload.Data, realm)
 	if err != nil {
 		return "", err
 	}
 	l.wbMu.Lock()
 	l.wbAcct = acct
 	l.wbLoginState = ""
+	l.wbLoginRealm = ""
 	l.wbMu.Unlock()
 	l.wbPersist(acct)
 	go l.RefreshCatalog(context.Background())
@@ -270,15 +280,40 @@ type wbTokenResponse struct {
 	ExpiresAt    any    `json:"expiresAt"`
 }
 
-// wbAccountFromToken validates the minted pair: the JWT must name the intl
-// realm (this build only speaks workbuddy.ai) and carries uid/expiry itself.
-func wbAccountFromToken(t wbTokenResponse) (WBAccount, error) {
+// wbRealmFromIss reads the publishment out of a token's issuer. Empty when
+// the issuer names neither realm — plenty of mints carry a bare or internal
+// issuer, and in that case the caller's own knowledge (which login did we
+// open?) is the better witness.
+func wbRealmFromIss(iss string) string {
+	i := strings.ToLower(iss)
+	switch {
+	case strings.Contains(i, "workbuddy.ai"):
+		return WBRealmIntl
+	case strings.Contains(i, "codebuddy"), strings.Contains(i, "copilot.tencent.com"), strings.Contains(i, "tencent"):
+		return WBRealmCN
+	}
+	return ""
+}
+
+// wbAccountFromToken validates the minted pair and stamps the account with
+// the realm it belongs to. hint is the region whose login produced it; an
+// issuer that names a realm outranks the hint, and a silent issuer defers to
+// it. The intl path keeps its assertion — a token that is neither clearly CN
+// nor issued by workbuddy.ai is not an intl account.
+func wbAccountFromToken(t wbTokenResponse, hint string) (WBAccount, error) {
 	sub, iss, expMS, ok := wbJWTClaims(t.AccessToken)
 	if !ok {
 		return WBAccount{}, errors.New("返回的令牌无法解析")
 	}
-	if !strings.Contains(iss, "workbuddy.ai") {
-		return WBAccount{}, errors.New("令牌不属于国际版（workbuddy.ai），本渠道暂只支持国际版")
+	realm := hint
+	if ev := wbRealmFromIss(iss); ev != "" {
+		realm = ev
+	}
+	if realm != WBRealmCN && !strings.Contains(iss, "workbuddy.ai") {
+		return WBAccount{}, errors.New("令牌不属于国际版（workbuddy.ai）；国内版请在登录时选择「国内版」")
+	}
+	if realm == "" {
+		realm = WBRealmIntl
 	}
 	if sub == "" {
 		sub = "anonymous"
@@ -289,6 +324,7 @@ func wbAccountFromToken(t wbTokenResponse) (WBAccount, error) {
 		UID:          sub,
 		ExpiresAtMS:  expMS,
 		Enabled:      true,
+		Realm:        realm,
 	}
 	if acct.ExpiresAtMS == 0 {
 		acct.ExpiresAtMS = wbExpToMS(t.ExpiresAt)
@@ -307,11 +343,20 @@ func wbAccountFromToken(t wbTokenResponse) (WBAccount, error) {
 	return acct, nil
 }
 
-// wbGet performs one identity-bearing GET against the WorkBuddy root and
-// returns (upstream code, body) without treating non-2xx as a Go error — the
-// callers read the envelope's own codes.
+// wbGet performs one identity-bearing GET against the account's publishment
+// root and returns (upstream code, body) without treating non-2xx as a Go
+// error — the callers read the envelope's own codes. Billing paths want
+// wbBillingGet: on CN the meter lives on a different host than the chat API.
 func wbGet(path string, acct WBAccount) (int, []byte, error) {
-	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, WorkBuddyBase+path, nil)
+	return wbGetOn(wbRealmConfig(wbRealmOf(acct)).ChatBase, path, acct)
+}
+
+func wbBillingGet(path string, acct WBAccount) (int, []byte, error) {
+	return wbGetOn(wbRealmConfig(wbRealmOf(acct)).BillingBase, path, acct)
+}
+
+func wbGetOn(base, path string, acct WBAccount) (int, []byte, error) {
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, base+path, nil)
 	if err != nil {
 		return 0, nil, err
 	}
@@ -378,6 +423,84 @@ func (l *Lane) wbMarkActivity(date string) {
 	}
 }
 
+// WorkBuddyDailyCheckin claims the CN publishment's daily reward on its own
+// endpoint. intl has no such endpoint — it earns its daily by conversing
+// (WorkBuddyDailyActivity) — so a CN account left on the activity chat would
+// collect nothing all week while still looking busy in the logs.
+//
+// The meter answers code 0 on a fresh claim and 10001 (or any 已签到 wording,
+// sometimes behind an HTTP 400) once the day is claimed. Both mean the day is
+// finished, so both mark it; only a genuinely different code leaves the day
+// open for the next tick.
+func (l *Lane) WorkBuddyDailyCheckin(ctx context.Context) (bool, error) {
+	acct, ok := l.workBuddyReady()
+	if !ok || wbRealmOf(acct) != WBRealmCN {
+		return false, nil
+	}
+	today := time.Now().Format("2006-01-02")
+	if acct.LastCheckinDate == today {
+		return false, nil
+	}
+	if wbTokenNearExpiry(acct) {
+		if rerr := l.refreshWorkBuddy(ctx); rerr == nil {
+			if fresh, ok := l.workBuddyReady(); ok {
+				acct = fresh
+			}
+		}
+	}
+	status, body, err := wbBillingPost(ctx, wbCheckinPath, acct, "{}")
+	if err != nil {
+		// Transport trouble only; the day stays open for the next tick.
+		return true, err
+	}
+	var resp struct {
+		Code int    `json:"code"`
+		Msg  string `json:"msg"`
+	}
+	_ = json.Unmarshal(body, &resp)
+	if resp.Code != 0 && resp.Code != wbCheckinAlready && !strings.Contains(resp.Msg, "已签到") {
+		return true, fmt.Errorf("国内版签到未成功（HTTP %d，code %d）%s",
+			status, resp.Code, strings.TrimSpace(resp.Msg))
+	}
+	l.wbMarkCheckin(today)
+	return true, nil
+}
+
+func (l *Lane) wbMarkCheckin(date string) {
+	l.wbMu.Lock()
+	l.wbAcct.LastCheckinDate = date
+	acct := l.wbAcct
+	fn := l.wbPersist
+	l.wbMu.Unlock()
+	if fn != nil {
+		fn(acct)
+	}
+}
+
+// wbBillingPost is the POST twin of wbBillingGet: same meter host, same
+// desktop identity headers the chat path presents.
+func wbBillingPost(ctx context.Context, path string, acct WBAccount, payload string) (int, []byte, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
+		wbRealmConfig(wbRealmOf(acct)).BillingBase+path, strings.NewReader(payload))
+	if err != nil {
+		return 0, nil, err
+	}
+	for k, v := range workBuddyHeaders(acct, wbRequestID()) {
+		req.Header.Set(k, v)
+	}
+	client := &http.Client{Timeout: 15 * time.Second, Transport: laneHTTP.Transport}
+	resp, err := client.Do(req)
+	if err != nil {
+		return 0, nil, err
+	}
+	defer resp.Body.Close()
+	data, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
+	if err != nil {
+		return 0, nil, err
+	}
+	return resp.StatusCode, data, nil
+}
+
 // WorkBuddyCredits reads the billing resource summary for the status card.
 // The response's numeric layout is not contractual, so the reader accepts any
 // numeric field named like a balance anywhere under data and reports the
@@ -399,7 +522,7 @@ func (l *Lane) WorkBuddyCredits(ctx context.Context) (string, error) {
 			}
 		}
 	}
-	outerCode, body, err := wbGetCancellable(ctx, wbUserResourcePath, acct)
+	outerCode, body, err := wbBillingGetCancellable(ctx, wbUserResourcePath, acct)
 	if err != nil {
 		return "", err
 	}
@@ -413,7 +536,7 @@ func (l *Lane) WorkBuddyCredits(ctx context.Context) (string, error) {
 		if !ok {
 			return "", errors.New("WorkBuddy 账号未登录")
 		}
-		if outerCode, body, err = wbGetCancellable(ctx, wbUserResourcePath, fresh); err != nil {
+		if outerCode, body, err = wbBillingGetCancellable(ctx, wbUserResourcePath, fresh); err != nil {
 			return "", err
 		}
 	}
@@ -434,6 +557,17 @@ func (l *Lane) WorkBuddyCredits(ctx context.Context) (string, error) {
 // wbGetCancellable runs one wbGet but honours ctx cancellation instead of the
 // bare 15s client timeout, so a status-card refresh cannot outlive its request.
 func wbGetCancellable(ctx context.Context, path string, acct WBAccount) (int, []byte, error) {
+	return wbGetOnCancellable(ctx, wbRealmConfig(wbRealmOf(acct)).ChatBase, path, acct)
+}
+
+// wbBillingGetCancellable is wbGetCancellable against the meter host. On intl
+// the two hosts are the same, so this only matters for CN — where asking
+// copilot.tencent.com for a billing meter is what answers 404.
+func wbBillingGetCancellable(ctx context.Context, path string, acct WBAccount) (int, []byte, error) {
+	return wbGetOnCancellable(ctx, wbRealmConfig(wbRealmOf(acct)).BillingBase, path, acct)
+}
+
+func wbGetOnCancellable(ctx context.Context, base, path string, acct WBAccount) (int, []byte, error) {
 	done := make(chan struct{})
 	var (
 		code int
@@ -441,7 +575,7 @@ func wbGetCancellable(ctx context.Context, path string, acct WBAccount) (int, []
 		gerr error
 	)
 	go func() {
-		code, body, gerr = wbGet(path, acct)
+		code, body, gerr = wbGetOn(base, path, acct)
 		close(done)
 	}()
 	select {
