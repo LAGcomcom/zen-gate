@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 )
@@ -32,6 +33,9 @@ type Decoder struct {
 	oidx map[float64]string
 	// chat-wire tool calls without index, grouped by id
 	chatTool map[string]int // provider id → block index
+	// the tool key of the most recent chat frame: a frame that opens a
+	// different call implicitly ends the previous one (chat has no stop frame)
+	chatLast string
 }
 
 // StreamResult accumulates what one upstream call produced.
@@ -77,13 +81,13 @@ type StreamResult struct {
 	// "end_turn", "failed", …) before mapping. The mapped Finish collapses
 	// unknown spellings into stop, so a normal-ending judgement must consult
 	// the token, not the mapping.
-	FinishToken         string
-	SawFinish           bool
-	SawReasoning        bool
-	SawText             bool
-	SawToolCall         bool
-	BrokenToolCall      bool
-	ReasoningText       string
+	FinishToken    string
+	SawFinish      bool
+	SawReasoning   bool
+	SawText        bool
+	SawToolCall    bool
+	BrokenToolCall bool
+	ReasoningText  string
 	// AnswerText is the concatenated answer, capped like the reasoning
 	// checkpoint — it feeds the max-tokens continuation without buffering
 	// more than one cap's worth.
@@ -174,7 +178,24 @@ func (d *Decoder) endBlock(key string) {
 }
 
 func (d *Decoder) endAllBlocks() {
+	keys := make([]string, 0, len(d.blocks))
 	for key := range d.blocks {
+		keys = append(keys, key)
+	}
+	// Map order is random; closing blocks in the order they were opened keeps
+	// parallel calls in the order the model made them (issue #96).
+	sort.Slice(keys, func(i, j int) bool { return d.blocks[keys[i]] < d.blocks[keys[j]] })
+	for _, key := range keys {
+		d.endBlock(key)
+	}
+}
+
+// endOpenTool validates and closes one tool block if it is still open.
+func (d *Decoder) endOpenTool(key string) {
+	if idx, ok := d.blocks[key]; ok {
+		if strings.HasPrefix(key, "tool:") {
+			d.checkToolBlock(idx)
+		}
 		d.endBlock(key)
 	}
 }
@@ -307,6 +328,14 @@ func (d *Decoder) chatToolCall(m map[string]any) {
 			return
 		}
 	}
+	// Chat-wire tool blocks carry no explicit stop frame. A frame that starts
+	// a different call means the previous one is complete, so close it here:
+	// leaving every block open until Finish() made parallel calls land on one
+	// block index for the whole turn (issue #96).
+	if d.chatLast != "" && d.chatLast != key {
+		d.endOpenTool(d.chatLast)
+	}
+	d.chatLast = key
 	name := ""
 	args := ""
 	if fn, ok := m["function"].(map[string]any); ok {

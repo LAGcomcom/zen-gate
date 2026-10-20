@@ -877,7 +877,7 @@ func normalizeEffortParam(v string) string {
 		return "light"
 	case "balanced", "medium":
 		return "balanced"
-	case "deep", "high", "xhigh":
+	case "deep", "high", "xhigh", "max", "maximum", "highest":
 		return "deep"
 	case "minimal", "low", "none", "off", "disabled":
 		return "light"

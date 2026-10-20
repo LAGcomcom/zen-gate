@@ -42,6 +42,11 @@ type openaiMessage struct {
 	Content    json.RawMessage  `json:"content"`
 	ToolCalls  []openaiToolCall `json:"tool_calls"`
 	ToolCallID string           `json:"tool_call_id"`
+	// The thinking a previous assistant turn produced. Clients replay it so a
+	// thinking-mode upstream accepts the turn; dropping it here made every
+	// second turn fail with "reasoning_content must be passed back" (#99).
+	ReasoningContent string `json:"reasoning_content"`
+	Reasoning        string `json:"reasoning"`
 }
 
 type openaiToolDef struct {
@@ -83,6 +88,12 @@ func convertOpenAIMessages(in []openaiMessage) []lane.Message {
 			parts := partsOfContent(m.Content, nil)
 			for _, tc := range m.ToolCalls {
 				parts = append(parts, lane.ToolCallPart{ID: tc.ID, Name: tc.Function.Name, Arguments: tc.Function.Arguments})
+			}
+			// Keep the replayed thinking, under either spelling a client uses.
+			if r := m.ReasoningContent; r != "" {
+				parts = append(parts, lane.ReasoningPart{Text: r})
+			} else if r := m.Reasoning; r != "" {
+				parts = append(parts, lane.ReasoningPart{Text: r})
 			}
 			out = append(out, lane.Message{Role: lane.RoleAssistant, Parts: parts})
 		case "tool":
@@ -496,7 +507,11 @@ type chatEmitter struct {
 	declared map[string]bool
 	toolIdx  int
 	openTool map[int]*chatToolBuf
-	sawAny   bool
+	// lane block index → OpenAI tool_calls.index. Allocated when the block
+	// opens so parallel calls get distinct indexes immediately instead of
+	// sharing 0 until a block end arrives (issue #96).
+	toolNumber map[int]int
+	sawAny     bool
 }
 
 // declaredNames collects the tool names an OpenAI request declared.
@@ -545,8 +560,9 @@ func (e *chatEmitter) consume(c lane.Chunk, text, reasoning *strings.Builder, to
 			if e.openTool == nil {
 				e.openTool = map[int]*chatToolBuf{}
 			}
-			e.openTool[c.Index] = &chatToolBuf{id: c.ID, name: c.Name,
-				suppressed: isDecoy(c.Name) && !e.declared[c.Name]}
+			suppressed := isDecoy(c.Name) && !e.declared[c.Name]
+			e.openTool[c.Index] = &chatToolBuf{id: c.ID, name: c.Name, suppressed: suppressed}
+			e.numberTool(c.Index, suppressed)
 		}
 	case lane.ChunkToolCallDelta:
 		if e.openTool == nil {
@@ -567,6 +583,7 @@ func (e *chatEmitter) consume(c lane.Chunk, text, reasoning *strings.Builder, to
 		}
 		if buf, ok := e.openTool[c.Index]; ok {
 			delete(e.openTool, c.Index)
+			delete(e.toolNumber, c.Index)
 			if !buf.suppressed {
 				*toolCalls = append(*toolCalls, map[string]any{
 					"id":       buf.id,
@@ -600,15 +617,16 @@ func (e *chatEmitter) stream(c lane.Chunk) []struct{ delta map[string]any } {
 			if e.openTool == nil {
 				e.openTool = map[int]*chatToolBuf{}
 			}
-			e.openTool[c.Index] = &chatToolBuf{id: c.ID, name: c.Name,
-				suppressed: isDecoy(c.Name) && !e.declared[c.Name]}
+			suppressed := isDecoy(c.Name) && !e.declared[c.Name]
+			e.openTool[c.Index] = &chatToolBuf{id: c.ID, name: c.Name, suppressed: suppressed}
+			e.numberTool(c.Index, suppressed)
 		}
 	case lane.ChunkToolCallDelta:
 		if e.openTool != nil {
 			if buf, ok := e.openTool[c.Index]; ok && !buf.suppressed {
 				delta := map[string]any{
 					"tool_calls": []any{map[string]any{
-						"index": e.toolIdx,
+						"index": e.toolNumber[c.Index],
 						"id":    firstNonEmpty(buf.id, c.ID),
 						"function": map[string]any{
 							"name":      firstNonEmpty(buf.name, c.Name),
@@ -629,11 +647,25 @@ func (e *chatEmitter) stream(c lane.Chunk) []struct{ delta map[string]any } {
 		if e.openTool != nil {
 			if _, ok := e.openTool[c.Index]; ok {
 				delete(e.openTool, c.Index)
-				e.toolIdx++
+				delete(e.toolNumber, c.Index)
 			}
 		}
 	}
 	return out
+}
+
+// numberTool assigns the next OpenAI tool_calls.index to a newly opened lane
+// block. Suppressed decoys never reach the client, so they stay unnumbered and
+// leave no gap in the indexes.
+func (e *chatEmitter) numberTool(block int, suppressed bool) {
+	if suppressed {
+		return
+	}
+	if e.toolNumber == nil {
+		e.toolNumber = map[int]int{}
+	}
+	e.toolNumber[block] = e.toolIdx
+	e.toolIdx++
 }
 
 func isDecoy(name string) bool {
@@ -721,6 +753,7 @@ type responsesItem struct {
 	Type      string          `json:"type"`
 	Role      string          `json:"role,omitempty"`
 	Content   json.RawMessage `json:"content,omitempty"`
+	Summary   json.RawMessage `json:"summary,omitempty"`
 	CallID    string          `json:"call_id,omitempty"`
 	Name      string          `json:"name,omitempty"`
 	Arguments string          `json:"arguments,omitempty"`
@@ -746,6 +779,7 @@ func convertResponsesInput(raw json.RawMessage, instructions string) []lane.Mess
 	if err := json.Unmarshal(raw, &items); err != nil {
 		return out
 	}
+	pendingReasoning := ""
 	for _, it := range items {
 		switch it.Type {
 		case "", "message":
@@ -754,18 +788,65 @@ func convertResponsesInput(raw json.RawMessage, instructions string) []lane.Mess
 				role = "user"
 			}
 			parts := responsesContentParts(it.Content)
+			// A reasoning item precedes the assistant turn it belongs to;
+			// carrying it back is what lets a thinking-mode upstream accept
+			// the replayed turn (issue #99).
+			if role == lane.RoleAssistant && pendingReasoning != "" {
+				parts = append(parts, lane.ReasoningPart{Text: pendingReasoning})
+				pendingReasoning = ""
+			}
 			out = append(out, lane.Message{Role: role, Parts: parts})
+		case "reasoning":
+			if t := responsesReasoningText(it); t != "" {
+				pendingReasoning = t
+			}
 		case "function_call":
-			out = append(out, lane.Message{Role: lane.RoleAssistant,
-				Parts: []lane.Part{lane.ToolCallPart{ID: it.CallID, Name: it.Name, Arguments: it.Arguments}}})
+			parts := []lane.Part{lane.ToolCallPart{ID: it.CallID, Name: it.Name, Arguments: it.Arguments}}
+			if pendingReasoning != "" {
+				parts = append(parts, lane.ReasoningPart{Text: pendingReasoning})
+				pendingReasoning = ""
+			}
+			out = append(out, lane.Message{Role: lane.RoleAssistant, Parts: parts})
 		case "function_call_output":
 			out = append(out, lane.Message{Role: lane.RoleTool,
 				Parts: []lane.Part{lane.ToolResultPart{ToolCallID: it.CallID, Text: it.Output}}})
 		default:
-			// reasoning items are never echoed upstream
+			// Other item types have no unified representation; skip them.
 		}
 	}
 	return out
+}
+
+// responsesReasoningText reads the thinking out of a reasoning item, in
+// whichever shape the client sent: a content array (reasoning_text), a summary
+// array (summary_text), or a bare string.
+func responsesReasoningText(it responsesItem) string {
+	for _, raw := range []json.RawMessage{it.Summary, it.Content} {
+		if len(raw) == 0 || string(raw) == "null" {
+			continue
+		}
+		var s string
+		if json.Unmarshal(raw, &s) == nil {
+			if s != "" {
+				return s
+			}
+			continue
+		}
+		var arr []struct {
+			Text string `json:"text"`
+		}
+		if json.Unmarshal(raw, &arr) != nil {
+			continue
+		}
+		joined := ""
+		for _, p := range arr {
+			joined += p.Text
+		}
+		if joined != "" {
+			return joined
+		}
+	}
+	return ""
 }
 
 func (s *Server) handleResponses(w http.ResponseWriter, r *http.Request) {

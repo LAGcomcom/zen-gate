@@ -147,11 +147,14 @@ func ToChatMessages(messages []Message) []map[string]any {
 			flushParts()
 		case RoleAssistant:
 			text := ""
+			reasoning := ""
 			tools := []map[string]any{}
 			for _, p := range m.Parts {
 				switch t := p.(type) {
 				case TextPart:
 					text += t.Text
+				case ReasoningPart:
+					reasoning += t.Text
 				case ToolCallPart:
 					args := t.Arguments
 					if strings.TrimSpace(args) == "" {
@@ -168,6 +171,11 @@ func ToChatMessages(messages []Message) []map[string]any {
 				}
 			}
 			msg := map[string]any{"role": RoleAssistant, "content": text}
+			if reasoning != "" {
+				// A thinking-mode upstream refuses a replayed assistant turn
+				// whose reasoning was dropped (issue #99).
+				msg["reasoning_content"] = reasoning
+			}
 			if len(tools) > 0 {
 				msg["tool_calls"] = tools
 			}

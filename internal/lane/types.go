@@ -28,6 +28,13 @@ type Part interface{ partMarker() }
 // TextPart is plain text.
 type TextPart struct{ Text string }
 
+// ReasoningPart is the thinking an assistant turn produced, as the client
+// replayed it. DeepSeek-family thinking mode rejects a replayed assistant turn
+// whose reasoning_content was dropped ("The `reasoning_content` in the thinking
+// mode must be passed back to the API"), so the text is carried through the
+// unified model and put back on the chat wire (issue #99).
+type ReasoningPart struct{ Text string }
+
 // ImagePart is an image carried as a data URL ("data:image/png;base64,…").
 type ImagePart struct{ DataURL string }
 
@@ -61,6 +68,7 @@ type ToolResultPart struct {
 }
 
 func (TextPart) partMarker()       {}
+func (ReasoningPart) partMarker()  {}
 func (ImagePart) partMarker()      {}
 func (AudioPart) partMarker()      {}
 func (FilePart) partMarker()       {}
