@@ -1,6 +1,15 @@
 {
   "announcements": [
     {
+      "id": "2026-10-20-v1.8.2-release",
+      "title": "v1.8.2：补齐 #96 的另一半——并行工具调用在上游不给序号时仍会串参数",
+      "body": "v1.8.1 修了并行工具调用（#96），但没有覆盖全部上游报文：有的上游发并行工具调用时不给 index，参数续帧也不重复带 id。这种情况下网关去「找一个还开着的工具块」，而那是按 Go map 的随机顺序取的，于是某个调用的参数被拼到了另一个调用上，客户端看到截断或非法的 JSON 参数，这一轮还会被判成「坏调用」降级成 max_tokens。\n现在无 id 无 index 的续帧固定挂到最近打开的那个调用，不再随机。这个缺陷在 v1.8.1 上可稳定复现，新增的回归测试在旧代码上失败、在新代码上通过（含一条绕行 64 次的循环，因为 map 顺序每次不同）。\n如果你用的是会带 index 的上游，v1.8.1 已经够用；不确认的话直接升到本版。\n1. 同时补上了 v1.8.1 缺失的端到端验证：并行调用带/不带序号两条报文、reasoning_effort 写 max 时上游 max_tokens 确实比 low 更深、回传的思考内容确实带着 reasoning_content 发往上游；\n2. 升级方式：总览页「一键更新」或 Releases 页下载。",
+      "level": "info",
+      "start": "2026-10-20",
+      "end": "2026-10-27",
+      "url": "https://github.com/LAGcomcom/zen-gate/releases/latest"
+    },
+    {
       "id": "2026-10-20-v1.8.1-release",
       "title": "v1.8.1：修复并行工具调用被并成一次、Trae 报 reasoning_content 错误、reasoning_effort=max 被静默降级",
       "body": "本版修三个客户端可见的问题，全部来自 issue 反馈：\n1. 并行工具调用被合成一个（#96）：流式下模型一回合发起两个及以上工具调用时，所有增量都落在 tool_calls.index = 0，客户端把工具名拼成「web_searchgrep」、参数拼成非法 JSON，这一轮调用整体作废，表现为命令被截断或搞错、模型反复重试。单次调用不受影响；\n2. Trae 里报「The reasoning_content in the thinking mode must be passed back to the API」（#99）：客户端回传的思考内容此前在网关里被丢掉，思考模式上游因此拒绝这一轮。现在 OpenAI 与 Responses 两种入站格式的思考内容都会原样带回上游；DSH 等本来就会回传的客户端不受影响；\n3. reasoning_effort 写 \"max\" 被静默降级（#97）：此前只有 light/balanced/high/xhigh 被识别，\"max\" 当成没写、回落到默认档。现在 max / maximum / highest 一律按最深档，且不会削减客户端声明的输出预算。\n4. 升级方式：总览页「一键更新」或 Releases 页下载。",
