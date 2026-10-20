@@ -12,6 +12,7 @@ import (
 	"encoding/base64"
 	"encoding/binary"
 	"fmt"
+	"net/http"
 	"strings"
 	"time"
 
@@ -103,7 +104,13 @@ func probeOneModality(ctx context.Context, p *store.Provider, model string, part
 		}
 		return verdictYes, answer
 	}
-	if uerr.Code == lane.CodeServer && uerr.Unavailable {
+	// ClassifyFailure files 400/404/422 alike as CodeServer+Unavailable, but
+	// they are not the same answer about the model: a 400/422 names the
+	// request shape (the modality), while a 404 names the route or the model
+	// id. Recording a 404 as "no" wrote a plain-text tag over a model that was
+	// never asked about the modality at all, so a typo'd model id downgraded a
+	// multimodal model permanently. A 404 is an inconclusive probe.
+	if uerr.Code == lane.CodeServer && uerr.Unavailable && uerr.HTTPStatus != http.StatusNotFound {
 		return verdictNo, uerr.Message
 	}
 	return verdictUnknown, uerr.Message
