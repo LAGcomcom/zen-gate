@@ -122,9 +122,10 @@ func TestParallelToolCallsEndToEnd(t *testing.T) {
 }
 
 // Issue #96, the harder wire: the upstream sends no index at all and drops the
-// id on the argument continuations. A bare continuation must follow the call
-// that was opened last; picking a random open block glued the arguments onto
-// the other call.
+// id on the argument continuations. v1.8.1 dropped those frames entirely, so
+// the call arrived with truncated arguments ("{\"pattern\":\"t") and the turn
+// was reported as length instead of tool_calls. They must follow the call that
+// was opened last.
 func TestParallelToolCallsWithoutIndexEndToEnd(t *testing.T) {
 	tcs, finish := parallelToolReply(t, []string{
 		`{"choices":[{"delta":{"role":"assistant","tool_calls":[{"id":"call_a","function":{"name":"web_search","arguments":"{\"query\":\"golang\"}"}}]}}]}`,

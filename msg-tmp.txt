@@ -1,0 +1,12 @@
+announcements: correct the v1.8.2 root cause (frames were dropped, not misrouted)
+
+The first draft said the bare continuation was attached to a random open
+tool block via Go map order. It was not: that branch keyed off d.chatTool,
+which was never populated, so the frames were dropped outright and the
+call arrived truncated with finish_reason=length.
+
+Verified against the v1.8.1 binary built from the tag: the same wire gives
+{"pattern":"t with finish_reason=length, while v1.8.2 gives {"pattern":"todo"}
+with finish_reason=tool_calls.
+
+Also correct the test comments that repeated the wrong mechanism.

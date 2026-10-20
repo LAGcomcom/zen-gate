@@ -3,12 +3,14 @@ package lane
 import "testing"
 
 // Issue #96, the harder wire: an upstream that sends parallel tool calls with
-// neither an index nor an id on the argument frames. The continuation must
-// attach to the most recently opened call, not to whichever block a Go map
-// happens to yield first.
+// neither an index nor an id on the argument frames. v1.8.1 dropped those
+// continuation frames outright -- the branch meant to route them keyed off a
+// map that was never populated -- so the call's arguments arrived truncated and
+// the turn was downgraded to max_tokens. They must follow the call that was
+// opened most recently.
 func TestChatBareContinuationFollowsLastOpenedCall(t *testing.T) {
-	// Run many times: Go map iteration order is randomised per pass, so a
-	// single run could get lucky.
+	// Run several times: a future implementation that walks a map here would
+	// fail only on some passes, because Go randomises iteration order.
 	for attempt := 0; attempt < 64; attempt++ {
 		names := map[int]string{}
 		args := map[int]string{}
@@ -41,11 +43,11 @@ func TestChatBareContinuationFollowsLastOpenedCall(t *testing.T) {
 			}
 		}
 		if got := byName["web_search"]; got != `{"query":"one"}` {
-			t.Fatalf("attempt %d: web_search args = %q, want %q (args glued onto the wrong call)",
+			t.Fatalf("attempt %d: web_search args = %q, want %q (continuation frame lost)",
 				attempt, got, `{"query":"one"}`)
 		}
 		if got := byName["grep"]; got != `{"pattern":"two"}` {
-			t.Fatalf("attempt %d: grep args = %q, want %q (args glued onto the wrong call)",
+			t.Fatalf("attempt %d: grep args = %q, want %q (continuation frame lost)",
 				attempt, got, `{"pattern":"two"}`)
 		}
 	}
