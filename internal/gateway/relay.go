@@ -17,25 +17,52 @@ import (
 // is forwarded to that provider instead of the free lane, and the response is
 // normalized back into whatever wire the caller speaks.
 
-// providerRoute resolves a namespaced model id onto its provider. Matching
-// never collides with lane models: a zen model id contains no "/", and a
-// Kilo id that does (e.g. "nvidia/nemotron-3-ultra:free") names a model the
-// lane catalog already knows — catalog membership wins, so a user-added
-// provider sharing the first segment never hijacks a free-pool id.
+// providerRoute resolves a requested model id onto a custom provider. It
+// handles both shapes a picker can hand back:
+//
+//   - Namespaced ("intern/glm-5.3"): the provider segment picks the upstream.
+//     Matching never collides with lane models: a zen model id contains no
+//     "/", and a Kilo id that does (e.g. "nvidia/nemotron-3-ultra:free")
+//     names a model the lane catalog already knows — catalog membership wins,
+//     so a user-added provider sharing the first segment never hijacks a
+//     free-pool id.
+//   - Bare ("glm-5.3"): the lane owns the name only while its catalog can
+//     actually answer it. Injected pickers mix bare lane ids and namespaced
+//     provider ids, and after a lane rotation a bare id can belong to no
+//     channel at all — attemptModel then hard-submits it to the Zen endpoint
+//     and the caller eats an upstream 401/404 for a model they can serve
+//     themselves (observed: bare glm-5.3 → lane INVALID_CREDENTIAL while
+//     intern/glm-5.3 answered in 600ms). When the catalog does not list the
+//     name and an enabled provider serves exactly that upstream id, route to
+//     the provider instead.
 func (s *Server) providerRoute(model string) (*store.Provider, string, bool) {
 	base := lane.BaseModelId(model)
-	i := strings.Index(base, "/")
-	if i <= 0 || i == len(base)-1 {
-		return nil, "", false
-	}
-	id, upstream := base[:i], base[i+1:]
-	if cat, _, _ := s.Lane.Snapshot(); laneCatalogHas(cat, base) {
-		return nil, "", false
-	}
+	cat, _, _ := s.Lane.Snapshot()
 	cfg := s.Store.Config()
+	if i := strings.Index(base, "/"); i > 0 && i < len(base)-1 {
+		id, upstream := base[:i], base[i+1:]
+		if laneCatalogHas(cat, base) {
+			return nil, "", false
+		}
+		for k := range cfg.Providers {
+			if cfg.Providers[k].ID == id {
+				return &cfg.Providers[k], upstream, true
+			}
+		}
+		return nil, "", false
+	}
+	if laneCatalogHas(cat, base) {
+		return nil, "", false
+	}
 	for k := range cfg.Providers {
-		if cfg.Providers[k].ID == id {
-			return &cfg.Providers[k], upstream, true
+		p := &cfg.Providers[k]
+		if !p.Enabled {
+			continue
+		}
+		for _, m := range p.Models {
+			if lane.BaseModelId(m) == base {
+				return p, m, true
+			}
 		}
 	}
 	return nil, "", false

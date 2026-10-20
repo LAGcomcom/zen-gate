@@ -82,6 +82,45 @@ func TestProviderChatRelay(t *testing.T) {
 	}
 }
 
+// A bare model id the lane catalog cannot answer is what the free lane would
+// hard-submit upstream for a 401/404 — while the user's own provider may
+// serve that exact name. providerRoute must hand the lane's ghosts to the
+// provider, and hand nothing the lane really owns.
+func TestProviderRouteBareNameCollision(t *testing.T) {
+	up := fakeUpstream(t, []string{
+		`{"choices":[{"delta":{"content":"x"}}]}`,
+		`{"choices":[{"delta":{},"finish_reason":"stop"}]}`,
+		`[DONE]`,
+	})
+	defer up.Close()
+	s := newTestServer(t, up)
+	// "glm-5.3-flash-free" is a real fallback-catalog lane id; "zzz-model"
+	// exists only on the provider side.
+	addProvider(t, s, up, store.ProtocolOpenAI, "sk", true, "glm-5.3-flash-free", "zzz-model")
+	ts := httptest.NewServer(s.mux)
+	defer ts.Close()
+
+	post := func(model string) (string, int) {
+		body := `{"model":"` + model + `","messages":[{"role":"user","content":"hi"}],"stream":false}`
+		req, _ := http.NewRequest("POST", ts.URL+"/v1/chat/completions", strings.NewReader(body))
+		req.Header.Set("authorization", "Bearer "+s.Store.Config().MainKey)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		return resp.Header.Get("x-zen-gate-served-by"), resp.StatusCode
+	}
+	if served, code := post("zzz-model"); code != 200 || served != "prov/zzz-model" {
+		t.Fatalf("bare provider-only id: served=%q code=%d, want prov/zzz-model 200", served, code)
+	}
+	// The lane owns this name — a provider carrying the same id must not
+	// hijack the turn.
+	if served, _ := post("glm-5.3-flash-free"); served == "prov/glm-5.3-flash-free" {
+		t.Fatal("lane-owned bare id was hijacked by the same-named provider")
+	}
+}
+
 func TestProviderAnthropicRelay(t *testing.T) {
 	var gotKey, gotPath string
 	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

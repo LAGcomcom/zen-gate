@@ -17,11 +17,63 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"zen-gate/internal/lane"
 	"zen-gate/internal/store"
 )
+
+// providerStreamIdle bounds silence on a relayed stream — both the wait for
+// the first frame after the 200 and the gap between frames. A user-added
+// upstream can accept the request, send headers, then queue: observed on
+// NVIDIA NIM's free tier with harness-sized prompts, where the body stayed
+// silent for minutes while the client aborted on its own patience (access log
+// read ABORTED at 20-44s with no in/out at all). Every received byte resets
+// the clock, so a slow-but-live answer is never cut; 30s of true silence on a
+// direct endpoint is a stuck request, not a queued one worth hanging for.
+// A var so tests can shrink the bound.
+var providerStreamIdle = 30 * time.Second
+
+// providerHeaderBound caps the wait for response headers on a relayed turn.
+// The lane's shared transport holds this at 90s — tuned for rotating egress —
+// but a user-added upstream that opens the socket and then never answers is
+// the exact shape observed on NVIDIA NIM's free queue: the client gave up at
+// 20s (ABORTED, attempts=1, failover never saw it). Cutting the header wait
+// at 30s turns that into a clean TRANSPORT error the gateway can report or
+// retry. A var so tests can shrink it.
+var providerHeaderBound = 30 * time.Second
+
+// relayHTTP returns the relay's own client: the lane's shared transport
+// cloned with the tighter header bound, and no end-to-end Timeout (a long
+// answer is fine — what is bounded is silence, phase by phase). The clone is
+// rebuilt when SetProxy swaps the base transport, so proxy mode stays honoured.
+var (
+	relayMu     sync.Mutex
+	relayBase   http.RoundTripper
+	relayClient *http.Client
+)
+
+func relayHTTP() *http.Client {
+	relayMu.Lock()
+	defer relayMu.Unlock()
+	c := lane.Client()
+	if relayClient != nil && c.Transport == relayBase {
+		return relayClient
+	}
+	cl := *c
+	if t, ok := c.Transport.(*http.Transport); ok {
+		ct := t.Clone()
+		ct.ResponseHeaderTimeout = providerHeaderBound
+		cl.Transport = ct
+		cl.Timeout = 0 // bounded per-phase, not end-to-end: a long answer is fine
+	} else {
+		cl.Timeout = providerHeaderBound
+	}
+	relayBase = c.Transport
+	relayClient = &cl
+	return relayClient
+}
 
 // NormalizeBaseURL trims and scheme-fills a provider base URL.
 func NormalizeBaseURL(raw string) string {
@@ -252,11 +304,14 @@ func postStreamed(ctx context.Context, p *store.Provider, session string, body m
 	authHeaders(req.Header, p.APIKey, p.Protocol)
 	identityHeaders(req.Header, p, session)
 
-	resp, err := lane.Client().Do(req)
+	resp, err := relayHTTP().Do(req)
 	if err != nil {
 		if ctx.Err() != nil {
 			return nil, &lane.UpstreamError{Code: lane.CodeAborted, Message: "cancelled"}
 		}
+		// A header-wait that hit ResponseHeaderTimeout reads as a net timeout
+		// error with no ctx cancellation — that is the queued-forever shape,
+		// classify it as a transport fault the caller can retry or report.
 		return nil, &lane.UpstreamError{Code: lane.CodeTransport, Message: err.Error()}
 	}
 	defer resp.Body.Close()
@@ -272,7 +327,12 @@ func postStreamed(ctx context.Context, p *store.Provider, session string, body m
 		return nil, lane.ClassifyFailure(resp.StatusCode, string(data), retryAfter)
 	}
 
-	br := bufio.NewReaderSize(resp.Body, 64*1024)
+	// Idle-bounded pump: an upstream that answers 200 and then queues in
+	// silence gets cut at providerStreamIdle instead of hanging until the
+	// client gives up (the ABORTED shape that skips every retry layer).
+	pump := lane.NewStreamReader(ctx, resp.Body, providerStreamIdle)
+	defer pump.Close()
+	br := bufio.NewReaderSize(pump, 64*1024)
 	var usage *lane.Usage
 	for {
 		line, rerr := br.ReadString('\n')

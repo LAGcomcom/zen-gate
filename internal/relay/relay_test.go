@@ -9,10 +9,88 @@ import (
 	"regexp"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"zen-gate/internal/lane"
 	"zen-gate/internal/store"
 )
+
+// TestCompleteHeaderWatchdog: a user-added upstream that accepts the
+// connection and then never sends response headers (the observed NVIDIA NIM
+// free-queue shape: harness request hangs 20-44s until the client aborts) must
+// fail fast as TRANSPORT instead of hanging the agent. providerHeaderBound is
+// shrunk so the test does not wait 30 seconds.
+func TestCompleteHeaderWatchdog(t *testing.T) {
+	old := providerHeaderBound
+	providerHeaderBound = 300 * time.Millisecond
+	relayMu.Lock()
+	relayClient = nil // force a clone under the shrunk bound
+	relayMu.Unlock()
+	defer func() {
+		providerHeaderBound = old
+		relayMu.Lock()
+		relayClient = nil
+		relayMu.Unlock()
+	}()
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(5 * time.Second) // headers never arrive within the bound
+	}))
+	defer up.Close()
+	p := &store.Provider{ID: "pv", Name: "pv", BaseURL: up.URL + "/v1",
+		Protocol: store.ProtocolOpenAI, APIKey: "k"}
+	start := time.Now()
+	_, _, uerr := Complete(context.Background(), Turn{
+		Provider: p, Model: "m", Messages: []lane.Message{{Role: lane.RoleUser, Parts: []lane.Part{lane.TextPart{Text: "hi"}}}},
+	}, func(lane.Chunk) {})
+	if uerr == nil {
+		t.Fatal("want an error for a header-stalling upstream")
+	}
+	if uerr.Code != lane.CodeTransport {
+		t.Fatalf("code = %s, want %s", uerr.Code, lane.CodeTransport)
+	}
+	if dt := time.Since(start); dt > 2*time.Second {
+		t.Fatalf("took %v: watchdog did not cut the header wait", dt)
+	}
+}
+
+// TestCompleteStreamIdleWatchdog: headers + the first frame arrive, then the
+// stream goes silent forever. The pump must cut at providerStreamIdle rather
+// than ride the client's own patience — the answer already produced still
+// reaches the caller before the cut.
+func TestCompleteStreamIdleWatchdog(t *testing.T) {
+	old := providerStreamIdle
+	providerStreamIdle = 400 * time.Millisecond
+	defer func() { providerStreamIdle = old }()
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("content-type", "text/event-stream")
+		w.WriteHeader(200)
+		fmt.Fprintln(w, `data: {"choices":[{"delta":{"content":"hi"}}]}`)
+		fmt.Fprintln(w)
+		w.(http.Flusher).Flush()
+		time.Sleep(3 * time.Second) // silence after a live first byte
+	}))
+	defer up.Close()
+	p := &store.Provider{ID: "pv", Name: "pv", BaseURL: up.URL + "/v1",
+		Protocol: store.ProtocolOpenAI, APIKey: "k"}
+	var got string
+	start := time.Now()
+	_, _, uerr := Complete(context.Background(), Turn{
+		Provider: p, Model: "m", Messages: []lane.Message{{Role: lane.RoleUser, Parts: []lane.Part{lane.TextPart{Text: "hi"}}}},
+	}, func(c lane.Chunk) {
+		if c.Kind == lane.ChunkTextDelta {
+			got += c.Delta
+		}
+	})
+	if uerr == nil {
+		t.Fatal("want an error for a stalled stream")
+	}
+	if got == "" {
+		t.Fatal("the first frame should have reached the caller before the cut")
+	}
+	if dt := time.Since(start); dt > 2*time.Second {
+		t.Fatalf("took %v: idle pump did not cut the stalled stream", dt)
+	}
+}
 
 func TestFetchModelsOpenAI(t *testing.T) {
 	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -172,6 +250,24 @@ func TestRecommendedModelsModelScope(t *testing.T) {
 		if m == "MiniMax/MiniMax-M3" || m == "PaddlePaddle/ERNIE-4.5-300B-A47B-PT" ||
 			m == "mistralai/Mistral-Large-Instruct-2407" {
 			t.Fatalf("stale model %q recommended", m)
+		}
+	}
+}
+
+func TestRecommendedModelsIntern(t *testing.T) {
+	cat := []string{"Agents-A1", "Atria-Dawn", "Atria-Dawn-Preview",
+		"deepseek-v4-flash-0731", "deepseek-v4-flash-vision", "deepseek-v4-pro-0813",
+		"glm-5.3", "intern-s2", "kimi-k2.6", "minimax-m3", "qwen3.8-27b"}
+	rec := RecommendedModels("", "https://discovery-api.intern-ai.org.cn/v1", cat)
+	want := map[string]bool{"deepseek-v4-flash-0731": true, "deepseek-v4-flash-vision": true,
+		"deepseek-v4-pro-0813": true, "glm-5.3": true, "intern-s2": true,
+		"kimi-k2.6": true, "qwen3.8-27b": true, "minimax-m3": true}
+	if len(rec) != len(want) {
+		t.Fatalf("recommended = %v", rec)
+	}
+	for _, m := range rec {
+		if !want[m] {
+			t.Fatalf("unexpected recommendation %q (Atria/Agents opt-in only)", m)
 		}
 	}
 }

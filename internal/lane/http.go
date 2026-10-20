@@ -575,6 +575,25 @@ type streamReader struct {
 	idle    time.Duration
 }
 
+// IdleReader is an io.Reader over a live stream whose Close detaches the
+// pump — io.ReadCloser's Close() error does not describe streamReader, which
+// closes without a status.
+type IdleReader interface {
+	io.Reader
+	Close()
+}
+
+// NewStreamReader exposes the idle-bounded body reader to the relay package:
+// a user-added upstream can hold the connection open after 200 while it
+// queues (observed on NVIDIA NIM's free tier: headers arrive, then minutes of
+// silence), and an unbounded read turns that into a hung client request that
+// ends in a client-side ABORTED no failover layer ever sees. Same contract as
+// the lane's own pump: every received byte resets the idle clock, so a
+// slow-but-live answer is never cut.
+func NewStreamReader(ctx context.Context, src io.Reader, idle time.Duration) IdleReader {
+	return newStreamReader(ctx, src, idle)
+}
+
 func newStreamReader(ctx context.Context, src io.Reader, idle time.Duration) *streamReader {
 	s := &streamReader{
 		ch:   make(chan streamChunk, 512),
