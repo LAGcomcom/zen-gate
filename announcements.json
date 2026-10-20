@@ -1,6 +1,15 @@
 {
   "announcements": [
     {
+      "id": "2026-10-20-v1.8.1-release",
+      "title": "v1.8.1：修复并行工具调用被并成一次、Trae 报 reasoning_content 错误、reasoning_effort=max 被静默降级",
+      "body": "本版修三个客户端可见的问题，全部来自 issue 反馈：\n1. 并行工具调用被合成一个（#96）：流式下模型一回合发起两个及以上工具调用时，所有增量都落在 tool_calls.index = 0，客户端把工具名拼成「web_searchgrep」、参数拼成非法 JSON，这一轮调用整体作废，表现为命令被截断或搞错、模型反复重试。单次调用不受影响；\n2. Trae 里报「The reasoning_content in the thinking mode must be passed back to the API」（#99）：客户端回传的思考内容此前在网关里被丢掉，思考模式上游因此拒绝这一轮。现在 OpenAI 与 Responses 两种入站格式的思考内容都会原样带回上游；DSH 等本来就会回传的客户端不受影响；\n3. reasoning_effort 写 \"max\" 被静默降级（#97）：此前只有 light/balanced/high/xhigh 被识别，\"max\" 当成没写、回落到默认档。现在 max / maximum / highest 一律按最深档，且不会削减客户端声明的输出预算。\n4. 升级方式：总览页「一键更新」或 Releases 页下载。",
+      "level": "info",
+      "start": "2026-10-20",
+      "end": "2026-10-27",
+      "url": "https://github.com/LAGcomcom/zen-gate/releases/latest"
+    },
+    {
       "id": "2026-10-20-v1.8.0-release",
       "title": "v1.8.0：退役已停服的 OpenCode 免费车道，新增 Intern（书生·端砚）预设，界面重排",
       "body": "OpenCode 从 2026-10-14 起对非官方客户端一律回 403 FreeTierError，这条车道（原 Zen 免费档）在每次探测里都是死的，却一直占着模型列表。本版不再留着它：\n1. 彻底移除 Zen 车道的代码——它的模型名单、free 档专用的 responses/messages 端点映射、伪造客户端指纹与会话的那套、只为它存在的探测脚手架，以及只给它补容量的「公开容量参考」；\n2. 修掉一处静默失败：AI 标注此前写死一个已下线的 Zen 模型 id，标注任务连续失败 5 轮后自停，表现是「新模型再也不被标注」；现在按目录里真实可用的模型来选，目录为空会明确报错；\n3. 修掉接入页示例照抄即 404 的问题：curl 示例改为按当前第一个可用模型生成，不再写死退役的 id；\n4. Kilo 免费池、WorkBuddy（国际版 / 国内版）、CodeArts、Qoder 与自定义 API 均不受影响；若你曾在 Agent 里选过 Zen 的模型，升级后这些条目会消失（它们本已调不通），请改选免费池里的 Kilo 模型；\n5. 本版同时带上 1.7.19 之后的改动：新增 Intern（书生·端砚）自定义供应商预设（实测首字 0.4–6.6 秒）、选择器去重且不再列出刚探测失败的模型、中继回合的静默加了 30 秒上限、八个页面的层级与动效重排加首屏骨架、Agent 探测结果缓存让 /state 从约 3 秒降到 20 毫秒；\n6. 升级方式：总览页「一键更新」或 Releases 页下载。自定义供应商与账号渠道的配置不需要重新填写。",
