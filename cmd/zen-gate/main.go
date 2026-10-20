@@ -306,6 +306,7 @@ func main() {
 		}
 	}()
 	gw.StartOpenRefLoop(ctx)
+	gw.StartCustomProbeLoop(ctx)
 	syncEndpoints()
 
 	if err := gw.Start(); err != nil {

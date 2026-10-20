@@ -650,11 +650,29 @@ func isProviderID(id string) bool { return strings.Contains(id, "/") }
 // — a hidden model requested explicitly still works.
 func (s *Server) VisibleModels() []lane.ModelInfo {
 	hidden := s.hiddenSet()
+	_, av, _ := s.Lane.Snapshot()
+	seen := map[string]bool{}
 	out := []lane.ModelInfo{}
 	for _, m := range s.Lane.ServableModels() {
-		if !hidden[m.ID] {
-			out = append(out, m)
+		// The catalog merges four channel buckets, and a rotation can leave
+		// two of them publishing the same id. Duplicates in a picker are not
+		// cosmetic: the harness resolves an id to the first match, and two
+		// entries with one name but different backends answer differently.
+		if hidden[m.ID] || seen[m.ID] {
+			continue
 		}
+		// A freshly probed refusal (the model left the upstream roster, its
+		// account channel is logged out, it answers 404 "not registered")
+		// must not sit in a picker: the agent sends one request, eats the
+		// error, and the user reads it as "the gateway does not work". The
+		// verdict expires on its own (FreshState → unknown after the probe
+		// TTL), so a model that comes back re-enters the roster without a
+		// restart; throttled and never-probed models stay listed.
+		if p, ok := av[m.ID]; ok && lane.FreshState(p) == lane.StateUnavailable {
+			continue
+		}
+		seen[m.ID] = true
+		out = append(out, m)
 	}
 	return out
 }
@@ -670,7 +688,15 @@ func (s *Server) VisibleModels() []lane.ModelInfo {
 // and the merged capability verdicts from the tag pipeline, so a picker's
 // input-modalities match what the router actually believes about the model.
 func (s *Server) InjectableModels() []lane.ModelInfo {
-	out := s.VisibleModels()
+	out := []lane.ModelInfo{}
+	seen := map[string]bool{}
+	for _, m := range s.VisibleModels() {
+		if seen[m.ID] {
+			continue
+		}
+		seen[m.ID] = true
+		out = append(out, m)
+	}
 	hidden := s.hiddenSet()
 	cfg := s.Store.Config()
 	for i := range cfg.Providers {
@@ -680,9 +706,17 @@ func (s *Server) InjectableModels() []lane.ModelInfo {
 		}
 		for _, m := range p.Models {
 			id := p.ID + "/" + m
-			if hidden[id] {
+			if hidden[id] || seen[id] {
 				continue
 			}
+			// Same discipline as the lane half: a probe that recently found
+			// this upstream id dead ("model not registered", a revoked key)
+			// must not sit in a picker the user trusts to answer. Never
+			// probed is not probed-dead — the entry stays.
+			if pr, ok := s.customProbeOf(id); ok && pr.State == lane.StateUnavailable {
+				continue
+			}
+			seen[id] = true
 			entry := lane.ModelInfo{
 				ID:   id,
 				Name: id,

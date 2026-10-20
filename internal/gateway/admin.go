@@ -1528,6 +1528,35 @@ func (s *Server) probeCustomProviders(ctx context.Context) {
 	}
 	wg.Wait()
 	s.logCat(logx.CatProbe, "info", "自定义供应商探测完成：%d 个模型（%d 个已在探测中）", started, len(targets)-started)
+	// Verdicts move models: an unregistered upstream id leaves the injected
+	// pickers (InjectableModels prunes probed-dead rows), so the agent
+	// configs have to be re-written on this result — the same re-injection
+	// the lane's OnChange fires for free-model verdicts.
+	if s.modelsSync != nil {
+		s.modelsSync()
+	}
+}
+
+// StartCustomProbeLoop keeps the custom-provider verdicts live the way the
+// lane's own prober keeps the free models live: one round shortly after boot
+// (the picker filters and the dashboard states are meaningless until the
+// first probe, and a restart used to park every model back on "custom" until
+// someone pressed the button), then hourly. The requests are the 16-token
+// ping ProbeModel already sends per card.
+func (s *Server) StartCustomProbeLoop(ctx context.Context) {
+	go func() {
+		timer := time.NewTimer(45 * time.Second)
+		defer timer.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-timer.C:
+				s.probeCustomProviders(ctx)
+				timer.Reset(time.Hour)
+			}
+		}
+	}()
 }
 
 // currentProbingModel merges the free-lane and custom-provider probe states:
