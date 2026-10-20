@@ -31,8 +31,6 @@ type Decoder struct {
 	pidx map[float64]string
 	// responses-wire output_index → key
 	oidx map[float64]string
-	// chat-wire tool calls without index, grouped by id
-	chatTool map[string]int // provider id → block index
 	// the tool key of the most recent chat frame: a frame that opens a
 	// different call implicitly ends the previous one (chat has no stop frame)
 	chatLast string
@@ -108,7 +106,6 @@ func NewDecoder(wire string, rename map[string]string, emit func(Chunk)) *Decode
 		kind:     map[int]string{},
 		pidx:     map[float64]string{},
 		oidx:     map[float64]string{},
-		chatTool: map[string]int{},
 	}
 }
 
@@ -312,20 +309,18 @@ func (d *Decoder) chatToolCall(m map[string]any) {
 		// continuation belongs to the previous block for that id.
 		if id != "" {
 			key = "tool:" + id
-		} else if len(d.chatTool) > 0 {
-			// no id and no index: attach to the last open tool block
-			for k, idx := range d.blocks {
-				if strings.HasPrefix(k, "tool:") {
-					_ = idx
-					key = k
-					break
-				}
-			}
-			if key == "" {
+		} else {
+			// No id and no index: a bare argument continuation belongs to the
+			// call opened most recently. Walking d.blocks here picked a random
+			// block (Go map order) and glued the arguments onto the wrong call
+			// -- the same defect class as issue #96.
+			if d.chatLast == "" {
 				return
 			}
-		} else {
-			return
+			if _, open := d.blocks[d.chatLast]; !open {
+				return
+			}
+			key = d.chatLast
 		}
 	}
 	// Chat-wire tool blocks carry no explicit stop frame. A frame that starts
