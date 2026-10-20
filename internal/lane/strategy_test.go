@@ -2,6 +2,25 @@ package lane
 
 import "testing"
 
+// strategyLane is the roster the routing rules rank over: a vision carrier
+// first, then a text-only row with the smallest window, then two more vision
+// carriers. The assertions below depend on these traits and this order only —
+// the retired Zen roster is gone, so the names are local to the test.
+func strategyLane() *Lane {
+	l := NewLane()
+	l.SetCatalog([]ModelInfo{
+		{ID: "space-bunny-free", Name: "Space Bunny", Wire: "chat", Vision: true,
+			ContextWindow: 1048576, MaxOutput: 65536},
+		{ID: "nemotron-3.5-lightning-free", Name: "Nemotron 3.5 Lightning", Wire: "chat",
+			ContextWindow: 128000, MaxOutput: 32768},
+		{ID: "ll-alpha-free", Name: "LL Alpha", Wire: "chat", Vision: true,
+			ContextWindow: 1048576, MaxOutput: 131072},
+		{ID: "mimo-v2.6-flash-free", Name: "MiMo V2.6 Flash", Wire: "chat", Vision: true,
+			ContextWindow: 1048576, MaxOutput: 131072},
+	})
+	return l
+}
+
 // throttleAll parks every catalog model except the named keeps, so
 // nextCandidate picks from a tiny deterministic pool.
 func throttleAll(l *Lane, keep ...string) {
@@ -26,7 +45,7 @@ func throttleAll(l *Lane, keep ...string) {
 // trait each assertion is about.
 
 func TestNextCandidateFiltersByNeeds(t *testing.T) {
-	l := NewLane()
+	l := strategyLane()
 	// nemotron-lightning is text-only and sorts before the vision carriers.
 	throttleAll(l, "nemotron-3.5-lightning-free", "space-bunny-free")
 
@@ -43,7 +62,7 @@ func TestNextCandidateFiltersByNeeds(t *testing.T) {
 }
 
 func TestNextCandidateContextFit(t *testing.T) {
-	l := NewLane()
+	l := strategyLane()
 	throttleAll(l, "nemotron-3.5-lightning-free") // 128k window, the smallest here
 	if got := l.nextCandidate(Needs{PromptTokens: 200000}, map[string]bool{}); got != "" {
 		t.Fatalf("oversized request: next = %q, want none", got)
@@ -54,7 +73,7 @@ func TestNextCandidateContextFit(t *testing.T) {
 }
 
 func TestNextCandidateLatencyStrategy(t *testing.T) {
-	l := NewLane()
+	l := strategyLane()
 	throttleAll(l, "nemotron-3.5-lightning-free", "space-bunny-free")
 	l.SetStrategy(StrategyLatency)
 	l.SetTTFTSource(func(model string) int64 {
@@ -77,7 +96,7 @@ func TestNextCandidateLatencyStrategy(t *testing.T) {
 }
 
 func TestSmartRoutingOffRestoresLegacy(t *testing.T) {
-	l := NewLane()
+	l := strategyLane()
 	l.SetSmartRouting(false)
 	throttleAll(l, "ll-alpha-free", "space-bunny-free")
 	// Legacy ignores the modality filter: a vision request still lands on
@@ -92,7 +111,7 @@ func TestSmartRoutingOffRestoresLegacy(t *testing.T) {
 }
 
 func TestApplyCapabilityTags(t *testing.T) {
-	l := NewLane()
+	l := strategyLane()
 	yes, no := true, false
 	if !l.ApplyCapabilityTags("mimo-v2.6-flash-free", CapabilityTags{Audio: &yes, File: &yes}) {
 		t.Fatal("lane model not found")
@@ -157,7 +176,7 @@ func TestSummarizeNeeds(t *testing.T) {
 }
 
 func TestCandidatesHonorsNeeds(t *testing.T) {
-	l := NewLane()
+	l := strategyLane()
 	throttleAll(l, "nemotron-3.5-lightning-free", "space-bunny-free")
 	got := l.Candidates(Needs{Image: true}, "nobody", 5)
 	if len(got) == 0 {
@@ -174,7 +193,7 @@ func TestCandidatesHonorsNeeds(t *testing.T) {
 // interval: the persisted sample ring is the honest estimate of what the model
 // does, and it is what routing should rank on.
 func TestLatencyStrategyPrefersTheSampleRingOverTheLastProbe(t *testing.T) {
-	l := NewLane()
+	l := strategyLane()
 	throttleAll(l, "nemotron-3.5-lightning-free", "space-bunny-free")
 	l.SetStrategy(StrategyLatency)
 	l.availability["nemotron-3.5-lightning-free"] = ProbeResult{

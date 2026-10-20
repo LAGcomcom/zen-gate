@@ -26,18 +26,38 @@ func fakeUpstream(t *testing.T, frames []string) *httptest.Server {
 	}))
 }
 
+// testLane seeds the catalog a gateway test can route over. The rows carry the
+// Kilo channel so a request reaches the fake upstream through the only keyless
+// source left; the retired Zen lane is not what these tests are about.
+func testLane() *lane.Lane {
+	l := lane.NewLane()
+	l.SetCatalog([]lane.ModelInfo{
+		{ID: "mimo-v2.6-flash-free", Name: "MiMo V2.6 Flash", Wire: "chat", Channel: lane.ChannelKilo,
+			Vision: true, Reasoning: true, ContextWindow: 1048576, MaxOutput: 131072},
+		{ID: "space-bunny-free", Name: "Space Bunny", Wire: "chat", Channel: lane.ChannelKilo,
+			Vision: true, Reasoning: true, ContextWindow: 1048576, MaxOutput: 65536},
+		{ID: "nemotron-3.5-lightning-free", Name: "Nemotron 3.5 Lightning", Wire: "chat", Channel: lane.ChannelKilo,
+			Reasoning: true, ContextWindow: 128000, MaxOutput: 32768},
+		{ID: "deepseek-v4.1-flash-free", Name: "DeepSeek V4.1 Flash", Wire: "chat", Channel: lane.ChannelKilo,
+			Vision: true, Reasoning: true, ContextWindow: 1048576, MaxOutput: 262144},
+		{ID: "glm-5.3-flash-free", Name: "GLM 5.3 Flash", Wire: "chat", Channel: lane.ChannelKilo,
+			Reasoning: true, ContextWindow: 524288, MaxOutput: 262144},
+	})
+	return l
+}
+
 func newTestServer(t *testing.T, upstream *httptest.Server) *Server {
 	t.Helper()
-	old := lane.UpstreamBase
-	lane.UpstreamBase = upstream.URL
-	t.Cleanup(func() { lane.UpstreamBase = old })
+	oldKilo := lane.KiloBase
+	lane.KiloBase = upstream.URL
+	t.Cleanup(func() { lane.KiloBase = oldKilo })
 
 	t.Setenv("ZEN_GATE_HOME", t.TempDir())
 	st, err := store.Open()
 	if err != nil {
 		t.Fatal(err)
 	}
-	return New(lane.NewLane(), st)
+	return New(testLane(), st)
 }
 
 func TestChatCompletionsNonStream(t *testing.T) {

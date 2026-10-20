@@ -233,9 +233,9 @@ func TestRefreshCatalogGatesTheWorkBuddyBucketOnTheAccount(t *testing.T) {
 		w.WriteHeader(http.StatusBadGateway)
 	}))
 	defer fail.Close()
-	oldUp, oldKilo := UpstreamBase, KiloBase
-	UpstreamBase, KiloBase = fail.URL, fail.URL
-	t.Cleanup(func() { UpstreamBase, KiloBase = oldUp, oldKilo })
+	oldKilo := KiloBase
+	KiloBase = fail.URL
+	t.Cleanup(func() { KiloBase = oldKilo })
 
 	l := NewLane()
 	// Logged in: the three free models enter the catalog even though every

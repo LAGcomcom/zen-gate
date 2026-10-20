@@ -1,10 +1,12 @@
-// Package lane speaks to the OpenCode Zen free lane (https://opencode.ai) and
-// to the other keyless free sources the gateway aggregates.
+// Package lane speaks to the sources the gateway serves: the keyless Kilo free
+// pool, the WorkBuddy 账号渠道 (intl) and the Huawei Cloud CodeArts 账号渠道.
+// The OpenCode Zen free lane that this package was first written for is retired
+// — it answers FreeTierError to every unauthenticated call.
 //
-// The wire behaviour here was settled against the live gateway: session
-// minting, the tool-name gate, the three wire protocols (chat / responses /
-// messages), and cut-stream recovery all reproduce what a genuine desktop
-// client sends, so models answer without a per-user key.
+// The wire behaviour here was settled against a live client: the three wire
+// protocols (chat / responses / messages), the tool-name gate one channel still
+// uses, and cut-stream recovery all reproduce what a genuine desktop client
+// sends, so models answer without a per-user key.
 package lane
 
 import (

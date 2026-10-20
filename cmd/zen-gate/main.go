@@ -1,6 +1,7 @@
-// zen-gate: a local tray gateway that exposes the OpenCode Zen free lane as
-// OpenAI/Anthropic-compatible APIs and auto-configures installed agents.
-// Usage of the free lane remains subject to the upstream provider's terms.
+// zen-gate: a local tray gateway that exposes keyless free model sources
+// (Kilo free pool, WorkBuddy and CodeArts accounts) as OpenAI/Anthropic-
+// compatible APIs and auto-configures installed agents.
+// Usage of those lanes remains subject to each upstream provider's terms.
 package main
 
 import (
@@ -309,7 +310,6 @@ func main() {
 			}
 		}
 	}()
-	gw.StartOpenRefLoop(ctx)
 	gw.StartCustomProbeLoop(ctx)
 	syncEndpoints()
 

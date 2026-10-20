@@ -1,4 +1,4 @@
-package gateway
+﻿package gateway
 
 import (
 	"encoding/json"
@@ -81,7 +81,9 @@ func TestProbeOneRecordsItsRun(t *testing.T) {
 	for _, sv := range steps {
 		names = append(names, sv.(map[string]any)["name"].(string))
 	}
-	want := []string{lane.PhaseRequest, lane.PhaseFirstByte, lane.PhaseVerdict}
+	// A Kilo row is verified by its roster entry, not by a request upstream, so
+	// the run carries the two phases a click reports and never a first byte.
+	want := []string{lane.PhaseRequest, lane.PhaseVerdict}
 	if strings.Join(names, ",") != strings.Join(want, ",") {
 		t.Fatalf("phases = %v, want %v", names, want)
 	}
@@ -116,57 +118,6 @@ func TestStateRowsCarryTheLatestRun(t *testing.T) {
 	}
 	t.Fatal("the probed model is missing from the state rows")
 }
-
-func TestSecondClickReusesTheRunInsteadOfCallingUpstreamAgain(t *testing.T) {
-	release := make(chan struct{})
-	var hits int32
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		atomic.AddInt32(&hits, 1)
-		select {
-		case <-release:
-		case <-time.After(10 * time.Second):
-		}
-		w.Header().Set("content-type", "text/event-stream")
-		fmt.Fprintln(w, `data: {"choices":[{"delta":{"content":"pong"}}]}`)
-		fmt.Fprintln(w, `data: [DONE]`)
-	}))
-	defer srv.Close()
-	s := newTestServer(t, srv)
-	ts := httptest.NewServer(s.mux)
-	defer ts.Close()
-
-	firstDone := make(chan map[string]any, 1)
-	go func() { firstDone <- postProbe(t, ts, "mimo-v2.6-flash-free") }()
-
-	deadline := time.Now().Add(5 * time.Second)
-	for atomic.LoadInt32(&hits) == 0 && time.Now().Before(deadline) {
-		time.Sleep(10 * time.Millisecond)
-	}
-	if atomic.LoadInt32(&hits) == 0 {
-		t.Fatal("the first probe never reached the upstream")
-	}
-
-	second := postProbe(t, ts, "mimo-v2.6-flash-free")
-	if second["running"] != true {
-		t.Fatalf("second click = %v, want it to report the run already going", second)
-	}
-	out := getJSON(t, ts.URL+"/admin/api/tasks?model=mimo-v2.6-flash-free")
-	runs := out["runs"].([]any)
-	if len(runs) != 1 {
-		t.Fatalf("runs = %d, want the in-flight run reused", len(runs))
-	}
-	if runs[0].(map[string]any)["status"] != taskRunning {
-		t.Fatalf("run 0 = %v, want still running", runs[0])
-	}
-
-	close(release)
-	<-firstDone
-	if got := atomic.LoadInt32(&hits); got != 1 {
-		t.Fatalf("upstream hits = %d, want the queued probe not fired twice", got)
-	}
-}
-
-// The 重新探测可用性 button drives the whole model page, so it has to reach
 // the user-added providers too. It used to run the free lane alone and leave
 // every custom model on the placeholder "custom" state until each card was
 // clicked by hand.

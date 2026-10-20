@@ -7,7 +7,6 @@ import (
 	"strings"
 	"testing"
 
-	"zen-gate/internal/lane"
 	"zen-gate/internal/store"
 )
 
@@ -30,7 +29,7 @@ func providerServer(t *testing.T, providers []store.Provider, hidden []string) *
 	if err := st.Save(); err != nil {
 		t.Fatal(err)
 	}
-	return New(lane.NewLane(), st)
+	return New(testLane(), st)
 }
 
 func sampleProviders() []store.Provider {

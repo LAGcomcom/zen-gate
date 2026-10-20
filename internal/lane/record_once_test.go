@@ -8,6 +8,14 @@ import (
 	"testing"
 )
 
+// kiloLane is a lane holding one free-pool row: the only channel a test can
+// dial without credentials.
+func kiloLane(id string) *Lane {
+	l := NewLane()
+	l.SetCatalog([]ModelInfo{{ID: id, Wire: "chat", Channel: ChannelKilo, ContextWindow: 131072, MaxOutput: 32768}})
+	return l
+}
+
 // One client request must cost exactly one stats record per attempt: the day
 // counters (Requests/Input/Output) are what the dashboard's 用量 numbers are
 // built from, and a second record for the same attempt doubles them.
@@ -20,17 +28,17 @@ func TestOneRecordPerSuccessfulAttempt(t *testing.T) {
 		))
 	}))
 	defer srv.Close()
-	old := UpstreamBase
-	UpstreamBase = srv.URL
-	defer func() { UpstreamBase = old }()
+	oldKilo := KiloBase
+	KiloBase = srv.URL
+	defer func() { KiloBase = oldKilo }()
 
-	l := NewLane()
+	l := kiloLane("kilo-auto/free")
 	l.SetFailover(false, 0) // one model, one attempt: exactly one record expected
 	var recs []CallRecord
 	l.OnCall = func(r CallRecord) { recs = append(recs, r) }
 
 	_, uerr := l.Complete(context.Background(), Request{
-		Model:    "mimo-v2.6-flash-free",
+		Model:    "kilo-auto/free",
 		Messages: []Message{{Role: RoleUser, Parts: []Part{TextPart{Text: "hi"}}}},
 	}, func(Chunk) {})
 	if uerr != nil {
@@ -52,17 +60,17 @@ func TestOneRecordPerRefusedAttempt(t *testing.T) {
 		fmt.Fprint(w, `{"error":{"message":"FreeUsageLimitError"}}`)
 	}))
 	defer srv.Close()
-	old := UpstreamBase
-	UpstreamBase = srv.URL
-	defer func() { UpstreamBase = old }()
+	oldKilo := KiloBase
+	KiloBase = srv.URL
+	defer func() { KiloBase = oldKilo }()
 
-	l := NewLane()
+	l := kiloLane("kilo-auto/free")
 	l.SetFailover(false, 1)
 	var recs []CallRecord
 	l.OnCall = func(r CallRecord) { recs = append(recs, r) }
 
 	_, uerr := l.Complete(context.Background(), Request{
-		Model:    "mimo-v2.6-flash-free",
+		Model:    "kilo-auto/free",
 		Messages: []Message{{Role: RoleUser, Parts: []Part{TextPart{Text: "hi"}}}},
 	}, func(Chunk) {})
 	if uerr == nil {
@@ -71,7 +79,7 @@ func TestOneRecordPerRefusedAttempt(t *testing.T) {
 	if len(recs) != 1 {
 		t.Fatalf("records = %d, want exactly 1: %+v", len(recs), recs)
 	}
-	if recs[0].Ok || recs[0].ErrCode != CodeQuota || recs[0].UpstreamRID != "req_quota_1" {
-		t.Errorf("record = %+v, want the failure class and the provider trace id", recs[0])
+	if recs[0].Ok || recs[0].ErrCode != CodeQuota {
+		t.Errorf("record = %+v, want the failure class of a quota refusal", recs[0])
 	}
 }

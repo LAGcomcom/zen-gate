@@ -2,7 +2,6 @@ package lane
 
 import (
 	"crypto/rand"
-	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -12,13 +11,6 @@ import (
 	"sync/atomic"
 	"time"
 )
-
-// UpstreamBase is the gateway root; override for tests.
-var UpstreamBase = "https://opencode.ai"
-
-// ClientUA is the v2 fingerprint the free-tier gate expects
-// (opencode/<channel>/<version>/<client>).
-const ClientUA = "opencode/latest/2.0.26/cli"
 
 // FingerprintTools is the tool pair the v2 free-tier gate requires: OpenCode's
 // own `read` and `shell`, declared with their exact descriptions and parameter
@@ -67,17 +59,8 @@ func fingerprintDefs(name string) (desc string, params map[string]any, ok bool) 
 }
 
 var (
-	responsesModels = map[string]bool{
-		"muse-spark-1.2-contributor-free": true,
-		"muse-spark-1.3-contributor-free": true,
-	}
-	messagesModels = map[string]bool{"union-alpha": true}
-)
-
-var (
 	sessionRe = regexp.MustCompile(`^ses_[0-9a-f]{12}[0-9A-Za-z]{14}$`)
 	requestRe = regexp.MustCompile(`^msg_[0-9a-f]{12}[0-9A-Za-z]{14}$`)
-	museRe    = regexp.MustCompile(`(?i)^muse[-_]?spark(?:$|[-_:.\s])`)
 )
 
 const base62 = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
@@ -113,21 +96,6 @@ func MintSessionId(nowMS int64) string {
 	rnd := make([]byte, 14)
 	_, _ = rand.Read(rnd)
 	return "ses_" + hex.EncodeToString(raw[:]) + base62From(rnd)
-}
-
-// MintRequestId mints a gateway-shaped per-turn request id.
-func MintRequestId(nowMS int64) string {
-	if nowMS <= 0 {
-		nowMS = time.Now().UnixMilli()
-	}
-	value := ^(uint64(nowMS)<<12 | 1)
-	var raw [6]byte
-	for i := 0; i < 6; i++ {
-		raw[i] = byte((value >> (40 - 8*i)) & 0xFF)
-	}
-	rnd := make([]byte, 14)
-	_, _ = rand.Read(rnd)
-	return "msg_" + hex.EncodeToString(raw[:]) + base62From(rnd)
 }
 
 // SessionForConversation maps one downstream conversation onto one stable
@@ -183,15 +151,6 @@ var (
 )
 
 // SessionForExit binds one conversation to one exit. Quota is accounted per
-// session AND per egress IP, so a session that appears from dozens of
-// countries is both an obvious fingerprint and a cache miss on every turn.
-func SessionForExit(seed, exitKey string) string {
-	if exitKey == "" {
-		return SessionForConversation(seed)
-	}
-	return SessionForConversation(seed + "\x00exit\x00" + exitKey)
-}
-
 // ReportExit books an (exit, model) failure against the live rotator.
 func ReportExit(nodeID, model, class string) {
 	if nodeID == "" || model == "" {
@@ -201,20 +160,6 @@ func ReportExit(nodeID, model, class string) {
 		r.Report(nodeID, model, class)
 	}
 }
-
-// RequestIdFor derives a stable per-turn request id; retries of one turn share it.
-func RequestIdFor(session, turnSeed string) string {
-	if strings.TrimSpace(turnSeed) == "" {
-		return MintRequestId(0)
-	}
-	sum := sha256.Sum256([]byte("zen-gate-req\x00" + session + "\x00" + turnSeed))
-	id := "msg_" + hex.EncodeToString(sum[:6]) + base62From(sum[6:20])
-	if !requestRe.MatchString(id) {
-		return MintRequestId(0)
-	}
-	return id
-}
-
 // BaseModelId strips a trailing "(…)" effort suffix so lookups hit the base id.
 func BaseModelId(model string) string {
 	s := strings.TrimSpace(model)
@@ -245,79 +190,11 @@ func EffortOf(model string) string {
 	return ""
 }
 
-func isMuseSpark(modelID string) bool {
-	base := BaseModelId(modelID)
-	if i := strings.LastIndex(base, "/"); i >= 0 {
-		base = base[i+1:]
-	}
-	return museRe.MatchString(base)
-}
-
-// WireFor returns which upstream wire protocol serves this model.
+// WireFor returns which wire protocol serves a model the catalog does not
+// list. Every servable row carries its own Wire; an unlisted id gets the
+// OpenAI chat shape, the one wire all three channels speak.
 func WireFor(modelID string) string {
-	base := BaseModelId(modelID)
-	if responsesModels[base] || isMuseSpark(base) {
-		return "responses"
-	}
-	if messagesModels[base] {
-		return "messages"
-	}
-	if isSystemOneModel(base) {
-		return "systemone"
-	}
 	return "chat"
-}
-
-// SystemOneRe matches Jev-style "System One" decision models. They do not
-// generate text: they evaluate a state against typed questions and answer
-// with structured probabilities on their own endpoint — never chat.
-var systemOneRe = regexp.MustCompile(`^jev`)
-
-func isSystemOneModel(base string) bool { return systemOneRe.MatchString(base) }
-
-// IsSystemOneModel reports whether the id is a decision model.
-func IsSystemOneModel(modelID string) bool { return isSystemOneModel(BaseModelId(modelID)) }
-
-// EndpointFor returns the upstream path for one model. Free-tier inference
-// moved to /inference/v1 (zen-gate fork of 9router PR #4842).
-func EndpointFor(modelID string) string {
-	switch WireFor(modelID) {
-	case "responses":
-		return "/inference/v1/responses"
-	case "messages":
-		return "/inference/v1/messages"
-	case "systemone":
-		return "/inference/v1/systemone"
-	default:
-		return "/inference/v1/chat/completions"
-	}
-}
-
-// GatewayHeaders builds the header set the v2 free-tier gate fingerprints.
-// "Bearer public" is the pooled free credential — there is no per-user secret
-// on this lane. x-opencode-request is removed (upstream now rejects it);
-// x-opencode-session-id / x-session-affinity / x-session-id are the v2
-// session headers (9router PR #4842).
-func GatewayHeaders(session, requestID string, stream bool, accept string) map[string]string {
-	if accept == "" {
-		if stream {
-			accept = "text/event-stream"
-		} else {
-			accept = "*/*"
-		}
-	}
-	return map[string]string{
-		"content-type":          "application/json",
-		"authorization":         "Bearer public",
-		"user-agent":            ClientUA,
-		"x-opencode-client":     "cli",
-		"x-opencode-session":    session,
-		"x-opencode-session-id": session,
-		"x-session-affinity":    session,
-		"x-session-id":          session,
-		"x-opencode-project":    "global",
-		"accept":                accept,
-	}
 }
 
 // toolNameOf reads a tool's declared name from either tool shape.
@@ -628,17 +505,6 @@ func RestoreToolName(name string, rename map[string]string) string {
 		return orig
 	}
 	return name
-}
-
-// DeclaredToolNames lists the tool names a request body declares.
-func DeclaredToolNames(body map[string]any) map[string]bool {
-	names := map[string]bool{}
-	for _, m := range toolsOf(body) {
-		if n := toolNameOf(m); n != "" {
-			names[n] = true
-		}
-	}
-	return names
 }
 
 func cloneMap(m map[string]any) map[string]any {

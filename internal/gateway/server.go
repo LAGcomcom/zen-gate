@@ -256,11 +256,11 @@ func New(l *lane.Lane, st *store.Store) *Server {
 	mux.HandleFunc("/", s.safeRoute)
 	s.mux = mux
 	// tags.json is the durable half of a verdict; the catalog is rebuilt from
-	// the curated table on every boot AND on every RefreshCatalog (every probe
-	// interval), so without a replay hook a measured 音频/文件 capability or an
-	// openref capacity would vanish a poll later and routing/agent injection
-	// would fall back to the name guess. Replay synchronously so readers woken
-	// by the rebuild never see the raw catalog.
+	// the serving sources on every boot AND on every RefreshCatalog (every probe
+	// interval), so without a replay hook a measured 音频/文件 capability would
+	// vanish a poll later and routing/agent injection would fall back to the
+	// name guess. Replay synchronously so readers woken by the rebuild never
+	// see the raw catalog.
 	l.OnCatalogReload = s.applyStoredTags
 	s.applyStoredTags()
 	return s
@@ -562,7 +562,7 @@ func (s *Server) handleListModels(w http.ResponseWriter, r *http.Request) {
 // half. A capacity nothing states is omitted — an absent number is honest
 // where a default would be a claim the gateway cannot support.
 //
-// floor carries what the free lane's curated table states; the merged verdict
+// floor carries what the serving source's listing declares; the merged verdict
 // (实测 > 上游声明 > AI标注 > 规则) overrides it wherever it reached a verdict,
 // so a probe result is what a client reads instead of the name guess.
 func (s *Server) modelCard(floor lane.ModelInfo, id, ownedBy string, cfg *store.Config, freeLane bool) map[string]any {
@@ -571,12 +571,9 @@ func (s *Server) modelCard(floor lane.ModelInfo, id, ownedBy string, cfg *store.
 	vision, audio, file, reasoning := floor.Vision, floor.AudioInput, floor.FileInput, floor.Reasoning
 	contextWindow, maxOutput := floor.ContextWindow, floor.MaxOutput
 	source := store.TagSourceUnknown
-	if freeLane && lane.CapabilityMatched(upstream) {
-		source = store.TagSourceHeuris
-	}
-	// For a free-lane model the curated table is the baseline, so only a real
+	// A source that declares its own capacities is the baseline, so only a real
 	// verdict (实测 / 上游声明 / AI标注) may override it — the name regexes are
-	// weaker evidence than the table, and they used to demote a probe-verified
+	// weaker evidence than the listing, and they used to demote a probe-verified
 	// 思考 model to plain text.
 	if caps.Known && (!freeLane || caps.Source != store.TagSourceHeuris) {
 		vision, audio, file, reasoning = caps.Vision, caps.Audio, caps.File, caps.Reasoning

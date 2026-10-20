@@ -135,26 +135,18 @@ func TestParseListingMetaDistinguishesUndeclaredFromDenied(t *testing.T) {
 	}
 }
 
-// exo-free matches no row in the capability table. The fallback used to claim
-// reasoning:true, so the model page showed a guessed 思考 badge exactly like a
-// curated one.
-func TestUnknownModelDoesNotClaimReasoning(t *testing.T) {
-	cat := BuildCatalog([]string{"exo-free", "mimo-v2.6-flash-free"})
-	if len(cat) != 2 {
-		t.Fatalf("got %d entries, want 2", len(cat))
+// A row whose listing states nothing must stay silent: zero bools mean "not
+// stated", never a guessed verdict. The retired Zen lane's curated table used
+// to answer here, which is how a stranger's model page showed a 思考 badge.
+func TestUnstatedCapabilitiesStaySilent(t *testing.T) {
+	rows := ParseListingMeta(decodeListing(t, `{"data":[{"id":"exo-free"}]}`))
+	if len(rows) != 1 {
+		t.Fatalf("got %d rows, want 1", len(rows))
 	}
-	for _, m := range cat {
-		if m.ID == "exo-free" && m.Reasoning {
-			t.Errorf("unmatched model reported as a reasoning model")
-		}
-		if m.ID == "mimo-v2.6-flash-free" && !m.Reasoning {
-			t.Errorf("curated mimo lost its reasoning verdict")
-		}
+	if rows[0].Reasoning || rows[0].Vision || rows[0].Audio || rows[0].File {
+		t.Errorf("an unstated row claimed a modality: %+v", rows[0])
 	}
-	if CapabilityMatched("exo-free") {
-		t.Error("CapabilityMatched(exo-free) = true, want false")
-	}
-	if !CapabilityMatched("mimo-v2.6-flash-free") {
-		t.Error("CapabilityMatched(mimo-v2.6-flash-free) = false, want true")
+	if rows[0].ContextWindow != 0 || rows[0].MaxOutput != 0 {
+		t.Errorf("an unstated row claimed a capacity: %+v", rows[0])
 	}
 }
