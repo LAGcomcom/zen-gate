@@ -133,3 +133,58 @@ func TestExpiredBanReleasesTheExit(t *testing.T) {
 		t.Error("the expired entry was not cleared")
 	}
 }
+
+// A dead egress ("能连接但不能用"): the node's socks inbound still answers, but
+// the upstream behind it never returns. One transport failure must not panic a
+// node out of rotation — cold-start stalls reach 62s here — but two consecutive
+// ones must, so the picker stops choosing it and the dead-node recheck re-probes
+// it instead of letting every request hang for ~90s.
+func TestReportDeadDowngradesNodeAfterTwoFailures(t *testing.T) {
+	m, health := poolForPick()
+	if !health["n3"].Alive {
+		t.Fatal("setup: n3 should start alive")
+	}
+	m.ReportDead("n3")
+	if !health["n3"].Alive {
+		t.Error("a single transport failure must not downgrade the node")
+	}
+	m.ReportDead("n3")
+	if health["n3"].Alive {
+		t.Fatal("two consecutive transport failures should downgrade the node to Alive=false")
+	}
+	// The downgraded node must leave the picker immediately.
+	if id := m.Pick("", "m"); id == "n3" {
+		t.Error("Pick returned a node downgraded for dead-egress")
+	}
+}
+
+// The consecutive-failure count restarts after a long quiet spell, so a node
+// that stalls once an hour is never treated as persistently dead.
+func TestReportDeadCountForgetsAfterMemoryWindow(t *testing.T) {
+	m, _ := poolForPick()
+	m.ReportDead("n3")
+	m.nodeFailAt["n3"] = time.Now().Add(-2 * failMemory)
+	m.ReportDead("n3")
+	if !m.health["n3"].Alive {
+		t.Error("the count should have restarted after the quiet spell, not downgraded the node")
+	}
+}
+
+// A served request is proof the egress is live: Revive must re-arm a node that
+// ReportDead had downgraded, and clear its transport-failure counter so a later
+// stall does not immediately re-kill it.
+func TestReviveReArmsDeadNode(t *testing.T) {
+	m, health := poolForPick()
+	m.ReportDead("n3")
+	m.ReportDead("n3")
+	if health["n3"].Alive {
+		t.Fatal("setup: n3 should be downgraded before Revive")
+	}
+	m.Revive("n3", "m")
+	if !health["n3"].Alive {
+		t.Error("Revive did not re-arm a dead node")
+	}
+	if _, still := m.nodeFails["n3"]; still {
+		t.Error("Revive did not clear the transport-failure counter")
+	}
+}

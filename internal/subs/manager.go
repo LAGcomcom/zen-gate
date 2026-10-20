@@ -54,11 +54,27 @@ type Manager struct {
 	// "known-good" pairs: preferring one pins every concurrent request onto
 	// the first success (measured in #23), so the ledger only ever removes
 	// candidates.
-	bans     map[string]time.Time
-	fails    map[string]int
-	failAt   map[string]time.Time
-	lastErr  string
-	version  string
+	bans   map[string]time.Time
+	fails  map[string]int
+	failAt map[string]time.Time
+
+	// nodeFails/nodeFailAt feed live transport failures back into node health.
+	// A subscription node whose egress died but whose local socks inbound
+	// still answers is the classic "能连接但不能用" case: the TCP/SOCKS
+	// connect succeeds, but the request never comes back. A probe sample cannot
+	// catch it between probe rounds, and the per-(exit,model) ban alone only
+	// parks the pair for seconds and is keyed per model, so the node keeps
+	// being chosen for every request and each attempt hangs for up to
+	// responseHeaderTimeout (90s). Two consecutive transport failures within
+	// failMemory downgrade the node to Alive=false, which drops it from
+	// Pick/nextNode immediately AND lets the 2-minute dead-node recheck
+	// re-probe it — a genuinely dead egress leaves rotation within one or two
+	// requests, and a merely flaky one self-heals on the next probe.
+	nodeFails  map[string]int
+	nodeFailAt map[string]time.Time
+
+	lastErr string
+	version string
 
 	deathCancel context.CancelFunc // bounds the dead-node recheck loop
 }
@@ -88,12 +104,14 @@ func NewManager(st *store.Store, log func(string, ...any)) *Manager {
 	}
 	return &Manager{
 		st: st, log: log,
-		health:   map[string]*NodeHealth{},
-		sticky:   map[string]string{},
-		bans:     map[string]time.Time{},
-		fails:    map[string]int{},
-		failAt:   map[string]time.Time{},
-		stickyAt: map[string]int64{},
+		health:     map[string]*NodeHealth{},
+		sticky:     map[string]string{},
+		bans:       map[string]time.Time{},
+		fails:      map[string]int{},
+		failAt:     map[string]time.Time{},
+		nodeFails:  map[string]int{},
+		nodeFailAt: map[string]time.Time{},
+		stickyAt:   map[string]int64{},
 	}
 }
 

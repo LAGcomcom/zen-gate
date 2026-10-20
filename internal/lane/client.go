@@ -1011,12 +1011,25 @@ func (l *Lane) attemptModel(ctx context.Context, req Request, model, effort stri
 		// ledger only ever skips known-bad pairs — it is never used to prefer a
 		// "known good" one, which would pin every concurrent request onto the
 		// first success and burn that exit's allowance.
-		switch asUpstream(err).Code {
+		code := asUpstream(err).Code
+		switch code {
 		case CodeRegion:
 			ReportExit(plan.NodeID, base, "region")
 		case CodeQuota:
 			ReportExit(plan.NodeID, base, "limited")
-		case CodeTransport, CodeServer, CodeTimeout, CodeEmpty, CodeReset:
+		case CodeTransport, CodeTimeout, CodeReset:
+			// Connection-level failure: the egress tunnel itself is broken
+			// (dead upstream / reset / silent stall) though the node's local
+			// socks inbound still answers. Downgrade the node so it leaves
+			// rotation instead of hanging every request for ~90s.
+			ReportExit(plan.NodeID, base, "other")
+			if r := CurrentRotator(); r != nil && plan.NodeID != "" {
+				r.ReportDead(plan.NodeID)
+			}
+		case CodeServer, CodeEmpty:
+			// A 5xx or an empty-but-2xx body is not proof the egress tunnel is
+			// dead — the connection clearly worked — so it only books the
+			// per-(exit,model) ban and never downgrades node health.
 			ReportExit(plan.NodeID, base, "other")
 		}
 		// The caller decides what a 429 means: under rotation it re-asks the
