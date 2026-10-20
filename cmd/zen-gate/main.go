@@ -176,6 +176,10 @@ func main() {
 	reg := agents.NewRegistry(st)
 	gw := gateway.New(ln, st)
 	gw.SetAgents(reg)
+	// Warm the Detect cache: the first /state after boot would otherwise shell
+	// out to every installed agent (~3s on Windows) and the dashboard would
+	// paint an empty shell until it returned.
+	go reg.Views()
 	gw.SetSubs(mgr)
 	gw.SetLogger(logger)
 	gw.ApplyLogSettings(cfg)

@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"zen-gate/internal/lane"
 	"zen-gate/internal/store"
@@ -57,7 +58,20 @@ type Registry struct {
 	// injectedKey fingerprints the model roster the enabled adapters were
 	// last written with; see ResyncEnabled.
 	injectedKey string
+	// views caches the last Detect pass. Detect shells out for a version on
+	// every installed agent, which costs a few hundred ms each — with 13
+	// adapters a /state poll took ~3s and the dashboard sat empty until it
+	// returned. Any Enable/Disable invalidates the cache, so a user action is
+	// visible on the very next poll.
+	viewsMu sync.Mutex
+	views   []View
+	viewsAt time.Time
 }
+
+// viewsTTL bounds how stale a Detect verdict may be. Detection itself only
+// changes when the user installs or removes something, so seconds of staleness
+// cost nothing while a fresh pass per request costs the first paint.
+const viewsTTL = 15 * time.Second
 
 // NewRegistry builds the built-in adapter set.
 func NewRegistry(st *store.Store) *Registry {
@@ -89,8 +103,39 @@ func (r *Registry) SetEndpoints(baseURL string, models []lane.ModelInfo) {
 	r.modelsCache = models
 }
 
-// Views snapshots every adapter's state.
+// Views snapshots every adapter's state. The Detect pass is cached for
+// viewsTTL so the dashboard's 10s poll does not re-shell-out to every agent on
+// each tick; Enable/Disable drop the cache instead of relying on the TTL.
 func (r *Registry) Views() []View {
+	r.viewsMu.Lock()
+	if r.views != nil && time.Since(r.viewsAt) < viewsTTL {
+		out := make([]View, len(r.views))
+		copy(out, r.views)
+		r.viewsMu.Unlock()
+		return out
+	}
+	r.viewsMu.Unlock()
+
+	out := r.detectViews()
+
+	r.viewsMu.Lock()
+	r.views, r.viewsAt = out, time.Now()
+	r.viewsMu.Unlock()
+
+	cp := make([]View, len(out))
+	copy(cp, out)
+	return cp
+}
+
+// dropViews invalidates the Detect cache after a state change.
+func (r *Registry) dropViews() {
+	r.viewsMu.Lock()
+	r.views = nil
+	r.viewsAt = time.Time{}
+	r.viewsMu.Unlock()
+}
+
+func (r *Registry) detectViews() []View {
 	out := []View{}
 	for _, a := range r.agents {
 		id, name, describe := a.Meta()
@@ -150,6 +195,7 @@ func (r *Registry) Enable(id string) error {
 		cfg.EnabledAgents[id] = true
 	})
 	_ = r.st.Save()
+	r.dropViews()
 	return nil
 }
 
@@ -172,6 +218,7 @@ func (r *Registry) Disable(id string) error {
 		cfg.EnabledAgents[id] = false
 	})
 	_ = r.st.Save()
+	r.dropViews()
 	return err
 }
 
@@ -203,6 +250,9 @@ func (r *Registry) ResyncEnabled() int {
 	// stale content forever behind the fingerprint.
 	if done == attempted {
 		r.commit(key)
+	}
+	if done > 0 {
+		r.dropViews()
 	}
 	return done
 }
