@@ -65,6 +65,10 @@ var Presets = []Preset{
 		Protocol: store.ProtocolOpenAI,
 		Note:     "国内直连，每日 2000 次免费推理，开源全家桶",
 		KeyURL:   "https://modelscope.cn/my/myaccesstoken"},
+	{ID: "intern-ai", Name: "书生·端砚 Intern", BaseURL: "https://discovery-api.intern-ai.org.cn/v1",
+		Protocol: store.ProtocolOpenAI,
+		Note:     "上海人工智能实验室开放平台，国内直连免费车道：DeepSeek-V4、GLM-5.3、Kimi-K2.6、书生-S2 等十来个开源旗舰，支持视觉与工具调用",
+		KeyURL:   "https://discovery.intern-ai.org.cn"},
 	{ID: "zhipu", Name: "智谱 BigModel", BaseURL: "https://open.bigmodel.cn/api/paas/v4",
 		Protocol: store.ProtocolOpenAI,
 		Note:     "国内直连，GLM-4.5-Flash 等 Flash 系免费",
@@ -130,6 +134,19 @@ var recommendPatterns = map[string][]string{
 		"deepseek-ai/DeepSeek-V4-Pro", "deepseek-ai/DeepSeek-V4.1-Flash",
 		"ZhipuAI/GLM-5.2", "Qwen/Qwen3.5-397B", "Qwen/Qwen3.5-122B",
 		"Qwen/Qwen3.8-Flash-Next", "stepfun-ai/Step-3.7-Flash",
+	},
+	// Intern dispatch API (verified Oct 2026 against a live key): every model
+	// answers in under 7s first-token — deepseek-v4-pro 0.9s, intern-s2 1.3s,
+	// glm-5.3 1.9s, qwen3.8-27b 0.5s, deepseek-v4-flash-vision 0.4s.
+	// kimi-k2.6 is the slowest (6.6s) but worth the default tick; the Atria
+	// mystery tier and Agents-A1 stay opt-in.
+	"intern-ai": {
+		"deepseek-v4-pro", "deepseek-v4-flash", "glm-5.3", "intern-s2",
+		"kimi-k2.6", "qwen3.8-27b", "minimax-m3",
+	},
+	"discovery-api.intern-ai.org.cn": {
+		"deepseek-v4-pro", "deepseek-v4-flash", "glm-5.3", "intern-s2",
+		"kimi-k2.6", "qwen3.8-27b", "minimax-m3",
 	},
 }
 

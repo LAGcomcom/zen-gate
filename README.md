@@ -35,7 +35,7 @@ OpenCode Zen 提供了一批**免登录、免计费**的模型车道，但它们
   `~/.qoder-cn/settings.json` 自定义供应商，IDE 本地直连）；
 - **自定义 API 接入**：免费车道之外，可添加任意 OpenAI / Anthropic 兼容上游——
   内置 NVIDIA NIM、Google Gemini、GitHub Models、Groq、Cerebras、Mistral、OpenRouter、
-  HuggingFace、硅基流动、魔搭、智谱、LongCat 等 13 个免费商预设一键填充，
+  HuggingFace、硅基流动、魔搭、智谱、LongCat、书生 Intern 等 14 个免费商预设一键填充，
   填上自己的 Key 后自动检索模型列表，模型以 `供应商ID/模型名` 出现在所有 Agent 选择器里；
 - **协议层实测打磨**：会话铸造、指纹门、三种线协议（chat / responses / messages），
   断流续写、空停续写、截断自动续写三重兜底——全部按真实客户端行为逐项实测；
