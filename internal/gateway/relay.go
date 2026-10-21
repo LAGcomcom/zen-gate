@@ -130,6 +130,7 @@ func (s *Server) relayChatCompletions(w http.ResponseWriter, r *http.Request, re
 		usage, finish, uerr := relay.Complete(ctx, relay.Turn{
 			Provider: p, Model: upstream, Messages: unified,
 			Tools: convertOpenAITools(req.Tools), MaxTokens: maxTok, Agent: agent,
+			ReasoningEffort: s.relayEffort(req.Model, upstream, req.ReasoningEffort),
 		}, func(c lane.Chunk) {
 			if firstAt == 0 {
 				firstAt = time.Since(start).Milliseconds()
@@ -230,9 +231,14 @@ func (s *Server) relayResponses(w http.ResponseWriter, r *http.Request, req resp
 	collector := newResponsesCollector()
 	start := time.Now()
 	var firstAt int64
+	respEffort := ""
+	if req.Reasoning != nil {
+		respEffort = req.Reasoning.Effort
+	}
 	usage, finish, uerr := relay.Complete(ctx, relay.Turn{
 		Provider: p, Model: upstream, Messages: unified,
 		Tools: convertOpenAITools(req.Tools), MaxTokens: req.MaxOutputTokens, Agent: agent,
+		ReasoningEffort: s.relayEffort(req.Model, upstream, respEffort),
 	}, func(c lane.Chunk) {
 		if firstAt == 0 {
 			firstAt = time.Since(start).Milliseconds()
@@ -270,6 +276,7 @@ func (s *Server) relayAnthropicMessages(w http.ResponseWriter, r *http.Request, 
 		usage, finish, uerr := relay.Complete(ctx, relay.Turn{
 			Provider: p, Model: upstream, Messages: unified,
 			Tools: tools, MaxTokens: maxTok, Agent: agent,
+			ReasoningEffort: s.relayEffort(req.Model, upstream, anthropicEffortDeclared(req)),
 		}, func(c lane.Chunk) {
 			if firstAt == 0 {
 				firstAt = time.Since(start).Milliseconds()
@@ -462,6 +469,7 @@ func mergeCatalog(p *store.Provider, catalog []lane.ListingMeta) {
 			Name: row.Name, ContextWindow: row.ContextWindow, MaxOutput: row.MaxOutput,
 			Vision: row.Vision, Audio: row.Audio, File: row.File, Reasoning: row.Reasoning,
 			InputDeclared: row.InputDeclared, OutputDeclared: row.OutputDeclared,
+			Efforts: append([]string(nil), row.Efforts...), EffortDefault: row.EffortDefault,
 		}
 		if !meta.Declared() {
 			continue

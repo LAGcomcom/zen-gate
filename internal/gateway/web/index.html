@@ -12,7 +12,7 @@
   :root[data-theme="dark"] {
     --bg:#171717; --bg-2:#141414; --side:#0a0a0a; --panel:#262626; --panel-2:#2e2e2e;
     --hairline:rgba(250,250,250,.10); --hairline-soft:rgba(250,250,250,.06);
-    --ink:#e5e5e5; --ink-dim:#a3a3a3; --ink-mute:rgba(229,229,229,.55);
+    --ink:#e5e5e5; --ink-dim:#a3a3a3; --ink-mute:rgba(229,229,229,.64);
     --accent:#0ea5e9; --accent-strong:#38bdf8; --accent-ink:#062c38; --accent-soft:rgba(14,165,233,.14);
     --ok:#22c55e; --ok-bg:rgba(34,197,94,.14);
     --warn:#eab308; --warn-bg:rgba(234,179,8,.13);
@@ -26,7 +26,7 @@
   :root[data-theme="light"] {
     --bg:#fafafa; --bg-2:#f4f4f5; --side:#f5f5f5; --panel:#ffffff; --panel-2:#f4f4f5;
     --hairline:rgba(10,10,10,.10); --hairline-soft:rgba(10,10,10,.06);
-    --ink:#404040; --ink-dim:#525252; --ink-mute:rgba(64,64,64,.75);
+    --ink:#404040; --ink-dim:#525252; --ink-mute:rgba(64,64,64,.88);
     --accent:#0284c7; --accent-strong:#0ea5e9; --accent-ink:#ffffff; --accent-soft:rgba(2,132,199,.10);
     --ok:#16a34a; --ok-bg:rgba(22,163,74,.12);
     --warn:#ca8a04; --warn-bg:rgba(202,138,4,.12);
@@ -205,26 +205,100 @@
     border-radius:var(--r-sm); padding:6px 9px; width:90px; font-family:var(--mono); }
   input[type=text], textarea { outline:none; transition:border-color .18s ease, box-shadow .18s ease, background-color .18s ease; }
   input[type=text]:focus, input[type=number]:focus, textarea:focus { border-color:var(--accent); box-shadow:0 0 0 3px var(--accent-soft); }
-  .sel { position:relative; display:inline-block; }
+  /* ---- 下拉选栏：默认 / 悬停 / 展开三态，展开时菜单自己找位置 ---- */
+  .sel { position:relative; display:inline-flex; }
   .sel-btn { display:inline-flex; align-items:center; justify-content:space-between; gap:10px;
-    background:var(--panel-2); border:1px solid var(--hairline); color:var(--ink);
-    border-radius:var(--r-sm); padding:6px 10px; cursor:pointer; font-size:13px; min-width:180px; }
-  .sel-btn:hover { border-color:var(--accent); }
-  .sel-btn .arr { font-size:10px; color:var(--ink-mute); transition:transform .15s ease; }
-  .sel.open .sel-btn { border-color:var(--accent); }
-  .sel.open .sel-btn .arr { transform:rotate(180deg); }
-  .sel-menu { position:absolute; top:calc(100% + 4px); left:0; min-width:100%; background:var(--panel);
-    border:1px solid var(--hairline); border-radius:var(--r-md); padding:4px; z-index:70;
-    box-shadow:0 8px 24px rgba(0,0,0,.25); display:none; animation:selIn .14s ease; }
+    min-height:34px; min-width:180px; padding:6px 10px 6px 12px; text-align:left;
+    background:var(--panel-2); border:1px solid var(--hairline); color:var(--ink-dim);
+    border-radius:var(--r-md); cursor:pointer; font-size:13px;
+    transition:border-color .16s ease, background-color .16s ease, color .16s ease, box-shadow .16s ease; }
+  .sel-btn .sel-val { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  /* 筛选行的选栏按内容收，不跟着 180px 的默认宽度撑破一行 */
+  .sel.tight .sel-btn { min-width:150px; }
+  .sel-btn .arr { flex:none; width:12px; height:12px; color:var(--ink-mute);
+    transition:transform .18s var(--ease), color .16s ease; }
+  .sel-btn:hover { border-color:var(--accent); color:var(--ink); }
+  .sel-btn:hover .arr { color:var(--accent-strong); }
+  .sel.open .sel-btn { border-color:var(--accent); background:var(--panel); color:var(--ink);
+    box-shadow:0 0 0 3px var(--accent-soft); }
+  .sel.open .sel-btn .arr { transform:rotate(180deg); color:var(--accent-strong); }
+  .sel-menu { position:absolute; top:calc(100% + 6px); left:0; min-width:100%;
+    max-height:min(320px,42vh); overflow-y:auto; padding:4px; display:none; z-index:70;
+    background:var(--panel); border:1px solid var(--hairline); border-radius:10px;
+    box-shadow:0 14px 34px rgba(0,0,0,.28); animation:selIn .14s var(--ease); }
+  /* 靠近窗口底部的选栏往下翻会把菜单推出可视区，展开时按实测位置决定开口方向 */
+  .sel.up .sel-menu { top:auto; bottom:calc(100% + 6px); animation:selInUp .14s var(--ease); }
   .sel.open .sel-menu { display:block; }
-  @keyframes selIn { from { opacity:0; transform:translateY(-4px); } to { opacity:1; transform:none; } }
+  @keyframes selIn   { from { opacity:0; transform:translateY(-4px); } to { opacity:1; transform:none; } }
+  @keyframes selInUp { from { opacity:0; transform:translateY(4px);  } to { opacity:1; transform:none; } }
   .sel-menu .opt { display:flex; align-items:center; justify-content:space-between; gap:12px;
-    padding:7px 10px; border-radius:var(--r-sm); cursor:pointer; font-size:12.5px;
+    padding:7px 9px; border-radius:var(--r-sm); cursor:pointer; font-size:12.5px;
     color:var(--ink-dim); white-space:nowrap; }
   .sel-menu .opt:hover { background:var(--panel-2); color:var(--ink); }
-  .sel-menu .opt.on { color:var(--accent); }
-  .sel-menu .opt .okm { font-size:11px; visibility:hidden; }
-  .sel-menu .opt.on .okm { visibility:visible; }
+  .sel-menu .opt.on { color:var(--accent-strong); background:var(--accent-soft); }
+  .sel-menu .opt .okm { flex:none; width:12px; height:12px; opacity:0; color:var(--accent-strong); }
+  .sel-menu .opt.on .okm { opacity:1; }
+  .sel-menu .opt.cursor { background:var(--panel-2); color:var(--ink); }
+
+  /* ---- 账号池：一个账号一张条目卡（身份 + 状态 + 指标 + 操作） ----
+     条目浮在「渠道」这块大卡里，所以它自己不再带投影：靠淡底 + 半透明描边成块，
+     只有正在接单的那一张点亮。层级是 渠道卡 > 账号条目 > 徽标/指标，而不是两层同样重的卡。 */
+  .acc-list { display:flex; flex-direction:column; gap:8px; }
+  .acc { position:relative; display:flex; flex-direction:column; gap:6px; padding:9px 11px;
+    border-left:2px solid color-mix(in srgb,var(--hairline) 90%,transparent);
+    border-bottom:1px solid color-mix(in srgb,var(--hairline) 60%,transparent);
+    border-right:1px solid color-mix(in srgb,var(--hairline) 60%,transparent);
+    border-radius:0 11px 11px 0;
+    transition:border-color .16s ease, opacity .16s ease; }
+  .acc:hover { border-left-color:color-mix(in srgb,var(--accent) 55%,transparent); }
+  /* 正在接单的那一张是唯一被点亮的一张：左侧色条换成强调色，不加投影、不套第二层盒子 */
+  .acc.now { border-left-color:var(--accent); }
+  /* 停用不是“不重要”：状态已经写在徽标和 chip 里了，这里只把名字压淡，
+     整卡半透明会把说明文字一起压到读不了。 */
+  .acc.off .acc-name, .acc.off .acc-id { color:var(--ink-mute); }
+  .acc.off { border-left-color:color-mix(in srgb,var(--hairline) 90%,transparent); }
+  .acc-hd { display:flex; align-items:center; gap:8px; min-width:0; }
+  .acc-idx { flex:none; font-family:var(--mono); font-size:11px; color:var(--ink-mute); }
+  .acc-name { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
+    font-size:13px; font-weight:650; color:var(--ink); }
+  .acc-badge { margin-left:auto; flex:none; }
+  .acc-id { font-family:var(--mono); font-size:11px; color:var(--ink-mute);
+    overflow:hidden; text-overflow:ellipsis; white-space:nowrap; user-select:all; }
+  .acc-meta { display:flex; flex-wrap:wrap; gap:4px 12px; font-size:11.5px; color:var(--ink-mute); }
+  .acc-meta b { color:var(--ink); font-weight:600; font-variant-numeric:tabular-nums; }
+  .acc-chips { display:flex; flex-wrap:wrap; gap:5px; }
+  .acc-chip { font-size:10.5px; padding:2px 8px; border-radius:999px; white-space:nowrap;
+    border:1px solid var(--hairline); color:var(--ink-dim); background:transparent; }
+  .acc-chip.now { color:var(--accent-strong); background:var(--accent-soft);
+    border-color:color-mix(in srgb,var(--accent) 45%,transparent); }
+  .acc-chip.warn { color:var(--warn); background:var(--warn-bg);
+    border-color:color-mix(in srgb,var(--warn) 45%,transparent); }
+  /* 一条失败原因是一个句子，不是标签：跟着 .prose 的口径走 13px。 */
+  .acc-note { font-size:13px; line-height:1.6; color:var(--warn); overflow-wrap:anywhere; max-width:74ch; }
+  .acc-note.bad { color:var(--bad); }
+  .acc-acts { display:flex; flex-wrap:wrap; gap:6px; margin-top:1px; }
+  .acc-acts button { font:inherit; font-size:11.5px; padding:3px 10px; border-radius:8px;
+    border:1px solid var(--hairline); background:transparent; color:var(--ink-dim); cursor:pointer;
+    transition:border-color .16s ease, color .16s ease, background-color .16s ease; }
+  .acc-acts button:hover:not(:disabled) { color:var(--ink); border-color:var(--accent); background:var(--accent-soft); }
+  .acc-acts button.danger:hover:not(:disabled) { color:var(--bad); border-color:var(--bad); background:var(--bad-bg); }
+  .acc-acts button:disabled { opacity:.45; cursor:default; }
+  /* 成句的说明文字（渠道卡片正文、公告正文）：13px 起，行高 1.7；
+     11–12px 只留给徽标、指标这类标签性短文本，句子不该那个字号。 */
+  .prose { font-size:13px; line-height:1.7; color:var(--ink-dim); overflow-wrap:anywhere; max-width:74ch; }
+  .acc-empty { font-size:13px; line-height:1.7; color:var(--ink-mute); padding:10px 12px;
+    border:1px dashed var(--hairline); border-radius:var(--r-lg); }
+  /* 授权窗口等待条：不是错误，所以和中性的空态同一口径（虚线、无常驻色块），
+     只有一个呼吸的小圆点表示“还在等”，不抢正在接单那张卡的强调色。 */
+  .acc-wait { display:flex; align-items:flex-start; gap:8px; font-size:13px; line-height:1.7;
+    color:var(--ink-dim); padding:9px 12px; border:1px dashed var(--hairline);
+    border-radius:var(--r-lg); overflow-wrap:anywhere; }
+  .acc-wait .dot { flex:none; width:6px; height:6px; margin-top:7px; border-radius:999px;
+    background:var(--accent); animation:tpb 1.4s ease-in-out infinite; }
+  /* 卡片页的账号列表与操作行：列表自己带上间距，操作行永不写内联样式 */
+  .acc-list:not(:empty) { margin-top:10px; }
+  .oprow { display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin-top:10px; }
+  .oprow .k { flex:none; font-size:12px; color:var(--ink-mute); letter-spacing:.02em; }
   .switch { display:flex; justify-content:space-between; align-items:center; gap:14px; padding:11px 2px; border-bottom:1px solid var(--hairline-soft); }
   .switch:last-child { border-bottom:0; }
   .switch .nm { font-weight:600; }
@@ -247,7 +321,7 @@
   .ann-link, .linkbtn { font-size:11.5px; color:var(--accent); text-decoration:none; white-space:nowrap; }
   .linkbtn { background:none; border:0; cursor:pointer; padding:0 2px; }
   .linkbtn:hover, .ann-link:hover { text-decoration:underline; }
-  .ann-body { margin-top:5px; font-size:12px; line-height:1.72; color:var(--ink-dim); white-space:pre-wrap; max-width:78ch; }
+  .ann-body { margin-top:5px; font-size:13px; line-height:1.72; color:var(--ink-dim); white-space:pre-wrap; max-width:78ch; }
   .annitem.clamp .ann-body { display:-webkit-box; -webkit-box-orient:vertical; -webkit-line-clamp:2; overflow:hidden; }
   /* 展开后正文自己滚，不把「服务 / Agent 概览」顶到折叠线下面 */
   .annitem.open .ann-body { display:block; max-height:32vh; overflow:auto; padding-right:6px; }
@@ -486,6 +560,8 @@
   .chip { display:inline-flex; align-items:center; gap:5px; font-size:11.5px; color:var(--ink-dim);
     background:var(--panel-2); border:1px solid transparent; border-radius:999px; padding:2px 9px; cursor:pointer; }
   .chip.on { border-color:var(--accent); color:var(--ink); }
+  /* 说明性 chip：不可点，用虚线描边区分，不靠把文字压淡到读不清 */
+  .chip.static { cursor:default; border:1px dashed var(--hairline); color:var(--ink-mute); background:transparent; }
   .chip .dotc { width:8px; height:8px; border-radius:50%; }
 
   /* ---- 日志 ---- */
@@ -815,6 +891,9 @@ function render(){ if(!STATE){ skeleton(); return; } const s=STATE;
   $("#side-ver").textContent = s.version || "";
   $("#egress-foot").textContent = s.egress&&s.egress.ip ? `${s.egress.ip} (${s.egress.country||"?"})` : "出口未知";
   renderDash(s); renderAgents(s); renderModels(s); renderProviders(s); renderAccess(s); renderUsage(s); renderSettings(s);
+  // 分段控件的滑块要靠 JS 量宽度才就位：登录版本在「自定义 API」页、热力度模式在概览页，
+  // 以前只有日志/设置页会调它，别的页面上的 seg 就一直顶着 40px 的默认滑块。
+  initSegs();
   if (cur === "logs") renderLogs();
   logTimer = syncLogTimer(logTimer);
   renderDashExtras(s);
@@ -912,7 +991,7 @@ function renderDash(s){
         <div class="card">
           <h3>快速开始</h3>
           <div class="dim" style="font-size:13px">1. 到「Agent 适配」打开你装的 Agent 开关 → 重启该 Agent → 模型选择器出现免费模型。<br>
-          2. 模型名可带思考档位后缀：<code class="k">${esc(s.models[0]?s.models[0].id:"")} (deep)</code>，或到「设置」里改默认档位。</div>
+           2. 支持思考的模型是一个模型 + 一个档位选择器；档位来自该来源自己公布的等级（来源没公布时用精简 / 均衡 / 深思），默认档位到「设置」里改。</div>
         </div>
       </div>
       <div>
@@ -1214,7 +1293,7 @@ function renderModels(s){
       <button class="ghost" id="hide-dead" title="把探测为不可用 / 地区受限的模型全部从 Agent 选择器隐藏（随时可单卡恢复）">隐藏全部不可用</button>
       <button class="ghost" id="show-all" title="恢复全部隐藏的模型${hiddenCount?`（当前 ${hiddenCount} 个）`:""}">恢复全部显示</button>
       <span class="muted" style="font-size:12px" id="eg-line"></span>
-      <span class="muted" style="font-size:12px">思考档位：默认档在「设置」里改；单个请求在模型名后加 (light)/(deep)，或选 /v1/models 里带后缀的变体。</span>
+       <span class="muted" style="font-size:12px">思考档位：默认档在「设置」里改；支持思考的模型在 Agent 里是一个模型 + 一个档位选择器。</span>
     </div></div>
     ${sharedNote}
     <div class="mgrid" id="mgrid"></div>`;
@@ -1236,7 +1315,7 @@ function renderModels(s){
   for(const m of sorted){
     const card = document.createElement("div");
     card.className = "mcard st-" + (m.hidden ? "hidden" : (m.state||"unknown")) + (m.hidden ? " dimmed" : "");
-    const eff = (m.efforts||[]).map(e=>`<span class="eff">${e.name} <b>${(e.tokens/1024|0)}K</b>${e.isDefault?" ★":""}</span>`).join("");
+    const eff = (m.efforts||[]).map(e=>`<span class="eff">${esc(e.zh || e.name || e.id)} <b>${(e.tokens/1024|0)}K</b>${e.isDefault?" ★":""}</span>`).join("");
     const probeBusy = !!(m.task && m.task.kind === "probe" && m.task.status === "running");
     const capsBusy = !!(m.task && m.task.kind === "caps" && m.task.status === "running");
     const pill = m.id === s.probingModel
@@ -1354,18 +1433,168 @@ async function renderQoderCard(){
       '然后打开 <a href="'+repo+'" target="_blank">Qoder IDE</a> 登录一次，模型会自动出现。';
     return;
   }
+  // The device login works with no IDE at all: the grant is what mints the
+  // credential, so the button has to survive the "not logged in" branch below.
+  const btnLogin = $("#qoder-login");
+  if(btnLogin) btnLogin.style.display = st.poolEnabled ? "" : "none";
   if(!st.loggedIn){
     stateEl.textContent = "未登录";
-    body.innerHTML = '网关在线但 Qoder 凭据未激活（'+ (st.detail||'token 已过期') +'）。' +
-      '打开 Qoder IDE 登录一次——网关每个请求都会重读凭据，刷新后模型自动恢复，无需重启网关。';
+    body.innerHTML = '网关在线，但还没有可用的 Qoder 登录。' +
+      (st.poolEnabled
+        ? '直接点「授权登录」，在浏览器里登录一个 Qoder 账号——凭据会进账号池，不用先开 IDE；想加第二个号就再点一次。'
+        : '打开 <a href="'+repo+'" target="_blank">Qoder IDE</a> 登录一次——网关每个请求都会重读凭据，刷新后模型自动恢复，无需重启网关。') +
+      (st.detail ? '<div class="acc-note">'+esc(st.detail)+'</div>' : '');
+    qoderRenderPool(st);
     return;
   }
-  stateEl.textContent = "已登录 · " + (st.models||[]).length + " 个模型";
-  body.innerHTML = '模型已进入所有 Agent 选择器（<code>qoder/模型名</code>）。token 跟随 Qoder IDE 的登录状态，' +
-    '过期时打开 IDE 刷新即可自动恢复。' +
+  const pool = st.pool || [];
+  stateEl.textContent = "已登录 · " + (st.models||[]).length + " 个模型" +
+    (st.poolEnabled ? " · " + pool.length + " 个账号" : "");
+  body.innerHTML = '模型已进入所有 Agent 选择器（<code>qoder/模型名</code>）。' +
+    (st.poolEnabled
+      ? '一个账号的额度用满或登录失效时，同一个请求会自动换下一个账号接着答。'
+      : '当前只用 Qoder IDE 的那一份登录——把它收录进账号池，就能在 IDE 掉线时继续用。') +
     '<div style="margin-top:6px;display:flex;flex-wrap:wrap;gap:4px">' +
     (st.models||[]).map(m=>'<span class="badge">'+m.replace(/^qoder\//,'')+'</span>').join('') +
     '</div>';
+  qoderRenderPool(st);
+}
+
+// 池子里一个账号卡的状态：文案只说事实，颜色由 cls 走主题变量（原来写死 #c55/#c88）。
+function qoderPoolState(a){
+  if(a.state === "auth") return {text:"登录失效", cls:"bad"};
+  if(a.state === "disabled") return {text:"已停用", cls:"unknown"};
+  if(a.state === "cooldown") return {text:"限流中", cls:"warn"};
+  if(a.state === "ok") return {text:"可用", cls:"ok"};
+  return {text:a.state || "未知", cls:"unknown"};
+}
+
+function qoderRenderPool(st){
+  const list = $("#qoder-pool");
+  if(!list) return;
+  const pool = st.pool || [];
+  if(!st.poolEnabled){ list.innerHTML = ""; return; }
+  // Several device logins may be waiting at once — that is how a second and
+  // third account get added — so the count is part of the roster's state.
+  const waiting = qoderLoginTimers.size ? `<div class="acc-wait"><span class="dot"></span>` +
+    `正在等待 ${qoderLoginTimers.size} 个授权窗口完成：在浏览器里登录后账号会自动进池；` +
+    `期间可以再点「授权登录」继续加号。</div>` : "";
+  if(!pool.length){
+    list.innerHTML = waiting + '<div class="acc-empty">账号池还是空的。点「授权登录」在浏览器里登录一个 Qoder 账号——' +
+      '凭据直接进池，想加第二个号就再点一次；也可以点「收录当前 IDE 登录」把 IDE 里现在这个号存进来。</div>';
+    return;
+  }
+  list.innerHTML = waiting + pool.map((a, i) => {
+    const s = qoderPoolState(a);
+    const now = i === 0;
+    const name = esc(a.label || a.uid || a.id || "-");
+    const uid = a.uid ? `<div class="acc-id" title="${esc(a.uid)}">uid ${esc(a.uid)}</div>` : "";
+    const until = a.state === "cooldown" && a.cooldownUntil
+      ? new Date(a.cooldownUntil).toLocaleTimeString().slice(0,5) : "";
+    const chips = [];
+    if(now) chips.push('<span class="acc-chip now">当前接单</span>');
+    if(!a.enabled) chips.push('<span class="acc-chip">已停用 · 不参与轮转</span>');
+    if(until) chips.push(`<span class="acc-chip warn">${until} 恢复</span>`);
+    // A device-authorized account expires on its own; say when, so a dead row
+    // is not mistaken for an upstream outage.
+    if(a.expiresAt){
+      const left = Math.ceil((new Date(a.expiresAt) - Date.now()) / 86400000);
+      chips.push(left <= 3
+        ? `<span class="acc-chip warn">${left <= 0 ? "登录已过期" : "还有 " + left + " 天过期"}</span>`
+        : `<span class="acc-chip">还有 ${left} 天过期</span>`);
+    }
+    const note = a.lastError
+      ? `<div class="acc-note${s.cls === "bad" ? " bad" : ""}">${esc(a.lastError)}</div>` : "";
+    return `<div class="acc${now ? " now" : ""}${a.enabled ? "" : " off"}" data-id="${esc(a.id)}">
+      <div class="acc-hd">
+        <span class="acc-idx">${i+1}</span>
+        <span class="acc-name" title="${name}">${name}</span>
+        <span class="pill ${s.cls} acc-badge">${s.text}</span>
+      </div>
+      ${uid}
+      ${note}
+      <div class="acc-chips">${chips.join("")}</div>
+      <div class="acc-acts">
+        <button class="qoder-act" data-act="primary" data-id="${esc(a.id)}"${now ? " disabled" : ""}>优先使用</button>
+        <button class="qoder-act" data-act="toggle" data-id="${esc(a.id)}" data-enabled="${a.enabled ? "0" : "1"}">${a.enabled ? "停用" : "启用"}</button>
+        <button class="qoder-act danger" data-act="delete" data-id="${esc(a.id)}">移除</button>
+      </div>
+    </div>`;
+  }).join("");
+}
+
+// Device logins are independent windows, so several can be open at once —
+// that is the whole point of "sign another account in". Each state gets its
+// own timer; the pool list shows how many are still waiting.
+const qoderLoginTimers = new Map();
+
+// pollQoderLogin follows one authorization window until the browser finishes.
+// Pending is the normal answer — 404/202 upstream — so it stays quiet.
+function pollQoderLogin(state){
+  if(qoderLoginTimers.has(state)) return;
+  const started = Date.now();
+  const stop = () => { clearInterval(timer); qoderLoginTimers.delete(state); };
+  const timer = setInterval(async () => {
+    if(Date.now() - started > 10 * 60 * 1000){
+      stop();
+      toast("授权窗口超时，请重新点「授权登录」");
+      renderQoderCard();
+      return;
+    }
+    const j = await api("/qoder/pool", { action: "login-poll", state });
+    if(!j){ stop(); renderQoderCard(); return; }
+    if(j.status === "pending") return;
+    stop();
+    if(j.status === "ok"){
+      toast("已加入账号池：" + ((j.account && j.account.label) || "Qoder 账号"));
+    } else {
+      toast(j.message || "授权没有完成");
+    }
+    renderQoderCard();
+  }, 2500);
+  qoderLoginTimers.set(state, timer);
+}
+
+function bindQoderCard(){
+  const card = $("#qoder-card");
+  if(!card || card.dataset.bound) return;
+  card.dataset.bound = "1";
+  const lg = $("#qoder-login");
+  if(lg) lg.onclick = async () => {
+    lg.disabled = true;
+    const start = await api("/qoder/pool", { action: "login-start" });
+    lg.disabled = false;
+    if(!start || !start.authUrl){ if(!start) toast("无法发起 Qoder 授权"); return; }
+    window.open(start.authUrl, "_blank", "noopener");
+    toast("已在浏览器打开 Qoder 授权页，登录完成后账号会自动进来");
+    pollQoderLogin(start.state);
+    renderQoderCard();
+  };
+  const imp = $("#qoder-import");
+  if(imp) imp.onclick = async () => {
+    imp.disabled = true;
+    const j = await api("/qoder/pool", { action: "import" });
+    imp.disabled = false;
+    if(j && j.ok) toast("已收录当前 Qoder IDE 登录到账号池");
+    renderQoderCard();
+  };
+  // Rows are re-rendered on every refresh, so actions are delegated.
+  const list = $("#qoder-pool");
+  if(list) list.onclick = async (ev) => {
+    const btn = ev.target.closest(".qoder-act");
+    if(!btn) return;
+    const id = btn.dataset.id, act = btn.dataset.act;
+    btn.disabled = true;
+    let j = null;
+    if(act === "primary") j = await api("/qoder/pool", { action: "primary", id });
+    else if(act === "toggle") j = await api("/qoder/pool", { action: "toggle", id, enabled: btn.dataset.enabled === "1" });
+    else if(act === "delete"){
+      if(!confirm("从这个账号池里移除该账号？（IDE 里的登录不受影响）")){ btn.disabled = false; return; }
+      j = await api("/qoder/pool", { action: "delete", id });
+    }
+    if(j && j.ok) toast("账号池已更新");
+    renderQoderCard();
+  };
 }
 
 /* CodeArts 账号渠道卡（华为云）：状态读 /admin/api/codearts/status，登录是
@@ -1450,12 +1679,17 @@ function renderProviders(s){
       <h2 class="pt">自定义 API <span class="sub">接入你自己的上游（OpenAI / Anthropic 兼容），模型以 供应商ID/模型名 出现在所有 Agent 选择器里</span></h2>
       <div class="card" id="qoder-card">
         <h3>Qoder 账号渠道 <span class="muted" style="font-size:11px" id="qoder-state"></span></h3>
-        <div class="muted" style="font-size:12px; line-height:1.7" id="qoder-body"></div>
+        <div class="prose" id="qoder-body"></div>
+        <div id="qoder-pool" class="acc-list"></div>
+        <div class="oprow">
+          <button class="act" id="qoder-login" title="在浏览器里登录一个 Qoder 账号，登录凭据直接进账号池——不需要先打开 IDE，可以重复多次加多个号">授权登录</button>
+          <button class="ghost" id="qoder-import" title="把 Qoder IDE 当前的登录快照存进账号池，之后即使 IDE 掉线也还能用这个账号">收录当前 IDE 登录</button>
+        </div>
       </div>
       <div class="card" id="ca-card">
         <h3>CodeArts 账号渠道（华为云） <span class="muted" style="font-size:11px" id="ca-state"></span></h3>
-        <div class="muted" style="font-size:12px; line-height:1.7" id="ca-body">加载中…</div>
-        <div style="margin-top:8px; display:flex; gap:8px; flex-wrap:wrap; align-items:center">
+        <div class="prose" id="ca-body">加载中…</div>
+        <div class="oprow">
           <button class="act" id="ca-login">授权登录</button>
           <button class="ghost" id="ca-logout">退出登录</button>
           <button class="act off" id="tg-codearts">关闭</button>
@@ -1463,15 +1697,17 @@ function renderProviders(s){
       </div>
       <div class="card" id="wb-card">
         <h3>WorkBuddy 账号渠道 <span class="muted" style="font-size:11px" id="wb-state"></span></h3>
-        <div class="muted" style="font-size:12px; line-height:1.7" id="wb-body">加载中…</div>
-        <div style="margin-top:8px; display:flex; gap:8px; flex-wrap:wrap; align-items:center">
-          <select id="wb-realm" style="font-size:12px; padding:4px 6px">
-            <option value="intl">国际版 workbuddy.ai</option>
-            <option value="cn">国内版 codebuddy.cn</option>
-          </select>
-          <button class="act" id="wb-login">授权登录</button>
-          <button class="ghost" id="wb-checkin" style="display:none">立即签到</button>
-          <button class="ghost" id="wb-logout">退出登录</button>
+        <div class="prose" id="wb-body">加载中…</div>
+        <div id="wb-accounts" class="acc-list"></div>
+        <div class="oprow">
+          <span class="k">登录版本</span>
+          <div class="seg" id="wb-realm">
+            <button data-v="intl" class="on">国际版 workbuddy.ai</button>
+            <button data-v="cn">国内版 codebuddy.cn</button>
+          </div>
+          <button class="act" id="wb-login">授权登录（新增账号）</button>
+          <button class="ghost" id="wb-checkin" style="display:none">立即签到（全部 CN）</button>
+          <button class="ghost" id="wb-logout">全部退出</button>
           <button class="act off" id="tg-workbuddy">关闭</button>
         </div>
       </div>
@@ -1613,6 +1849,8 @@ function renderProviders(s){
   renderWorkBuddyCard();
   bindWorkBuddyCard();
   bindCodeartsCard();
+  renderQoderCard();
+  bindQoderCard();
 }
 
 /* WorkBuddy 账号渠道卡：状态读 /admin/api/workbuddy/status，登录走 state 轮询
@@ -1620,40 +1858,158 @@ function renderProviders(s){
 let wbPollTimer = null;
 async function renderWorkBuddyCard(){
   const st = await fetch("/admin/api/workbuddy/status").then(r=>r.json()).catch(()=>null);
-  const state = $("#wb-state"), body = $("#wb-body");
+  const state = $("#wb-state"), body = $("#wb-body"), list = $("#wb-accounts");
   if(!state || !body || !st){ if(state) state.textContent = "状态获取失败"; return; }
-  setToggle("#tg-workbuddy", !!st.enabled);
+  const accts = st.accounts || [];
+  const anyEnabled = accts.some(a => a.enabled);
+  setToggle("#tg-workbuddy", anyEnabled);
+  const tg = $("#tg-workbuddy");
+  // No account, no channel switch: a switch that governs nothing is noise.
+  if(tg) tg.style.display = accts.length ? "" : "none";
   const lg = $("#wb-logout");
-  if(lg) lg.style.display = st.loggedIn ? "" : "none";
-  const realmSel = $("#wb-realm");
-  if(realmSel) realmSel.style.display = st.loggedIn ? "none" : "";
+  if(lg) lg.style.display = accts.length ? "" : "none";
   const ck = $("#wb-checkin");
-  if(ck) ck.style.display = st.canCheckin ? "" : "none";
-  if(!st.loggedIn){
+  if(ck) ck.style.display = accts.some(a => a.canCheckin) ? "" : "none";
+
+  if(!accts.length){
     state.textContent = "未登录";
-    body.innerHTML = '用 WorkBuddy / CodeBuddy 账号授权后，免费模型（hy4-preview-f / hy3 / deepseek-v4.1-flash）直接进入「模型」页和所有 Agent 选择器。国际版每日自动发一条极小对话领活跃积分，国内版每日自动签到。免费模型走 24h 窗口限量；提示词可能被上游记录，别交机密内容。';
+    body.innerHTML = '用 WorkBuddy / CodeBuddy 账号授权后，免费模型（hy4-preview-f / hy3 / deepseek-v4.1-flash）直接进入「模型」页和所有 Agent 选择器。' +
+      '可以登录多个账号：一个账号的免费额度用满后，同一个请求会自动换下一个账号接着答。' +
+      '国际版每个账号每日自动发一条极小对话领活跃积分，国内版每个账号每日自动签到。' +
+      '免费模型走 24h 窗口限量；提示词可能被上游记录，别交机密内容。';
+    if(list) list.innerHTML = "";
     return;
   }
-  state.textContent = st.enabled ? "已启用" : "已停用";
-  const exp = st.expiresAtMs ? new Date(st.expiresAtMs).toLocaleString() : "未知";
-  const realmLabel = st.realm === "cn" ? "国内版 codebuddy.cn" : "国际版 workbuddy.ai";
-  const dailyLabel = st.realm === "cn"
-    ? ' · 上次签到 ' + (st.lastCheckinDate || "—")
-    : ' · 上次活跃 ' + (st.lastActivityDate || "—");
-  body.innerHTML = '账号 <b>' + (st.nickname || st.uid || "-") + '</b> · ' + realmLabel +
-    ' · 登录有效期至 ' + exp +
-    ' · 积分 <b>' + (st.credits === "" ? "—" : st.credits) + '</b>' + dailyLabel +
-    (st.detail ? '<br><span style="color:#c88">' + st.detail + '</span>' : '');
+
+  // 池内合计只在说得出「谁没读到」时才敢说：三行里有两行读数失败，把读到的
+  // 两行加起来当总数，卡片就在报一个不存在的余额。
+  const known = accts.filter(a => a.creditsKnown);
+  let creditLine = "";
+  if(known.length){
+    const sum = Math.round(known.reduce((s, a) => s + (Number(a.credits) || 0), 0) * 100) / 100;
+    creditLine = " · 积分 " + sum + (known.length < accts.length ? `（${accts.length - known.length} 个未读到）` : "");
+  } else if(accts.length){
+    creditLine = " · 积分 —";
+  }
+  state.textContent = (anyEnabled ? "已启用 · " + accts.length + " 个账号" : "已停用") + creditLine;
+  body.innerHTML = '一个账号的免费额度用满后会自动换下一个账号，对客户端无感；' +
+    '每个账号各自每日自动签到 / 领活跃。停用只停止接单，签到与令牌刷新照常（否则它永远回不来）。';
+  wbRenderAccounts(st);
 }
+
+// 分段控件的当前值：以按下钮为准，dataset.value 只是绑定前的兜底。
+function wbRealmValue(){
+  const seg = $("#wb-realm");
+  if(!seg) return "intl";
+  const on = seg.querySelector("button.on");
+  return on ? on.dataset.v : (seg.dataset.value || "intl");
+}
+
+// 一张卡一个账号：身份（昵称/uid）+ 状态徽标 + 版本域 + 指标 + 操作。
+function wbStateBadge(a){
+  if(a.state === "auth") return {text:"登录失效", cls:"bad"};
+  if(a.state === "unready") return {text:"未登录", cls:"unknown"};
+  if(a.state === "disabled") return {text:"已停用", cls:"unknown"};
+  if(a.state === "cooldown") return {text:"限流中", cls:"warn"};
+  // "ok" is what the pool actually publishes for a healthy account (see
+  // wbViews in the lane); the card used to know only "ready", so every usable
+  // account wore its raw English enum as the badge.
+  if(a.state === "ok" || a.state === "ready" || a.state === undefined || a.state === "") return {text:"可用", cls:"ok"};
+  return {text:"状态未知", cls:"unknown"};
+}
+
+// 积分不是一种货币，而是一种有到期日的货币：卡片把两桶分开写。
+// 窗口天数取自后端（creditsWindow），文案不写死 —— 标签说 15 天、规则用另一个
+// 天数，就是在对用户宣布一个我们从未执行过的期限。
+function wbCreditSplitChip(a){
+  if(!a.creditsKnown) return "";
+  const c = v => { const n = Math.round(Number(v || 0) * 100) / 100; return Number.isFinite(n) ? n : 0; };
+  const days = a.creditsWindow || 15;
+  const soon = c(a.creditsExpiring), rest = c(a.creditsPermanent), dead = c(a.creditsDead);
+  if(soon === 0 && rest === 0){
+    return `<span class="acc-chip${dead ? " warn" : ""}">无可用积分${dead ? ` · 另有 ${dead} 已失效` : ""}</span>`;
+  }
+  const parts = [];
+  if(soon > 0) parts.push(`${days} 天内到期 <b>${soon}</b>`);
+  if(rest > 0) parts.push(`永久 <b>${rest}</b>`);
+  if(dead > 0) parts.push(`已失效 ${dead}`);
+  // 「永久」是产品口径：它是「15 天后才停止计费」，含上游没公布截止时间的包。
+  const hint = `「永久」= ${days} 天后才停止计费（含上游未公布截止时间的包）`;
+  return `<span class="acc-chip${soon > 0 ? " warn" : ""}" title="${esc(hint)}">${parts.join(" · ")}</span>`;
+}
+
+function wbRenderAccounts(st){
+  const list = $("#wb-accounts");
+  if(!list) return;
+  const accts = st.accounts || [];
+  const active = st.activeId || "";
+  if(!accts.length){ list.innerHTML = ""; return; }
+  const num = v => (v === "" || v === undefined || v === null) ? "—" : esc(String(v));
+  list.innerHTML = accts.map((a, i) => {
+    const s = wbStateBadge(a);
+    const now = a.id === active;
+    const name = esc(a.nickname || a.uid || a.id || "-");
+    const uid = a.uid ? `<div class="acc-id" title="${esc(a.uid)}">uid ${esc(a.uid)}</div>` : "";
+    const exp = a.expiresAtMs ? new Date(a.expiresAtMs).toLocaleDateString() : "—";
+    const daily = a.realm === "cn"
+      ? `上次签到 <b>${a.lastCheckinDate || "—"}</b>`
+      : `上次活跃 <b>${a.lastActivityDate || "—"}</b>`;
+    const credits = a.creditsKnown ? `<b>${num(a.credits)}</b>` : "<b>—</b>";
+    const meta = [
+      `积分 ${credits}`,
+      daily,
+      `有效期至 <b>${exp}</b>`,
+    ];
+    if(a.inFlight) meta.push(`在途 <b>${a.inFlight}</b>`);
+    if(a.state === "cooldown"){
+      if(a.cooldownModel) meta.push(`限流模型 <b>${esc(a.cooldownModel)}</b>`);
+      if(a.cooldownUntil) meta.push(`恢复 <b>${new Date(a.cooldownUntil).toLocaleTimeString().slice(0,5)}</b>`);
+    }
+    const chips = [`<span class="acc-chip">${a.realm === "cn" ? "国内版 codebuddy.cn" : "国际版 workbuddy.ai"}</span>`];
+    const split = wbCreditSplitChip(a);
+    if(split) chips.push(split);
+    if(now) chips.push('<span class="acc-chip now">当前接单</span>');
+    if(a.noCheckin) chips.push('<span class="acc-chip">企业账号 · 无每日签到</span>');
+    if(!a.enabled) chips.push('<span class="acc-chip">已停用 · 只签到不接单</span>');
+    const noteText = a.detail || a.lastError;
+    const note = noteText
+      ? `<div class="acc-note${s.cls === "bad" ? " bad" : ""}">${esc(noteText)}</div>` : "";
+    return `<div class="acc${now ? " now" : ""}${a.enabled ? "" : " off"}" data-id="${esc(a.id)}">
+      <div class="acc-hd">
+        <span class="acc-idx">${i+1}</span>
+        <span class="acc-name" title="${name}">${name}</span>
+        <span class="pill ${s.cls} acc-badge">${s.text}</span>
+      </div>
+      ${uid}
+      ${note}
+      <div class="acc-meta">${meta.join(" · ")}</div>
+      <div class="acc-chips">${chips.join("")}</div>
+      <div class="acc-acts">
+        <button class="wb-act" data-act="primary" data-id="${esc(a.id)}"${now ? " disabled" : ""}>优先使用</button>
+        <button class="wb-act" data-act="toggle" data-id="${esc(a.id)}" data-enabled="${a.enabled ? "0" : "1"}">${a.enabled ? "停用" : "启用"}</button>
+        <button class="wb-act danger" data-act="logout" data-id="${esc(a.id)}">退出</button>
+      </div>
+    </div>`;
+  }).join("");
+}
+
 function bindWorkBuddyCard(){
   const card = $("#wb-card");
   if(!card || card.dataset.bound) return;
   card.dataset.bound = "1";
+  // 登录版本是个二选一：分段控件一眼能看见两个选项，比收起来的下拉少一次点击。
+  const realm = $("#wb-realm");
+  if(realm){
+    realm.querySelectorAll("button").forEach(b => b.onclick = () => {
+      realm.querySelectorAll("button").forEach(x => x.classList.toggle("on", x === b));
+      realm.dataset.value = b.dataset.v;
+    });
+    realm.dataset.value = realm.querySelector("button.on") ? realm.querySelector("button.on").dataset.v : "intl";
+  }
   $("#wb-login").onclick = async () => {
     const b = $("#wb-login");
     b.disabled = true;
-    const realm = ($("#wb-realm") && $("#wb-realm").value) || "intl";
-    const j = await api("/workbuddy/login/start", { realm });
+    const j = await api("/workbuddy/login/start", { realm: wbRealmValue() });
     b.disabled = false;
     if (!j || !j.authUrl) return;
     // 服务端已用系统默认浏览器打开授权页（复用你已有的 workbuddy.ai 登录态）；
@@ -1662,7 +2018,7 @@ function bindWorkBuddyCard(){
     state.textContent = "等待授权…";
     body.innerHTML = '授权页已在你的默认浏览器打开。如果你在浏览器里已登录过 WorkBuddy，通常只需点一下确认；' +
       '没有自动弹出时 <a href="' + j.authUrl + '" target="_blank" rel="noopener">点这里打开授权页</a>。' +
-      '完成后这里会自动拿到令牌（有效期最长 5 分钟）。';
+      '完成后这里会自动拿到令牌（有效期最长 5 分钟）。已登录的账号不会被替换，新账号会加入账号池。';
     const deadline = Date.now() + 5*60*1000;
     if (wbPollTimer) clearInterval(wbPollTimer);
     wbPollTimer = setInterval(async () => {
@@ -1670,7 +2026,7 @@ function bindWorkBuddyCard(){
       const p = await fetch("/admin/api/workbuddy/login/poll").then(r=>r.json()).catch(()=>null);
       if (p && p.state === "ok") {
         clearInterval(wbPollTimer); wbPollTimer = null;
-        toast("WorkBuddy 授权成功，免费模型已进入模型页");
+        toast("WorkBuddy 账号已加入账号池（已自动补签今日）");
         renderWorkBuddyCard();
       } else if (p && p.state === "error") {
         clearInterval(wbPollTimer); wbPollTimer = null;
@@ -1685,19 +2041,43 @@ function bindWorkBuddyCard(){
     const j = await api("/workbuddy/checkin", {});
     b.disabled = false;
     if (!j) { renderWorkBuddyCard(); return; }
-    toast(j.skipped ? "今日已签到（每日一次）" : "国内版每日签到已完成");
+    toast(j.skipped ? "今日已签到（每账号每日一次）" : "国内版每日签到已完成（每轮最多 3 个账号）");
     renderWorkBuddyCard();
   };
   $("#wb-logout").onclick = async () => {
+    if (!confirm("退出全部 WorkBuddy 账号？")) return;
     const j = await api("/workbuddy/logout", {});
-    if (j) toast("已退出 WorkBuddy 账号");
+    if (j) toast("已退出全部 WorkBuddy 账号");
+    renderWorkBuddyCard();
+  };
+  // Per-account actions are delegated: the rows are re-rendered on every
+  // refresh, so binding to them directly would lose the handlers.
+  $("#wb-accounts").onclick = async (ev) => {
+    const btn = ev.target.closest(".wb-act");
+    if (!btn) return;
+    const id = btn.dataset.id;
+    const act = btn.dataset.act;
+    btn.disabled = true;
+    let j = null;
+    if (act === "primary") {
+      j = await api("/workbuddy/account/primary", { id });
+      if (j) toast("已设为优先账号");
+    } else if (act === "toggle") {
+      const enabled = btn.dataset.enabled === "1";
+      j = await api("/workbuddy/account/toggle", { id, enabled });
+      if (j) toast(enabled ? "该账号已启用" : "该账号已停用（签到与刷新照常）");
+    } else if (act === "logout") {
+      if (!confirm("退出这个账号？其他账号不受影响。")) { btn.disabled = false; return; }
+      j = await api("/workbuddy/logout", { id });
+      if (j) toast("该账号已退出");
+    }
     renderWorkBuddyCard();
   };
   const tgb = $("#tg-workbuddy");
   tgb.onclick = async () => {
     const on = tgb.dataset.on !== "1";
     const j = await api("/settings", { workBuddyEnabled: on });
-    if(j){ setToggle("#tg-workbuddy", on); toast(on ? "WorkBuddy 渠道已启用" : "WorkBuddy 渠道已停用"); }
+    if(j){ setToggle("#tg-workbuddy", on); toast(on ? "WorkBuddy 渠道已启用（全部账号）" : "WorkBuddy 渠道已停用（全部账号）"); }
     renderWorkBuddyCard();
   };
 }
@@ -1819,13 +2199,12 @@ function renderProviderList(s){
 
 /* ---- 接入 ---- */
 function renderAccess(s){
-  // The example names a model this machine can actually call today: take the
-  // first model the state reports as available, and show an effort suffix only
-  // when that model really offers one.
+  // The example names a model this machine can actually call today, and asks
+  // for an effort only when that model really publishes a ladder.
   const ex = (s.models || []).find(m => m.state === "available") || (s.models || [])[0] || {};
   const exId = ex.id || "kilo-auto/free";
-  const exEff = (ex.efforts || []).some(e => e.id === "deep") ? " (deep)" : "";
-  const curl = `curl ${s.baseURL}/chat/completions \\\n  -H "Authorization: Bearer ${s.mainKey}" \\\n  -H "content-type: application/json" \\\n  -d '{"model":"${exId}${exEff}","messages":[{"role":"user","content":"你好"}],"stream":true}'`;
+  const exEff = (ex.efforts || []).length ? `,"reasoning_effort":"${(ex.efforts.find(e=>e.isDefault)||{}).id || "balanced"}"` : "";
+  const curl = `curl ${s.baseURL}/chat/completions \\\n  -H "Authorization: Bearer ${s.mainKey}" \\\n  -H "content-type: application/json" \\\n  -d '{"model":"${exId}","messages":[{"role":"user","content":"你好"}],"stream":true${exEff}}'`;
   $("#page-access").innerHTML = `
     <h2 class="pt">接入 <span class="sub">任何支持 OpenAI / Anthropic 兼容端点的客户端</span></h2>
     <div class="card"><h3>通用参数</h3>
@@ -2142,7 +2521,13 @@ let logQ = "";
 let logFilePick = "";
 let logKeepPick = "";
 let logDaysKey = "";
+let logDays = [];
 let logTimer = null;
+
+// 「来源」下拉的选项来自日志文件列表，每次渲染重新喂给选栏组件。
+function logDayOptions(){
+  return [["", "实时（内存）"]].concat(logDays.map(d => [d, d]));
+}
 
 async function renderLogs(){
   const el = $("#page-logs");
@@ -2158,12 +2543,9 @@ async function renderLogs(){
           '<button data-l="'+v+'" class="'+(logLevel===v?"on":"")+'">'+t+'</button>').join("")
       +   '</div>'
       +   '<span class="dim" style="font-size:12px">来源</span>'
-      +   '<select id="log-day" style="'+LOG_INP+';width:150px"></select>'
+      +   '<div class="sel tight" id="log-day"></div>'
       +   '<span class="dim" style="font-size:12px">只看</span>'
-      +   '<select id="log-cat" style="'+LOG_INP+';width:120px">'
-      +     '<option value="">全部分类</option>'
-      +     LOG_CATS.map(([k,label])=>'<option value="'+k+'">'+label+'</option>').join("")
-      +   '</select>'
+      +   '<div class="sel tight" id="log-cat"></div>'
       +   '<input id="log-q" style="'+LOG_INP+';width:230px" placeholder="按请求 id 或关键字过滤">'
       +   '<button class="ghost" id="log-dl">下载</button>'
       +   '<span class="muted" style="font-size:11.5px" id="log-count"></span>'
@@ -2189,8 +2571,10 @@ async function renderLogs(){
       logFilePick = b.dataset.f;
       el.querySelectorAll("#log-file-levels button").forEach(x=>x.classList.toggle("on", x===b));
     });
-    el.querySelector("#log-day").onchange = e => { logDay = e.target.value; renderLogs(); };
-    el.querySelector("#log-cat").onchange = e => { logCat = e.target.value; renderLogs(); };
+    makeDropdown(el.querySelector("#log-cat"), [["", "全部分类"]].concat(LOG_CATS), logCat,
+      v => { logCat = v; renderLogs(); });
+    makeDropdown(el.querySelector("#log-day"), logDayOptions(), logDay,
+      v => { logDay = v; renderLogs(); });
     const q = el.querySelector("#log-q");
     q.onchange = () => { logQ = q.value.trim(); renderLogs(); };
     q.onkeydown = e => { if(e.key==="Enter"){ logQ = q.value.trim(); renderLogs(); } };
@@ -2210,7 +2594,7 @@ async function renderLogs(){
     + LOG_CATS.map(([k,label])=>'<button class="chip'+(cats[k]?" on":"")+'" data-c="'+k+'">'
         + '<span class="dotc" style="background:'+(cats[k]?"var(--accent)":"var(--ink-mute)")+'"></span>'+label
         + '</button>').join("")
-    + '<span class="chip" style="cursor:default;opacity:.75">未分类信息 · 始终记录</span>';
+    + '<span class="chip static">未分类信息 · 始终记录</span>';
   box.querySelectorAll(".chip[data-c]").forEach(b=>b.onclick=async ()=>{
     const next = {};
     LOG_CATS.forEach(([k])=>{ next[k] = !!cats[k]; });
@@ -2236,10 +2620,11 @@ async function renderLogs(){
     const key = days.join(",");
     if(key !== logDaysKey){
       logDaysKey = key;
+      logDays = days;
       if(logDay && days.indexOf(logDay) < 0) logDay = "";
-      el.querySelector("#log-day").innerHTML = '<option value="">实时（内存）</option>'
-        + days.map(d=>'<option value="'+d+'"'+(d===logDay?" selected":"")+'>'+d+'</option>').join("");
-      el.querySelector("#log-day").value = logDay;
+      // 选栏按签名重建：日期列表会随文件轮转变化，值仍然落在容器上。
+      makeDropdown(el.querySelector("#log-day"), logDayOptions(), logDay,
+        v => { logDay = v; renderLogs(); });
     }
     const lines = (data.entries||[]).map(e=>{
       const c = {INFO:"var(--ink-dim)",WARN:"var(--warn)",ERROR:"var(--bad)"}[e.level]||"var(--ink-dim)";
@@ -2279,8 +2664,8 @@ function renderSettings(s){
         <button class="act" id="save">保存</button>
         <button class="ghost" id="rotate">轮换主 Key</button>
       </div>
-      <div class="muted" style="font-size:12px;margin-top:10px">默认思考档位对所有已接入的 Agent 生效（模型名没带后缀时使用）。
-      想按次选择：模型名加后缀 <code class="k">(light)</code> / <code class="k">(deep)</code>。</div></div>
+       <div class="muted" style="font-size:12px;margin-top:10px">默认思考档位对所有已接入的 Agent 生效（请求没指定档位时使用）。
+       想按次选择：用该模型自带的档位选择器，或在请求里带 <code class="k">reasoning_effort</code>。</div></div>
 
       <div class="card">
         <h3>模型切换</h3>
@@ -2663,46 +3048,123 @@ async function refresh(){
 }
 
 /* ---- custom dropdown ---- */
+/* 下拉选栏：一个按钮 + 一个 listbox 菜单。
+   三件事是这里最容易悄悄坏掉的，都按“最后一次调用”处理：
+   1. 选项变了必须重建菜单（同一容器常被喂进新的模型列表）；
+   2. onChange 存成最新的那个闭包，否则第二次渲染后点选项会跑回调到旧数据上；
+   3. 键盘可达：方向键移动、Enter 选中、Esc 关闭，菜单贴着窗口底部时向上开。 */
 function makeDropdown(container, options, value, onChange){
   container.classList.add("sel");
   if(!container.querySelector(".sel-btn")){
-    container.innerHTML = `<button type="button" class="sel-btn"><span class="sel-val"></span><span class="arr">▾</span></button><div class="sel-menu"></div>`;
+    container.innerHTML = `<button type="button" class="sel-btn" aria-haspopup="listbox" aria-expanded="false">`
+      + `<span class="sel-val"></span>`
+      + `<svg class="arr" viewBox="0 0 12 12" aria-hidden="true"><path d="M2.5 4.5 6 8l3.5-3.5" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>`
+      + `</button><div class="sel-menu" role="listbox"></div>`;
   }
   const val = container.querySelector(".sel-val");
   const btn = container.querySelector(".sel-btn");
   const menu = container.querySelector(".sel-menu");
+  // 最新的回调存在容器上：菜单只在选项变化时重建，点击时永远读这里。
+  container.__change = onChange;
   const label = v => { const o = options.find(x=>x[0]===v); return o ? o[1] : v; };
-  const set = v => {
-    container.dataset.value = v;
-    val.textContent = label(v);
-    menu.querySelectorAll(".opt").forEach(o=>o.classList.toggle("on", o.dataset.v===v));
-  };
-  if(!menu.dataset.built){
-    menu.innerHTML = options.map(([v,t])=>
-      `<div class="opt" data-v="${v}"><span>${esc(t)}</span><span class="okm">✓</span></div>`).join("");
-    menu.dataset.built = "1";
-    menu.querySelectorAll(".opt").forEach(o=>o.onclick = ()=>{
-      set(o.dataset.v);
-      closeSel();
-      if(onChange) onChange(o.dataset.v);
+  const sig = options.map(o=>o[0]+"\u0000"+o[1]).join("\u0001");
+  if(menu.dataset.sig !== sig){
+    // 每个选栏一套稳定的 option id，供 aria-activedescendant 指向；
+    // 容器没有 id 时也要拿到一个，不能生成以 "-" 开头的非法值。
+    if(!container.id) container.id = "sel-" + (makeDropdown.seq++);
+    const pid = container.id;
+    menu.innerHTML = options.map(([v,t], i)=>
+      `<div class="opt" role="option" tabindex="-1" id="${pid}-o${i}" data-v="${esc(String(v))}">`
+      + `<span>${esc(t)}</span>`
+      + `<svg class="okm" viewBox="0 0 12 12" aria-hidden="true"><path d="M2.5 6.2 5 8.6 9.5 3.8" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>`
+      + `</div>`).join("");
+    menu.dataset.sig = sig;
+    menu.querySelectorAll(".opt").forEach(o=>{
+      o.onclick = () => pick(o.dataset.v);
+      o.onmouseenter = () => move(opts(), o);
     });
   }
-  set(value);
-
-  function closeSel(){
-    container.classList.remove("open");
-    if(container.__outsideL){ document.removeEventListener("click", container.__outsideL); container.__outsideL = null; }
+  function set(v){
+    container.dataset.value = v;
+    val.textContent = label(v);
+    menu.querySelectorAll(".opt").forEach(o=>{
+      const on = o.dataset.v === v;
+      o.classList.toggle("on", on);
+      o.setAttribute("aria-selected", on ? "true" : "false");
+    });
   }
-  const outside = e => { if(!container.contains(e.target)) closeSel(); };
-  if(container.__outsideL){ document.removeEventListener("click", container.__outsideL); }
-  container.__outsideL = outside;
+  function pick(v){
+    set(v);
+    close();
+    if(container.__change) container.__change(v);
+  }
+  set(value);
+  const opts = () => Array.from(menu.querySelectorAll(".opt"));
+
+  function move(list, target){
+    if(!list.length) return;
+    let i = target === null ? list.findIndex(o=>o.classList.contains("on"))
+                             : list.indexOf(target);
+    if(i < 0) i = 0;
+    list.forEach(o=>o.classList.remove("cursor"));
+    list[i].classList.add("cursor");
+    btn.setAttribute("aria-activedescendant", list[i].id);
+    list[i].scrollIntoView({block:"nearest"});
+  }
+
+  function open(){
+    document.querySelectorAll(".sel.open").forEach(x=>{ if(x!==container) x.classList.remove("open"); });
+    // 向下放不下就向上开：设置页和供应商卡的选栏常贴着窗口底部。
+    const r = btn.getBoundingClientRect();
+    const roomBelow = window.innerHeight - r.bottom;
+    container.classList.toggle("up", roomBelow < Math.min(320, (r.height + 8) * 6) && roomBelow < r.top);
+    container.classList.add("open");
+    btn.setAttribute("aria-expanded","true");
+    move(opts(), null);
+    document.addEventListener("click", outside);
+  }
+  function close(){
+    container.classList.remove("open");
+    container.__pressIn = false;
+    btn.setAttribute("aria-expanded","false");
+    btn.removeAttribute("aria-activedescendant");
+    document.removeEventListener("click", outside);
+  }
+  const outside = e => { if(!container.contains(e.target)) close(); };
+
   btn.onclick = e => {
     e.stopPropagation();
-    const was = container.classList.contains("open");
-    document.querySelectorAll(".sel.open").forEach(x=>{ if(x!==container) x.classList.remove("open"); });
-    if(was){ closeSel(); } else { container.classList.add("open"); document.addEventListener("click", outside); }
+    if(container.classList.contains("open")) close(); else open();
+  };
+  btn.onkeydown = e => {
+    const list = opts();
+    const isOpen = container.classList.contains("open");
+    if(!isOpen && (e.key === "ArrowDown" || e.key === "ArrowUp" || e.key === "Enter" || e.key === " ")) {
+      e.preventDefault(); open(); return;
+    }
+    if(!isOpen) return;
+    const i = list.findIndex(o=>o.classList.contains("cursor"));
+    if(e.key === "Escape"){ e.preventDefault(); close(); btn.focus(); }
+    else if(e.key === "Tab"){ close(); }
+    else if(e.key === "ArrowDown"){ e.preventDefault(); move(list, list[Math.min(i+1, list.length-1)]); }
+    else if(e.key === "ArrowUp"){ e.preventDefault(); move(list, list[Math.max(i-1, 0)]); }
+    else if(e.key === "Home"){ e.preventDefault(); move(list, list[0]); }
+    else if(e.key === "End"){ e.preventDefault(); move(list, list[list.length-1]); }
+    else if(e.key === "Enter" || e.key === " "){ e.preventDefault(); if(list[i]) pick(list[i].dataset.v); }
+  };
+  // 鼠标按下选项时按钮先失焦：如果这时就关闭菜单，menu 立刻 display:none，
+  // mouseup/click 落在空白处，用鼠标点选项就永远不会生效（键盘路径反而正常）。
+  // 所以“按进了菜单里”的那次失焦不关；选项也带 tabindex=-1，点它焦点仍留在容器内。
+  if(!menu.dataset.pressBound){
+    menu.dataset.pressBound = "1";
+    menu.addEventListener("mousedown", () => { container.__pressIn = true; });
+  }
+  btn.onblur = () => {
+    if(container.__pressIn){ container.__pressIn = false; return; }
+    if(!container.contains(document.activeElement)) close();
   };
 }
+makeDropdown.seq = 1;
 
 /* ---- theme ---- */
 function setTheme(t){

@@ -129,6 +129,46 @@ func TestWorkBuddy6004CarriesTheResetClock(t *testing.T) {
 	}
 }
 
+// The card's note line is prose, not a wire dump. A logged upstream refusal
+// (2026-10-21, 14003) carried the Chinese sentence the vendor itself wrote in
+// displayMsg.zh while the card printed the whole English JSON envelope.
+func TestWorkBuddyRefusalReadsAsASentence(t *testing.T) {
+	real := `{"code":14003,"msg":"too many requests","requestId":"6e879703292bdec799bdf9bc4bf19006",` +
+		`"displayMsg":{"en":"Model busy. Please switch models or retry later","zh":"模型繁忙，请换模型或稍后再试"}}`
+	ue := classifyWorkBuddyFailure(429, real, 0)
+	if ue.Message != "模型繁忙，请换模型或稍后再试（上游 code 14003）" {
+		t.Fatalf("message = %q, want the upstream's own Chinese line", ue.Message)
+	}
+	for _, leak := range []string{"requestId", "displayMsg", "too many requests", `{"code"`} {
+		if strings.Contains(ue.Message, leak) {
+			t.Errorf("message leaks envelope text %q: %q", leak, ue.Message)
+		}
+	}
+	if ue.Code != CodeQuota || ue.RetryAfter != wbSoftCooldown {
+		t.Fatalf("refusal filed as %+v, want a soft quota cooldown", ue)
+	}
+
+	// No Chinese: fall to the English sentence, still not the envelope.
+	enOnly := classifyWorkBuddyFailure(429, `{"code":14003,"msg":"too many requests"}`, 0)
+	if enOnly.Message != "too many requests（上游 code 14003）" {
+		t.Fatalf("english-only fallback = %q", enOnly.Message)
+	}
+
+	// 6004's reset clock is the actionable half of the message: naming the
+	// condition in Chinese must not throw the clock away.
+	cap := classifyWorkBuddyFailure(429, `{"code":6004,"message":"free window exceeded, your usage will reset at 2099-01-01 00:00:00 UTC+8"}`, 0)
+	if !strings.Contains(cap.Message, "2099-01-01 00:00:00") || !strings.Contains(cap.Message, "免费窗口已用满") {
+		t.Fatalf("6004 message = %q, want the Chinese condition plus the reset clock", cap.Message)
+	}
+
+	// A non-JSON body (an openresty page, a plain-text verdict) is passed
+	// through, shortened: inventing a sentence we cannot read is worse.
+	html := classifyWorkBuddyFailure(503, "<html><body>503 Service Unavailable</body></html>", 0)
+	if html == nil || !strings.Contains(html.Message, "503") {
+		t.Fatalf("non-JSON refusal = %+v, want the body kept", html)
+	}
+}
+
 func TestPostWorkBuddyStreamedSanitizesFingerprintsOn403(t *testing.T) {
 	var calls atomic.Int64
 	var firstBody, secondBody string
@@ -617,7 +657,7 @@ func TestProbeWorkBuddyCarriesModelQuirks(t *testing.T) {
 // must ride the same refresh chain.
 func TestWorkBuddyCreditsRefreshesOn401(t *testing.T) {
 	var billingCalls, refreshCalls atomic.Int64
-	var lastAuth atomic.Value
+	var lastAuth, lastMethod atomic.Value
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case strings.HasSuffix(r.URL.Path, wbAuthRefreshPath):
@@ -626,11 +666,17 @@ func TestWorkBuddyCreditsRefreshesOn401(t *testing.T) {
 		case strings.HasSuffix(r.URL.Path, wbUserResourcePath):
 			n := billingCalls.Add(1)
 			lastAuth.Store(r.Header.Get("authorization"))
+			lastMethod.Store(r.Method)
 			if n == 1 {
 				w.WriteHeader(401) // openresty refuses the stale credential
 				return
 			}
-			fmt.Fprint(w, `{"code":0,"data":{"credit":123}}`)
+			// The meter's own shape: two spendable packs, 249.04 + 100.
+			fmt.Fprint(w, `{"code":0,"data":{"Response":{"Data":{"Accounts":[`+
+				`{"PackageName":"Bonus Pack","CapacityUnit":"credit","Status":0,`+
+				`"CycleCapacityRemain":249,"CycleCapacityRemainPrecise":"249.04","DeductionEndTime":9999999999999},`+
+				`{"PackageName":"Free Plan Subscription","CapacityUnit":"credits","Status":0,`+
+				`"CycleCapacityRemain":100,"CycleCapacityRemainPrecise":"100","DeductionEndTime":9999999999999}]}}}}`)
 		default:
 			w.WriteHeader(404)
 		}
@@ -646,14 +692,155 @@ func TestWorkBuddyCreditsRefreshesOn401(t *testing.T) {
 	if err != nil {
 		t.Fatalf("credits read failed: %v", err)
 	}
-	if credits != "123" {
-		t.Fatalf("credits = %q, want 123", credits)
+	if got := credits.String(); got != "349.04" {
+		t.Fatalf("credits = %q, want the sum of the spendable packs (349.04)", got)
+	}
+	// The meter is POST-only: a GET is answered with a bare "404 page not
+	// found" by the live router, which is exactly what made every card report
+	// 积分查询返回 HTTP 404 while chat kept working (measured 2026-10-21).
+	if lastMethod.Load() != "POST" {
+		t.Fatalf("meter read rode %v, want POST", lastMethod.Load())
 	}
 	if refreshCalls.Load() != 1 {
 		t.Fatalf("refresh calls = %d, want exactly one", refreshCalls.Load())
 	}
 	if lastAuth.Load() != "Bearer tok-2" {
 		t.Fatalf("retry rode %v, want the refreshed token", lastAuth.Load())
+	}
+}
+
+// The balance is the sum of the account's resource packs, not a field, and the
+// packs the meter still lets it spend are not all the packs it returns. The
+// sum is then split by when each pack stops being chargeable, because credit
+// that dies this month and credit that does not are different things to a user
+// deciding whether to burn an account now.
+func TestWBMeterBalance(t *testing.T) {
+	now := time.Date(2026, 10, 21, 12, 0, 0, 0, time.Local)
+	const noCutoff = time.Duration(-1)
+
+	pack := func(name, unit string, status int, precise string, cutoff time.Duration, expired string) string {
+		ms := int64(0)
+		if cutoff != noCutoff {
+			ms = now.Add(cutoff).UnixMilli()
+		}
+		return `{"PackageName":"` + name + `","CapacityUnit":"` + unit +
+			`","Status":` + fmt.Sprint(status) +
+			`,"CycleCapacityRemainPrecise":"` + precise +
+			`","DeductionEndTime":` + fmt.Sprint(ms) +
+			`,"ExpiredTime":"` + expired + `"}`
+	}
+	envelope := func(packs ...string) []byte {
+		return []byte(`{"code":0,"msg":"OK","data":{"Response":{"Data":{"Accounts":[` +
+			strings.Join(packs, ",") + `]}}}}`)
+	}
+	in := func(d time.Duration) time.Duration { return d }
+
+	t.Run("reads the precise value, not the truncated one", func(t *testing.T) {
+		body := []byte(`{"code":0,"data":{"Response":{"Data":{"Accounts":[` +
+			`{"CapacityUnit":"credit","Status":0,"CycleCapacityRemain":249,"CycleCapacityRemainPrecise":"249.04","DeductionEndTime":` +
+			fmt.Sprint(now.Add(in(90*24*time.Hour)).UnixMilli()) + `}]}}}}`)
+		got, err := wbMeterBalance(body, now)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.String() != "249.04" {
+			t.Fatalf("balance = %q, want 249.04 — the integer field drops the cents", got.String())
+		}
+	})
+	t.Run("sums packs without floating-point tail noise", func(t *testing.T) {
+		got, err := wbMeterBalance(envelope(
+			pack("A", "credit", 0, "0.1", in(90*24*time.Hour), ""),
+			pack("B", "credits", 0, "0.2", in(90*24*time.Hour), "")), now)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.String() != "0.3" {
+			t.Fatalf("balance = %q, want 0.3, not 0.30000000000000004", got.String())
+		}
+	})
+	t.Run("splits by when the pack stops being chargeable", func(t *testing.T) {
+		got, err := wbMeterBalance(envelope(
+			pack("Dying", "credit", 0, "100", in(3*24*time.Hour), ""),
+			pack("Long lived", "credit", 0, "250", in(90*24*time.Hour), "")), now)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.Expiring != 100 || got.Permanent != 250 || got.Total != 350 {
+			t.Fatalf("split = %+v, want expiring 100 / permanent 250 / total 350", got)
+		}
+		if got.Packs != 2 {
+			t.Fatalf("packs = %d, want both live packs counted", got.Packs)
+		}
+	})
+	t.Run("an unpublished cutoff is permanent, not expiring", func(t *testing.T) {
+		got, err := wbMeterBalance(envelope(pack("No cutoff", "credit", 0, "40", noCutoff, "")), now)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.Expiring != 0 || got.Permanent != 40 {
+			t.Fatalf("split = %+v, want unknown-cutoff credit kept out of the dying bucket", got)
+		}
+	})
+	t.Run("dead packs are reported apart, never folded into the total", func(t *testing.T) {
+		got, err := wbMeterBalance(envelope(
+			pack("Live", "credit", 0, "55.67", in(24*time.Hour), ""),
+			pack("Dead status", "credit", wbMeterPackExpired, "400", in(24*time.Hour), ""),
+			pack("Dead cutoff", "credit", 0, "100", in(-time.Hour), ""),
+			pack("Dead date", "credit", 0, "50", in(24*time.Hour), "2026-10-01 00:00:00")), now)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.Total != 55.67 || got.Packs != 1 {
+			t.Fatalf("total = %v over %d packs, want 55.67 over one live pack", got.Total, got.Packs)
+		}
+		if got.Dead != 550 {
+			t.Fatalf("dead = %v, want the 550 the meter still ships for closed packs", got.Dead)
+		}
+	})
+	t.Run("does not spend a token-metered pack as credit", func(t *testing.T) {
+		got, err := wbMeterBalance(envelope(
+			pack("Tokens", "token", 0, "5000", in(24*time.Hour), ""),
+			pack("Credit", "credit", 0, "10", in(24*time.Hour), "")), now)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.Total != 10 {
+			t.Fatalf("total = %v, want 10 — 5000 tokens is not 5000 积分", got.Total)
+		}
+	})
+	t.Run("a spendable nothing is the answer 0, not an error", func(t *testing.T) {
+		got, err := wbMeterBalance(envelope(pack("Used up", "credit", 0, "0", in(24*time.Hour), "")), now)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.String() != "0" || got.Packs != 0 {
+			t.Fatalf("balance = %q over %d packs, want 0 over none", got.String(), got.Packs)
+		}
+	})
+	t.Run("a business refusal is an error with the upstream reason", func(t *testing.T) {
+		_, err := wbMeterBalance([]byte(`{"code":10002,"msg":"no qualification"}`), now)
+		if err == nil || !strings.Contains(err.Error(), "10002") || !strings.Contains(err.Error(), "no qualification") {
+			t.Fatalf("err = %v, want the code and the upstream message", err)
+		}
+	})
+	t.Run("a missing pack list is not a zero balance", func(t *testing.T) {
+		if _, err := wbMeterBalance(envelope(), now); err == nil {
+			t.Fatal("an empty Accounts list must read as unreadable, not as 0")
+		}
+	})
+	t.Run("an unparsable body is an error", func(t *testing.T) {
+		if _, err := wbMeterBalance([]byte("<html>404</html>"), now); err == nil {
+			t.Fatal("non-JSON must not read as a balance")
+		}
+	})
+}
+
+// The window the buckets are cut with has to reach the card as data: a label
+// that says one number next to a rule that used another tells the user a
+// deadline we never applied.
+func TestWBExpiringWindowIsPublished(t *testing.T) {
+	if WBExpiringWindowDays() != 15 {
+		t.Fatalf("window = %d days, want the 15 the split was measured against", WBExpiringWindowDays())
 	}
 }
 

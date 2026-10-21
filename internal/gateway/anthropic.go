@@ -39,6 +39,30 @@ type anthropicToolDef struct {
 	InputSchema json.RawMessage `json:"input_schema"`
 }
 
+// anthropicEffortDeclared reads the thinking level out of an Anthropic request.
+// The wire states a token budget, not a rung, so the budget maps onto the
+// gateway's levels — and an explicit "disabled" stays "none" instead of
+// collapsing into the lightest rung, which still thinks.
+func anthropicEffortDeclared(req anthropicRequest) string {
+	if req.Thinking == nil {
+		return ""
+	}
+	switch req.Thinking.Type {
+	case "disabled":
+		return "none"
+	case "enabled":
+		switch b := req.Thinking.BudgetTokens; {
+		case b > 8192:
+			return "deep"
+		case b > 2048:
+			return "balanced"
+		case b > 0:
+			return "light"
+		}
+	}
+	return ""
+}
+
 type anthropicRequest struct {
 	Model     string             `json:"model"`
 	MaxTokens int                `json:"max_tokens"`
@@ -171,17 +195,7 @@ func (s *Server) handleAnthropicMessages(w http.ResponseWriter, r *http.Request)
 	turn := TurnSeed(unified)
 	model := req.Model
 	needs := lane.SummarizeNeeds(unified, len(req.Tools))
-	effortDeclared := ""
-	if req.Thinking != nil && req.Thinking.Type == "enabled" && req.Thinking.BudgetTokens > 0 {
-		switch b := req.Thinking.BudgetTokens; {
-		case b > 8192:
-			effortDeclared = "deep"
-		case b > 2048:
-			effortDeclared = "balanced"
-		default:
-			effortDeclared = "light"
-		}
-	}
+	effortDeclared := anthropicEffortDeclared(req)
 	effort := s.resolveEffort(model, effortDeclared)
 	base := lane.BaseModelId(model)
 	tools := []lane.ToolDef{}

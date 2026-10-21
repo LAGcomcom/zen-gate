@@ -25,6 +25,11 @@ type modalityCaps struct {
 	ContextWindow int
 	MaxOutput     int
 	Source        string
+	// Efforts are the thinking rungs the serving provider declared for this
+	// model, in its own naming. Empty means nothing was declared, and the
+	// gateway's own budget ladder is what the picker shows.
+	Efforts       []string
+	EffortDefault string
 }
 
 // modalityCapsOf resolves capabilities for one upstream model id (no
@@ -72,6 +77,11 @@ func (s *Server) modalityCapsOf(upstreamModel string) modalityCaps {
 		if c.MaxOutput == 0 {
 			c.MaxOutput = declared.MaxOutput
 		}
+		// The rungs ride the declared row whatever else won the capability
+		// branch: they are not a guess about the model, they are the names the
+		// vendor's own endpoint answers to.
+		c.Efforts = declared.Efforts
+		c.EffortDefault = declared.EffortDefault
 	}
 	return c
 }
@@ -153,6 +163,10 @@ func (s *Server) providerFallback(ctx context.Context, picks []fallbackPick, uni
 		usage, finish, uerr := relay.Complete(ctx, relay.Turn{
 			Provider: pick.p, Model: pick.model, Messages: unified,
 			Tools: tools, MaxTokens: maxTokens, Agent: agent,
+			// No rung is forwarded here on purpose: the fallback serves a
+			// different vendor's model than the one the caller picked, and a
+			// thinking level chosen for that model is not a statement about
+			// this one. The direct relay path carries the caller's own word.
 		}, emit)
 		s.recordRelay(ctx, pick.p, pick.model, agent, finish != "", usage, 0, finish, uerr)
 		if uerr == nil {

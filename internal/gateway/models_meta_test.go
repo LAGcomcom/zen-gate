@@ -160,27 +160,42 @@ func TestListModelsNamesAudioAndFileInputs(t *testing.T) {
 	}
 }
 
-// The effort variants are separate ids a client can pick, so each one has to
-// describe the model it routes to rather than an empty shell.
-func TestEffortVariantsCarryTheParentMetadata(t *testing.T) {
+// A reasoning model is one entry carrying its whole effort ladder: the picker
+// renders the levels as a selector on that model. Advertising "id (light)" and
+// "id (deep)" as extra rows instead made every thinking model look like three
+// different models in a picker — same weights, three names.
+func TestReasoningModelCarriesItsLadderNotVariantRows(t *testing.T) {
 	laneUp := laneUpstreamByModel(t, nil)
 	defer laneUp.Close()
 	s := newTestServer(t, laneUp)
 
 	entries := listModels(t, s)
 	parent := entries["nemotron-3.5-lightning-free"]
-	variant := entries["nemotron-3.5-lightning-free (deep)"]
-	if parent == nil || variant == nil {
-		t.Fatalf("missing entries: parent=%v variant=%v", parent != nil, variant != nil)
+	if parent == nil {
+		t.Fatal("nemotron-3.5-lightning-free missing from /v1/models")
 	}
-	for _, field := range []string{"context_window", "max_output_tokens"} {
-		if numField(entries, "nemotron-3.5-lightning-free (deep)", field) != numField(entries, "nemotron-3.5-lightning-free", field) {
-			t.Errorf("%s = %v on the variant, want the parent's %v", field,
-				variant[field], parent[field])
+	for id := range entries {
+		if strings.HasSuffix(id, " (light)") || strings.HasSuffix(id, " (deep)") {
+			t.Errorf("%q must not be advertised as its own model; the ladder belongs to the parent entry", id)
 		}
 	}
-	if mods := modsOf(entries, "nemotron-3.5-lightning-free (deep)"); !hasString(mods, "text") {
-		t.Errorf("variant input_modalities = %v", mods)
+	levels, _ := parent["supported_reasoning_levels"].([]any)
+	if len(levels) != 3 {
+		t.Fatalf("supported_reasoning_levels = %v, want the three rungs", parent["supported_reasoning_levels"])
+	}
+	efforts, _ := parent["efforts"].([]any)
+	if len(efforts) != len(levels) {
+		t.Fatalf("efforts = %d entries, want one per rung (%d)", len(efforts), len(levels))
+	}
+	first, _ := efforts[0].(map[string]any)
+	if first["id"] != "light" || first["zh"] == "" {
+		t.Errorf("first rung = %v, want {id:light, zh:…}", first)
+	}
+	if n, ok := first["tokens"].(float64); !ok || n <= 0 {
+		t.Errorf("rung token budget = %v, want a resolved number", first["tokens"])
+	}
+	if parent["context_window"] == nil || parent["max_output_tokens"] == nil {
+		t.Errorf("the parent entry lost its capacities: %v", parent)
 	}
 }
 

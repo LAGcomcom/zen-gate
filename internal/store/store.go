@@ -49,21 +49,28 @@ const (
 // model. It is the provider's claim, not a measurement: a live capability
 // probe outranks it, and an empty value means the provider published nothing.
 type ModelMeta struct {
-	Name           string `json:"name,omitempty"` // the provider's display name
-	ContextWindow  int    `json:"contextWindow,omitempty"`
-	MaxOutput      int    `json:"maxOutput,omitempty"`
-	Vision         bool   `json:"vision,omitempty"`
-	Audio          bool   `json:"audio,omitempty"`
-	File           bool   `json:"file,omitempty"`
-	Reasoning      bool   `json:"reasoning,omitempty"`
-	InputDeclared  bool   `json:"inputDeclared,omitempty"`
-	OutputDeclared bool   `json:"outputDeclared,omitempty"`
+	Name           string   `json:"name,omitempty"` // the provider's display name
+	ContextWindow  int      `json:"contextWindow,omitempty"`
+	MaxOutput      int      `json:"maxOutput,omitempty"`
+	Vision         bool     `json:"vision,omitempty"`
+	Audio          bool     `json:"audio,omitempty"`
+	File           bool     `json:"file,omitempty"`
+	Reasoning      bool     `json:"reasoning,omitempty"`
+	InputDeclared  bool     `json:"inputDeclared,omitempty"`
+	OutputDeclared bool     `json:"outputDeclared,omitempty"`
+	// Efforts are the thinking rungs the provider itself publishes, in the
+	// names that provider understands (QoderCN: low / medium / xhigh). A
+	// provider that states them owns the picker: the gateway advertises these
+	// rungs instead of inventing its own budget ladder, and forwards the
+	// chosen one verbatim so the picker actually changes what the vendor does.
+	Efforts       []string `json:"efforts,omitempty"`
+	EffortDefault string   `json:"effortDefault,omitempty"`
 }
 
 // Declared reports whether the listing stated anything about the model at all.
 func (m ModelMeta) Declared() bool {
 	return m.ContextWindow > 0 || m.MaxOutput > 0 || m.Name != "" ||
-		m.InputDeclared || m.OutputDeclared
+		m.InputDeclared || m.OutputDeclared || len(m.Efforts) > 0
 }
 
 type Provider struct {
@@ -153,10 +160,18 @@ type Config struct {
 	// they stay servable if requested explicitly but disappear from agent
 	// pickers and /v1/models.
 	HiddenModels []string `json:"hiddenModels,omitempty"`
-	// WorkBuddy is the WorkBuddy 账号渠道 (intl) credential set. The lane
-	// writes rotated token pairs and activity dates back through its persist
-	// callback; Masked() hides both tokens from config exports.
-	WorkBuddy lane.WBAccount `json:"workBuddy"`
+	// WorkBuddyAccounts is the WorkBuddy 账号渠道 pool: one entry per login,
+	// in the order the user wants them tried. The lane writes rotated token
+	// pairs and activity dates back through its persist callback; Masked()
+	// hides every entry's tokens from config exports.
+	//
+	// It is the only authoritative home for these credentials. WorkBuddy
+	// (below) is the pre-v12 single-account field, read once by the migration
+	// and never written again.
+	WorkBuddyAccounts []lane.WBAccount `json:"workBuddyAccounts,omitempty"`
+	// WorkBuddy is the pre-v12 single-account slot. Read only by the v12
+	// migration; kept in the struct so an old config still parses.
+	WorkBuddy lane.WBAccount `json:"workBuddy,omitempty"`
 	// CodeArts is the CodeArts 账号渠道 credential set (Huawei Cloud STS
 	// pair + the refresh binding). Rotated in place via the lane's persist
 	// callback; Masked() hides every secret field from config exports.
@@ -428,6 +443,27 @@ func Open() (*Store, error) {
 	if cfg.SchemaVersion < 11 {
 		cfg.SchemaVersion = 11
 	}
+	// v12: WorkBuddy became an account pool. The single account an existing
+	// install already has becomes the pool's first entry, so an upgrade needs
+	// no re-login; the legacy field is then cleared so there is exactly one
+	// place these credentials live.
+	if cfg.SchemaVersion < 12 {
+		cfg.SchemaVersion = 12
+		if len(cfg.WorkBuddyAccounts) == 0 {
+			if legacy := cfg.WorkBuddy; strings.TrimSpace(legacy.AccessToken) != "" ||
+				strings.TrimSpace(legacy.RefreshToken) != "" || strings.TrimSpace(legacy.UID) != "" {
+				cfg.WorkBuddyAccounts = []lane.WBAccount{legacy}
+			}
+		}
+		cfg.WorkBuddy = lane.WBAccount{}
+	}
+	// Any account that arrived without an id (an imported config, a hand
+	// edit) gets one, so admin routes always have a handle to address.
+	for i := range cfg.WorkBuddyAccounts {
+		if strings.TrimSpace(cfg.WorkBuddyAccounts[i].ID) == "" {
+			cfg.WorkBuddyAccounts[i].ID = lane.WBAccountID(cfg.WorkBuddyAccounts[i])
+		}
+	}
 	if cfg.RoutingStrategy == "" {
 		cfg.RoutingStrategy = "catalog"
 	}
@@ -642,6 +678,16 @@ func (s *Store) Masked() *Config {
 	if cfg.WorkBuddy.RefreshToken != "" {
 		cfg.WorkBuddy.RefreshToken = MaskedValue
 	}
+	// Every account in the pool, not just the first: an export that leaks the
+	// second account's token is exactly as bad as one that leaks the first.
+	for i := range cfg.WorkBuddyAccounts {
+		if cfg.WorkBuddyAccounts[i].AccessToken != "" {
+			cfg.WorkBuddyAccounts[i].AccessToken = MaskedValue
+		}
+		if cfg.WorkBuddyAccounts[i].RefreshToken != "" {
+			cfg.WorkBuddyAccounts[i].RefreshToken = MaskedValue
+		}
+	}
 	// CodeArts carries four secret material fields plus the DPoP key map; the
 	// identity fields (user/domain) and the public client id stay visible so a
 	// shared config still says which account it was.
@@ -676,6 +722,7 @@ func (c *Config) clone() *Config {
 	next.SeenAnnouncements = cloneSlice(c.SeenAnnouncements)
 	next.HiddenModels = cloneSlice(c.HiddenModels)
 	next.Subscriptions = cloneSlice(c.Subscriptions)
+	next.WorkBuddyAccounts = cloneSlice(c.WorkBuddyAccounts)
 	// The CodeArts credential carries a DPoP key map; aliasing it across
 	// snapshots would let a later refresh mutate the value a prior export (or
 	// the old snapshot still being read) points at, so copy it.
@@ -721,6 +768,10 @@ func cloneMeta(m map[string]ModelMeta) map[string]ModelMeta {
 	}
 	out := make(map[string]ModelMeta, len(m))
 	for k, v := range m {
+		// The rungs are a slice: a shallow copy would hand every reader the
+		// same backing array, and one in-place sort would then reorder the
+		// picker for the whole process.
+		v.Efforts = cloneSlice(v.Efforts)
 		out[k] = v
 	}
 	return out
@@ -738,6 +789,100 @@ func (s *Store) Save() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return writeJSON(filepath.Join(s.Home, "config.json"), s.cfg.Load())
+}
+
+// --- WorkBuddy account pool -------------------------------------------------
+//
+// The store is the pool's authority: the lane keeps a live copy for scheduling,
+// but every membership change is written here first so a restart comes back to
+// the same pool. Callers own Save().
+
+// UpsertWorkBuddyAccount inserts or replaces one account, matched by ID.
+func (s *Store) UpsertWorkBuddyAccount(acct lane.WBAccount) {
+	if strings.TrimSpace(acct.ID) == "" {
+		acct.ID = lane.WBAccountID(acct)
+	}
+	s.Mutate(func(c *Config) {
+		for i := range c.WorkBuddyAccounts {
+			if c.WorkBuddyAccounts[i].ID == acct.ID {
+				c.WorkBuddyAccounts[i] = acct
+				return
+			}
+		}
+		c.WorkBuddyAccounts = append(c.WorkBuddyAccounts, acct)
+	})
+}
+
+// RemoveWorkBuddyAccount drops one account; an empty id clears the pool.
+func (s *Store) RemoveWorkBuddyAccount(id string) {
+	s.Mutate(func(c *Config) {
+		if strings.TrimSpace(id) == "" {
+			c.WorkBuddyAccounts = nil
+			return
+		}
+		keep := c.WorkBuddyAccounts[:0]
+		for _, a := range c.WorkBuddyAccounts {
+			if a.ID != id {
+				keep = append(keep, a)
+			}
+		}
+		c.WorkBuddyAccounts = keep
+	})
+}
+
+// SetWorkBuddyAccountEnabled flips one account's participation.
+func (s *Store) SetWorkBuddyAccountEnabled(id string, enabled bool) {
+	s.Mutate(func(c *Config) {
+		for i := range c.WorkBuddyAccounts {
+			if c.WorkBuddyAccounts[i].ID == id {
+				c.WorkBuddyAccounts[i].Enabled = enabled
+				return
+			}
+		}
+	})
+}
+
+// SetWorkBuddyEnabledAll flips every account at once — the channel switch.
+func (s *Store) SetWorkBuddyEnabledAll(enabled bool) {
+	s.Mutate(func(c *Config) {
+		for i := range c.WorkBuddyAccounts {
+			c.WorkBuddyAccounts[i].Enabled = enabled
+		}
+	})
+}
+
+// MoveWorkBuddyAccountFirst promotes one account to the front of the pool.
+func (s *Store) MoveWorkBuddyAccountFirst(id string) {
+	s.Mutate(func(c *Config) {
+		idx := -1
+		for i := range c.WorkBuddyAccounts {
+			if c.WorkBuddyAccounts[i].ID == id {
+				idx = i
+				break
+			}
+		}
+		if idx <= 0 {
+			return
+		}
+		moved := c.WorkBuddyAccounts[idx]
+		rest := make([]lane.WBAccount, 0, len(c.WorkBuddyAccounts))
+		rest = append(rest, moved)
+		rest = append(rest, c.WorkBuddyAccounts[:idx]...)
+		rest = append(rest, c.WorkBuddyAccounts[idx+1:]...)
+		c.WorkBuddyAccounts = rest
+	})
+}
+
+// WorkBuddyEnabled reports whether the channel serves at all: it does when any
+// account is enabled. The channel has no separate switch — an independent
+// boolean would let the two disagree.
+func (c *Config) WorkBuddyEnabled() bool {
+	for i := range c.WorkBuddyAccounts {
+		if c.WorkBuddyAccounts[i].Enabled && strings.TrimSpace(c.WorkBuddyAccounts[i].AccessToken) != "" {
+			return true
+		}
+	}
+	return false
 }
 
 // Record folds one call into the stats.

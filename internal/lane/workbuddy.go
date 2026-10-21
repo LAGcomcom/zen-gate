@@ -156,6 +156,11 @@ const wbCodeSanitize = "WB_SANITIZE"
 // persist callback. UID is the JWT sub — the fingerprint seeds derive from it,
 // so the same account always presents the same machine/session ids.
 type WBAccount struct {
+	// ID is the account pool's stable handle: admin routes address accounts by
+	// it, and it survives a token rotation. It is the UID whenever the token
+	// names one; a mint without a subject falls back to a random hex id so the
+	// account can still be listed, toggled and removed.
+	ID               string `json:"id,omitempty"`
 	AccessToken      string `json:"accessToken,omitempty"`
 	RefreshToken     string `json:"refreshToken,omitempty"`
 	UID              string `json:"uid,omitempty"`
@@ -501,6 +506,17 @@ func wbPostOnce(ctx context.Context, body map[string]any, acct WBAccount, conver
 			return usage, &UpstreamError{Code: CodeAborted, Message: "cancelled"}
 		}
 		if ue, ok := err.(*UpstreamError); ok {
+			// readSSE files a mid-stream {"error":...} through the shared
+			// classifier, which reads the status line — and this upstream
+			// reports its own refusals *inside* a 200 stream. A 6004 delivered
+			// that way came out as CodeServer, so the turn neither cooled the
+			// model nor switched accounts. Re-file anything unclassified or
+			// server-shaped through this source's own vocabulary.
+			if ue.Code == CodeServer || ue.Code == "" {
+				if refiled := classifyWorkBuddyFailure(0, ue.Message, ue.RetryAfter); refiled != nil {
+					return usage, refiled
+				}
+			}
 			return usage, ue
 		}
 		return usage, &UpstreamError{Code: CodeTransport, Message: err.Error()}
@@ -602,12 +618,24 @@ func wbRewriteText(text string) string {
 var (
 	wbCapLimitCode  = 6004 // the free window is spent; the only code with a reset clock
 	wbSoftLimitCode = 14003
+	// wbSessionDeadCode is "your session is gone": the same family the CN
+	// publishment also spells out as text. It is usually a network hiccup or a
+	// refresh race rather than a revoked login, so it cools briefly and only
+	// escalates after repeated hits (wbAuthFailsMax).
+	wbSessionDeadCode = 12153
+	// wbBadBodyCode is the upstream refusing a malformed request body. The
+	// request is the caller's fault, not the account's: rotating accounts
+	// replays the identical malformed body, so it must never be charged
+	// against the account.
+	wbBadBodyCode = 11101
 )
 
 var (
 	wbResetTimeRe = regexp.MustCompile(`(?:reset at|将在)\s*(\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2})`)
 	wbResetTZRe   = regexp.MustCompile(`UTC([+-])(\d{1,2})(?::?(\d{2}))?`)
 	wbSoftLimitRe = regexp.MustCompile(`(?i)usage exceeds frequency limit|too many requests|请求过于频繁`)
+	wbSessionRe   = regexp.MustCompile(`(?i)offline user session not found|session not found|session expired`)
+	wbBadBodyRe   = regexp.MustCompile(`(?i)unmarshal chat params failed|invalid request body|malformed`)
 )
 
 // classifyWorkBuddyFailure reads one of this gateway's refusals onto the
@@ -619,6 +647,10 @@ func classifyWorkBuddyFailure(status int, payload string, retryAfterSec int) *Up
 	code := wbCodeFromPayload(payload)
 	switch {
 	case code == wbCapLimitCode:
+		// 6004 names ONE model's daily window (its message carries that
+		// model's reset clock), so the refusal is scoped to the model: the
+		// account's other models keep working, which is the difference between
+		// a pool that helps and one that benches an account for a whole day.
 		wait := wbResetWait(payload)
 		if wait <= 0 {
 			wait = wbCapDefaultWait
@@ -626,13 +658,19 @@ func classifyWorkBuddyFailure(status int, payload string, retryAfterSec int) *Up
 		if retryAfterSec > 0 && retryAfterSec < wait {
 			wait = retryAfterSec
 		}
-		return &UpstreamError{Code: CodeQuota, Message: truncate(payload, 300), RetryAfter: wait}
+		msg := wbMessageFromPayload(payload)
+		if !strings.Contains(msg, "窗口") {
+			// The upstream only says it in English; name the condition in the
+			// card's own language so the line reads as a status, not a relay.
+			msg = "免费窗口已用满：" + msg
+		}
+		return &UpstreamError{Code: CodeQuota, Message: msg, RetryAfter: wait, Scope: ScopeModel}
 	case code == wbSoftLimitCode || wbSoftLimitRe.MatchString(payload):
-		return &UpstreamError{Code: CodeQuota, Message: truncate(payload, 300), RetryAfter: wbSoftCooldown}
+		return &UpstreamError{Code: CodeQuota, Message: wbMessageFromPayload(payload), RetryAfter: wbSoftCooldown, Scope: ScopeModel}
 	case status == 402:
 		return &UpstreamError{Code: CodeQuota,
-			Message:    truncate(payload, 300) + "（WorkBuddy 余额耗尽，免费模型不受影响）",
-			RetryAfter: wbSecondsUntil4AM()}
+			Message:    wbMessageFromPayload(payload) + "（WorkBuddy 余额耗尽，免费模型不受影响）",
+			RetryAfter: wbSecondsUntil4AM(), Scope: ScopeAccount}
 	case status == 401:
 		// Unconditional: the front gateway answers a dead credential with an
 		// openresty HTML page, and the HTML special case downstream would
@@ -642,8 +680,76 @@ func classifyWorkBuddyFailure(status int, payload string, retryAfterSec int) *Up
 	case code == 11140 || code == 11128:
 		return &UpstreamError{Code: wbCodeSanitize,
 			Message: "上游内容门拦截（" + strconv.Itoa(code) + "）"}
+	case code == wbBadBodyCode || wbBadBodyRe.MatchString(payload):
+		// The body itself is malformed: every account answers the same 400, so
+		// this is filed as the request's fault and carries no account penalty.
+		return &UpstreamError{Code: CodeClient,
+			Message: "上游拒绝请求体（" + strconv.Itoa(code) + "）: " + wbMessageFromPayload(payload)}
+	case code == wbSessionDeadCode || wbSessionRe.MatchString(payload):
+		// Soft: one 12153 is routinely a refresh race or a dropped connection.
+		// The caller counts hits and escalates after wbAuthFailsMax.
+		return &UpstreamError{Code: CodeCredential, Soft: true,
+			Message: "WorkBuddy 会话失效（" + strconv.Itoa(code) + "）"}
 	}
 	return ClassifyFailure(status, payload, retryAfterSec)
+}
+
+// wbMessageFromPayload turns one refusal body into the line a person reads.
+//
+// The chat gate ships {"code":14003,"msg":"too many requests","requestId":"…",
+// "displayMsg":{"en":"Model busy. Please switch models or retry later",
+// "zh":"模型繁忙，请换模型或稍后再试"}}. Handing that JSON to the card was wrong
+// twice over: it is a wire envelope, not a sentence, and it made the card read
+// English while the Chinese the upstream itself wrote sat in the same body.
+// The zh line wins, then en, then msg; the requestId is dropped because a
+// per-request id is a support handle, not a status the user can act on.
+func wbMessageFromPayload(payload string) string {
+	var env struct {
+		Code       int    `json:"code"`
+		Msg        string `json:"msg"`
+		Message    string `json:"message"`
+		DisplayMsg struct {
+			En string `json:"en"`
+			Zh string `json:"zh"`
+		} `json:"displayMsg"`
+		Error struct {
+			Code    int    `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	trimmed := strings.TrimSpace(payload)
+	if json.Unmarshal([]byte(trimmed), &env) != nil {
+		return truncate(trimmed, 200)
+	}
+	say := env.DisplayMsg.Zh
+	if say == "" {
+		say = env.DisplayMsg.En
+	}
+	if say == "" {
+		say = env.Msg
+	}
+	if say == "" {
+		// 6004 ships its reset clock in a top-level "message", and that half
+		// sentence is the part the user can act on.
+		say = env.Message
+	}
+	if say == "" {
+		say = env.Error.Message
+	}
+	code := env.Code
+	if code == 0 {
+		code = env.Error.Code
+	}
+	if say == "" {
+		if code != 0 {
+			return "上游返回 code " + strconv.Itoa(code)
+		}
+		return truncate(trimmed, 200)
+	}
+	if code != 0 && !strings.Contains(say, strconv.Itoa(code)) {
+		say += "（上游 code " + strconv.Itoa(code) + "）"
+	}
+	return truncate(say, 200)
 }
 
 // wbCodeFromPayload digs the numeric error code out of either envelope shape

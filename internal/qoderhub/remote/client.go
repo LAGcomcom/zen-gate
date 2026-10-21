@@ -8,6 +8,7 @@ import (
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -54,6 +55,9 @@ type Config struct {
 	ProxyURL    string
 	CosyVersion string
 	Timeout     time.Duration
+	// Pool holds several IDE logins. Nil means "no pool": every call falls back
+	// to the single live credential, exactly as before pooling existed.
+	Pool *Pool
 }
 
 type Client struct {
@@ -238,6 +242,33 @@ func ResolveBaseURLWithSource(explicit string) BaseURLHint {
 	return BaseURLHint{URL: DefaultBaseURL, Source: "default"}
 }
 
+// credential resolves the credential one call should present, plus the pool id
+// it came from ("" when there is no pool, so nothing gets reported).
+//
+// With a pool, the first healthy account wins; without one this is exactly the
+// old single-credential read.
+func (c *Client) credential() (Credential, string, error) {
+	if c.cfg.Pool != nil {
+		if cands := c.cfg.Pool.Candidates(""); len(cands) > 0 {
+			return cands[0].Cred, cands[0].ID, nil
+		}
+	}
+	cred, err := LoadCredential(c.cfg.AuthFile)
+	if err != nil {
+		return Credential{}, "", err
+	}
+	return cred, "", nil
+}
+
+// reportPool books one attempt's outcome. A nil pool (or the live IDE cache)
+// is a no-op.
+func (c *Client) reportPool(id, model string, out PoolOutcome, msg string) {
+	if c.cfg.Pool == nil || id == "" {
+		return
+	}
+	c.cfg.Pool.Report(id, model, out, msg)
+}
+
 func ResolveBaseURLCandidates() []BaseURLHint {
 	hints := make([]BaseURLHint, 0)
 	for _, path := range candidateConfigFiles() {
@@ -323,7 +354,7 @@ type Quota struct {
 // FetchQuota reads account credit/usage from the QoderCN openapi host. It only
 // needs the access token (Bearer); no cosy signature or machine headers.
 func (c *Client) FetchQuota(ctx context.Context) (*Quota, error) {
-	cred, err := LoadCredential(c.cfg.AuthFile)
+	cred, _, err := c.credential()
 	if err != nil {
 		return nil, err
 	}
@@ -421,7 +452,7 @@ func (c *Client) WebSearch(ctx context.Context, query string, opts WebSearchOpti
 	if !webSearchTimeRanges[timeRange] {
 		timeRange = "NoLimit" // gateway silently ignores unknown values; normalize
 	}
-	cred, err := LoadCredential(c.cfg.AuthFile)
+	cred, _, err := c.credential()
 	if err != nil {
 		return nil, err
 	}
@@ -485,7 +516,7 @@ type ImageResult struct {
 // postEncoded signs and POSTs a plaintext {payload, encodeVersion, ...} body to
 // an Encode=0 gateway endpoint and returns the raw JSON response.
 func (c *Client) postEncoded(ctx context.Context, path string, body []byte) ([]byte, error) {
-	cred, err := LoadCredential(c.cfg.AuthFile)
+	cred, _, err := c.credential()
 	if err != nil {
 		return nil, err
 	}
@@ -674,7 +705,7 @@ func stripPNGMetadata(png []byte) ([]byte, bool) {
 // postSigned posts a plain JSON body to path with cosy signing (no Encode
 // envelope, unlike postEncoded) and returns the raw JSON response.
 func (c *Client) postSigned(ctx context.Context, path string, body []byte) ([]byte, error) {
-	cred, err := LoadCredential(c.cfg.AuthFile)
+	cred, _, err := c.credential()
 	if err != nil {
 		return nil, err
 	}
@@ -765,7 +796,7 @@ func openAPIBaseURL(chatBaseURL string) (string, error) {
 }
 
 func (c *Client) Warmup(ctx context.Context) error {
-	_, err := LoadCredential(c.cfg.AuthFile)
+	_, _, err := c.credential()
 	if err != nil {
 		return err
 	}
@@ -785,7 +816,7 @@ func (c *Client) ListModels(ctx context.Context) ([]Model, error) {
 }
 
 func (c *Client) listModels(ctx context.Context) ([]Model, error) {
-	cred, err := LoadCredential(c.cfg.AuthFile)
+	cred, _, err := c.credential()
 	if err != nil {
 		return nil, err
 	}
@@ -872,11 +903,229 @@ func (c *Client) modelListStatusError(statusCode int, body string) error {
 	return fmt.Errorf("%s", message)
 }
 
+// QuotaError is a refusal the account pool can act on. Kind separates the three
+// cases a caller must treat differently:
+//
+//	queue  — model-level capacity (10605 / RESOURCE_LIMIT). Every account shares
+//	         it, so switching accounts is useless; the caller should wait or pick
+//	         another model.
+//	rate   — this account's model is being throttled.
+//	credit — this account's credit is gone.
+type QuotaError struct {
+	Status     int
+	RetryAfter int
+	Kind       string
+	Body       string
+}
+
+const (
+	QuotaKindQueue  = "queue"
+	QuotaKindRate   = "rate"
+	QuotaKindCredit = "credit"
+)
+
+func (e *QuotaError) Error() string {
+	label := map[string]string{
+		QuotaKindQueue:  "模型排队（换账号无效，请稍候或换模型）",
+		QuotaKindRate:   "账号限流",
+		QuotaKindCredit: "账号额度耗尽",
+	}[e.Kind]
+	if label == "" {
+		label = "限流"
+	}
+	return fmt.Sprintf("qoder %s（HTTP %d）：%s", label, e.Status, truncate(e.Body, 300))
+}
+
+// remoteStatusError carries the status code so the pool can classify a refusal
+// without re-parsing a formatted string.
+type remoteStatusError struct {
+	Status int
+	Body   string
+	Op     string
+}
+
+func (e *remoteStatusError) Error() string {
+	return fmt.Sprintf("%s status %d: %s", e.Op, e.Status, truncate(e.Body, 1000))
+}
+
+// isQoderAuthStatus spots a dead login. 401/403 alone is not enough: the queue
+// answer also arrives as 403, so the body decides.
+func isQoderAuthStatus(status int, body string) bool {
+	if status != 401 && status != 403 {
+		return false
+	}
+	lower := strings.ToLower(body)
+	for _, marker := range []string{"token_expire", "offline user session not found", "12153", "100401", "100403", "unauthorized"} {
+		if strings.Contains(lower, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+// isQoderDailyQuotaBody spots the per-account daily billing cap: Qoder answers
+// 403 with code 110 and "Billing daily count exceeded" once the account has
+// spent the day's allowance. It is per account, so the pool must rotate — the
+// next account still has its own count — and only a spent pool should tell the
+// caller to wait for tomorrow.
+func isQoderDailyQuotaBody(status int, body string) bool {
+	if status != 403 && status != 429 && status != 402 {
+		return false
+	}
+	lower := strings.ToLower(body)
+	return strings.Contains(lower, "billing daily count exceeded") ||
+		strings.Contains(lower, "daily count exceeded") ||
+		(strings.Contains(lower, "billing") && strings.Contains(lower, "exceed"))
+}
+
+// isQoderQueueBody spots the model-capacity answer, which arrives as a normal
+// error envelope rather than an HTTP status.
+func isQoderQueueBody(body string) bool {
+	lower := strings.ToLower(body)
+	return strings.Contains(lower, "10605") ||
+		strings.Contains(lower, "resource_limit") ||
+		strings.Contains(lower, "isqueued") ||
+		strings.Contains(lower, "模型负载较高")
+}
+
+// qoderRetryAfter digs a wait out of the queue envelope when one is stated.
+func qoderRetryAfter(body string) int {
+	for _, key := range []string{"retryAfterSeconds", "retry_after_seconds"} {
+		if i := strings.Index(body, key); i >= 0 {
+			rest := body[i+len(key):]
+			rest = strings.TrimLeft(rest, "\": ")
+			n := 0
+			for _, r := range rest {
+				if r < '0' || r > '9' {
+					break
+				}
+				n = n*10 + int(r-'0')
+				if n > 86400 {
+					break
+				}
+			}
+			if n > 0 {
+				return n
+			}
+		}
+	}
+	return 0
+}
+
+// classifyQoderFailure decides what one failed attempt means for the pool.
+//
+// The distinction that matters most: a queue answer is MODEL capacity, shared
+// by every account, so it must not move the turn to another account — doing
+// that drags several accounts into cooldown and buys no capacity. Only a dead
+// login or spent credit is genuinely per-account.
+func classifyQoderFailure(err error) (PoolOutcome, bool) {
+	var qe *QuotaError
+	if errors.As(err, &qe) {
+		if qe.Kind == QuotaKindQueue {
+			return PoolQueue, true
+		}
+		return PoolQuota, true
+	}
+	var statusErr *remoteStatusError
+	if errors.As(err, &statusErr) {
+		switch {
+		case isQoderDailyQuotaBody(statusErr.Status, statusErr.Body):
+			// The account's daily billing cap, not a dead login. It answered as
+			// 403 with code 110 here, which the auth branch used to swallow:
+			// the turn failed with "API 密钥无效" while a healthy second account
+			// sat unused in the pool.
+			return PoolQuota, true
+		case isQoderAuthStatus(statusErr.Status, statusErr.Body):
+			return PoolAuth, true
+		case statusErr.Status == 429 || statusErr.Status == 402:
+			return PoolQuota, true
+		}
+	}
+	return PoolOK, false
+}
+
+// Chat runs one turn, walking the account pool when a refusal is per-account.
 func (c *Client) Chat(ctx context.Context, request ChatRequest, onDelta func(StreamEvent)) (*ChatResult, error) {
+	cands := c.candidates(request.Model)
+	if len(cands) == 0 {
+		return nil, errors.New("没有可用的 Qoder 账号：请先在设置页导入 IDE 登录，或在 Qoder IDE 里登录后重试")
+	}
+
+	// Once a delta reached the caller the turn is committed: replaying it on
+	// another account would duplicate the visible answer.
+	emitted := false
+	tracked := onDelta
+	if onDelta != nil {
+		tracked = func(ev StreamEvent) {
+			emitted = true
+			onDelta(ev)
+		}
+	}
+
+	var lastErr error
+	lastOutcome := PoolOK
+	for i, cand := range cands {
+		if i >= qoderMaxAccountTries {
+			break
+		}
+		result, err := c.chatOnce(ctx, request, tracked, cand)
+		if err == nil {
+			c.reportPool(cand.ID, request.Model, PoolOK, "")
+			return result, nil
+		}
+		lastErr = err
+		outcome, switchable := classifyQoderFailure(err)
+		if !switchable {
+			// Transport, 5xx, content review: another account answers the same.
+			return nil, err
+		}
+		lastOutcome = outcome
+		c.reportPool(cand.ID, request.Model, outcome, err.Error())
+		if outcome == PoolQueue {
+			// Model capacity, shared by every account (see the pool doc).
+			// Surface the wait so the caller picks another model instead of
+			// watching us burn accounts.
+			return nil, err
+		}
+		if emitted {
+			return nil, err
+		}
+	}
+	if lastErr == nil {
+		lastErr = errors.New("所有 Qoder 账号都不可用")
+	}
+	if lastOutcome == PoolQuota {
+		// Every account refused for spend, so the message has to say that
+		// instead of echoing the last 403: the caller cannot fix it by
+		// re-sending and it is not an auth problem.
+		var qe *QuotaError
+		if !errors.As(lastErr, &qe) {
+			return nil, &QuotaError{
+				Status: http.StatusForbidden,
+				Kind:   QuotaKindCredit,
+				Body:   lastErr.Error(),
+			}
+		}
+	}
+	return nil, lastErr
+}
+
+// candidates resolves the attempt order. Without a pool this is the single
+// live credential, which is exactly the pre-pool behaviour.
+func (c *Client) candidates(model string) []PoolCandidate {
+	if c.cfg.Pool != nil {
+		return c.cfg.Pool.Candidates(model)
+	}
 	cred, err := LoadCredential(c.cfg.AuthFile)
 	if err != nil {
-		return nil, err
+		return nil
 	}
+	return []PoolCandidate{{ID: "", Cred: cred}}
+}
+
+// chatOnce performs one physical attempt with one credential.
+func (c *Client) chatOnce(ctx context.Context, request ChatRequest, onDelta func(StreamEvent), cand PoolCandidate) (*ChatResult, error) {
+	cred := cand.Cred
 	requestID := newHexID()
 	body, err := c.buildBody(requestID, request)
 	if err != nil {
@@ -889,6 +1138,17 @@ func (c *Client) Chat(ctx context.Context, request ChatRequest, onDelta func(Str
 	if key := strings.TrimSpace(request.Model); key != "" {
 		headers["X-Model-Key"] = key
 		headers["X-Model-Source"] = "system"
+	}
+	if v, ok := os.LookupEnv("QPROBE_MODEL_SOURCE"); ok {
+		if v == "" {
+			delete(headers, "X-Model-Source")
+		} else {
+			headers["X-Model-Source"] = v
+		}
+	}
+	if os.Getenv("QPROBE_NO_MODEL") == "1" {
+		delete(headers, "X-Model-Key")
+		delete(headers, "X-Model-Source")
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.cfg.BaseURL+chatPath+chatQuery, strings.NewReader(body))
 	if err != nil {
@@ -904,7 +1164,20 @@ func (c *Client) Chat(ctx context.Context, request ChatRequest, onDelta func(Str
 	defer resp.Body.Close()
 	if resp.StatusCode >= 400 {
 		respBody, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("remote chat status %d: %s", resp.StatusCode, truncate(string(respBody), 1000))
+		text := string(respBody)
+		if isQoderQueueBody(text) {
+			return nil, &QuotaError{Status: resp.StatusCode, Kind: QuotaKindQueue,
+				RetryAfter: qoderRetryAfter(text), Body: text}
+		}
+		if resp.StatusCode == 402 || resp.StatusCode == 429 {
+			kind := QuotaKindRate
+			if resp.StatusCode == 402 {
+				kind = QuotaKindCredit
+			}
+			return nil, &QuotaError{Status: resp.StatusCode, Kind: kind,
+				RetryAfter: qoderRetryAfter(text), Body: text}
+		}
+		return nil, &remoteStatusError{Status: resp.StatusCode, Body: text, Op: "remote chat"}
 	}
 	var builder strings.Builder
 	var reasoningBuilder strings.Builder
@@ -1429,7 +1702,16 @@ func parseSSEPayload(payload string) (sseEvent, bool, error) {
 		return sseEvent{}, false, err
 	}
 	if outer.StatusCode >= 400 {
-		return sseEvent{}, false, fmt.Errorf("remote sse status %d", outer.StatusCode)
+		// Qoder reports upstream failures as a status frame and puts the actual
+		// reason in body. Dropping it left only a bare "403", which reads like an
+		// auth problem even when the cause is the account's daily billing cap,
+		// so keep the body and hand back a typed error: the pool classifies on
+		// the body, and the message stays readable.
+		return sseEvent{}, false, &remoteStatusError{
+			Status: outer.StatusCode,
+			Body:   strings.Join(strings.Fields(outer.Body), " "),
+			Op:     "remote sse",
+		}
 	}
 	if outer.Body == "" {
 		return sseEvent{}, false, nil

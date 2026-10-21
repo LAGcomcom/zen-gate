@@ -238,7 +238,25 @@ type UpstreamError struct {
 	// (x-request-id / request-id). It is the only handle the provider's
 	// support team can use to find a failed turn on their side.
 	UpstreamRID string
+	// Soft marks a credential refusal that is probably transient: the account
+	// stays in the pool, only a short cooldown applies, and repeated hits
+	// escalate to a real logout. WorkBuddy answers 12153 (and "Offline user
+	// session not found") for network hiccups and refresh races too, so one
+	// of those must not bench an account for good.
+	Soft bool
+	// Scope says how far a quota refusal reaches, which a pool must know: a
+	// per-model window (6004 names one model's reset clock) leaves the
+	// account's other models usable, while an account-level one (paid balance
+	// gone) takes everything down. Empty means "the model named in the
+	// request", which is the safe default — it never over-benches.
+	Scope string
 }
+
+// Refusal scopes. See UpstreamError.Scope.
+const (
+	ScopeModel   = "model"
+	ScopeAccount = "account"
+)
 
 func (e *UpstreamError) Error() string { return fmt.Sprintf("%s: %s", e.Code, e.Message) }
 

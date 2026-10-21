@@ -101,16 +101,20 @@ type Lane struct {
 	ttft             TTFTSource
 	throttle         *ThrottleBook
 
-	// WorkBuddy 账号渠道 state. wbMu serializes token rotation (upstream
-	// rotates the refresh token on every refresh — two overlapping refreshes
-	// void the second pair) and guards the account snapshot the request paths
-	// read.
-	wbMu          sync.Mutex
-	wbAcct        WBAccount
-	wbPersist     func(WBAccount)
-	wbRefreshedAt time.Time
-	wbLoginState  string
-	wbLoginAt     time.Time
+	// WorkBuddy 账号渠道 state. The pool lives in workbuddy_pool.go: wbMu
+	// guards the slot slice and the active pointer only, while each slot
+	// carries its own mutex — upstream rotates the refresh token on every
+	// refresh, so two overlapping refreshes of the SAME account void the
+	// second pair, and one account's refresh must not block another's turn.
+	wbMu       sync.RWMutex
+	wbSlots    []*wbSlot
+	wbActiveID string
+	wbPersist  func(WBAccount)
+	// Logf receives the pool's diagnostics (account switches, cooldowns). Nil
+	// in tests and headless embeds, where it stays silent.
+	Logf         func(string, ...any)
+	wbLoginState string
+	wbLoginAt    time.Time
 	// wbLoginRealm is the region the in-flight login was opened against. The
 	// browser finishes the login on that publishment, so the state poll and
 	// the token it mints must both go back to the same one.
@@ -403,7 +407,7 @@ func (l *Lane) RefreshCatalog(ctx context.Context) {
 	// account. Logging out empties the bucket on purpose: logged-out models
 	// must leave the pickers, a subtract that is the point here.
 	subtracted := false
-	if _, ok := l.workBuddyReady(); ok {
+	if l.wbServeable() {
 		wb = buildWorkBuddyCatalog()
 	} else {
 		if len(wb) > 0 {

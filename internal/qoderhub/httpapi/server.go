@@ -6,6 +6,7 @@ import (
 	"crypto/subtle"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"image"
 	_ "image/gif"
@@ -27,6 +28,10 @@ type Server struct {
 	svc  *service.Service
 	http *http.Server
 	sem  chan struct{}
+	// logins owns the device-authorization windows the settings card opens. It
+	// lives on the server rather than in the service because it is a UI
+	// handshake, not part of the inference path.
+	logins *remote.DeviceLogins
 	// authKeys, when non-empty, gates every request behind an Authorization:
 	// Bearer or x-api-key match. Empty (the default) means open access.
 	authKeys map[string]struct{}
@@ -92,8 +97,9 @@ type rawMessage struct {
 
 func NewServer(addr string, svc *service.Service) *Server {
 	s := &Server{
-		svc: svc,
-		sem: make(chan struct{}, maxConcurrentRequests()),
+		svc:    svc,
+		sem:    make(chan struct{}, maxConcurrentRequests()),
+		logins: remote.NewDeviceLogins(),
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", s.handleRoot)
@@ -107,6 +113,8 @@ func NewServer(addr string, svc *service.Service) *Server {
 	mux.HandleFunc("/v1/messages", s.handleAnthropicMessages)
 	mux.HandleFunc("/v1/chat/completions", s.handleOpenAIChatCompletions)
 	mux.HandleFunc("/api/v1/chat/completions", s.handleOpenAIChatCompletions)
+	mux.HandleFunc("/pool", s.handlePool)
+	mux.HandleFunc("/pool/account", s.handlePoolAccount)
 
 	s.http = &http.Server{
 		Addr: addr,
@@ -450,6 +458,21 @@ func (s *Server) handleAnthropicMessages(w http.ResponseWriter, r *http.Request)
 	})
 }
 
+// writeChatError answers a refused generation with the shape the refusal
+// deserves. Everything used to leave as 500 api_error, so an exhausted account
+// — Qoder's "Billing daily count exceeded" — reached the client as a generic
+// server fault, and harnesses that classify on status and error type printed
+// "invalid API key" while the pool still held a usable account. 429 +
+// insufficient_quota is the OpenAI vocabulary for "spent, retry later".
+func writeChatError(w http.ResponseWriter, err error) {
+	var qe *remote.QuotaError
+	if errors.As(err, &qe) {
+		writeOpenAIError(w, http.StatusTooManyRequests, "insufficient_quota", qe.Error())
+		return
+	}
+	writeOpenAIError(w, http.StatusInternalServerError, "api_error", err.Error())
+}
+
 func (s *Server) handleOpenAIChatCompletions(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodOptions {
 		w.WriteHeader(http.StatusNoContent)
@@ -492,7 +515,7 @@ func (s *Server) handleOpenAIChatCompletions(w http.ResponseWriter, r *http.Requ
 
 	result, err := s.svc.Generate(r.Context(), normalized)
 	if err != nil {
-		writeOpenAIError(w, http.StatusInternalServerError, "api_error", err.Error())
+		writeChatError(w, err)
 		return
 	}
 
@@ -1006,7 +1029,7 @@ func (s *Server) handleOpenAIStream(w http.ResponseWriter, r *http.Request, req 
 	if shouldAggregateToolStream(req) {
 		result, err := s.svc.Generate(r.Context(), req)
 		if err != nil {
-			writeOpenAIError(w, http.StatusInternalServerError, "api_error", err.Error())
+			writeChatError(w, err)
 			return
 		}
 		streamingHeaders(w)
@@ -1060,7 +1083,7 @@ func (s *Server) handleOpenAIStream(w http.ResponseWriter, r *http.Request, req 
 
 	events, done, err := s.svc.GenerateStream(r.Context(), req)
 	if err != nil {
-		writeOpenAIError(w, http.StatusInternalServerError, "api_error", err.Error())
+		writeChatError(w, err)
 		return
 	}
 

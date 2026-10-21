@@ -137,11 +137,13 @@ func main() {
 		st.SetQuotaNote(model, qn)
 	})
 	lane.SetProxy(cfg.ProxyMode, cfg.ProxyURL)
-	// WorkBuddy 账号渠道：config 是账号的落盘处，lane 持快照；上游轮换
-	// refresh token，lane 通过 persist 回调把新 token 对写回 config。
-	ln.SetWorkBuddyAccount(cfg.WorkBuddy)
+	// WorkBuddy 账号渠道：config 是账号池的落盘处，lane 持运行态（选号、冷却、
+	// 租约）。上游每次刷新都轮换 refresh token，lane 通过 persist 回调把新
+	// token 对按账号写回 config。
+	ln.Logf = logger.Infof
+	ln.SetWorkBuddyAccounts(cfg.WorkBuddyAccounts)
 	ln.SetWorkBuddyPersist(func(a lane.WBAccount) {
-		st.Mutate(func(c *store.Config) { c.WorkBuddy = a })
+		st.UpsertWorkBuddyAccount(a)
 		_ = st.Save()
 	})
 	// CodeArts 账号渠道：同一套账号快照 + 轮换回写。STS 临时凭证到期前由

@@ -45,6 +45,15 @@ type ListingMeta struct {
 	Reasoning      bool   `json:"reasoning,omitempty"`
 	InputDeclared  bool   `json:"inputDeclared,omitempty"`  // input_modalities were stated
 	OutputDeclared bool   `json:"outputDeclared,omitempty"` // output_modalities were stated
+
+	// Efforts are the thinking rungs the provider publishes for this model, in
+	// the provider's own naming, lightest first. EffortDefault is whichever of
+	// them the provider turns on when the caller states nothing. Both empty
+	// means the listing said nothing about thinking levels — the gateway then
+	// falls back to its own budget ladder instead of claiming rungs the
+	// upstream has never heard of.
+	Efforts       []string `json:"efforts,omitempty"`
+	EffortDefault string   `json:"effortDefault,omitempty"`
 }
 
 // dig walks a decoded-JSON path: a string step is an object key, an int step

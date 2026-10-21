@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"strconv"
 	"strings"
@@ -13,105 +14,200 @@ import (
 )
 
 // The account side of the WorkBuddy 账号渠道: login, refresh, the daily
-// activity claim, and the credits readout. Everything here rides wbMu, which
-// serializes token rotation — upstream swaps the refresh token on every
-// refresh, so two overlapping refreshes void the second pair and log the
-// account out.
+// activity claim, and the credits readout. The pool itself (membership,
+// selection, cooldowns) lives in workbuddy_pool.go; this file is about one
+// account's credential lifecycle. Token rotation is single-flight PER ACCOUNT
+// (each slot holds its own lock) — upstream swaps the refresh token on every
+// refresh, so two overlapping refreshes of one account void the second pair
+// and log it out, while two different accounts must not wait on each other.
 
-// SetWorkBuddyAccount installs the account snapshot from config. Catalog
-// refresh is the caller's job (main wires it at boot; admin refreshes after
-// login/logout/toggles).
+// SetWorkBuddyAccount installs a single account snapshot from config. A zero
+// account clears the pool, which is what the old single-account call sites
+// (logout, tests) mean. Catalog refresh is the caller's job.
 func (l *Lane) SetWorkBuddyAccount(acct WBAccount) {
-	l.wbMu.Lock()
-	l.wbAcct = acct
-	l.wbMu.Unlock()
+	if strings.TrimSpace(acct.AccessToken) == "" && strings.TrimSpace(acct.RefreshToken) == "" &&
+		strings.TrimSpace(acct.UID) == "" {
+		l.SetWorkBuddyAccounts(nil)
+		return
+	}
+	l.SetWorkBuddyAccounts([]WBAccount{acct})
 }
 
 // SetWorkBuddyPersist wires the write-back path for rotated token pairs and
-// activity dates. Called with wbMu held by the refresher — the callback must
-// not call back into the account setters.
+// activity dates. The callback must not call back into the account setters.
 func (l *Lane) SetWorkBuddyPersist(fn func(WBAccount)) {
 	l.wbMu.Lock()
 	l.wbPersist = fn
 	l.wbMu.Unlock()
 }
 
-// WorkBuddySnapshot returns a copy of the live account state.
+// WorkBuddySnapshot returns a copy of the first account's live state — the
+// single-account view the older callers and tests expect.
 func (l *Lane) WorkBuddySnapshot() WBAccount {
-	l.wbMu.Lock()
-	defer l.wbMu.Unlock()
-	return l.wbAcct
+	slots := l.wbSlotsSnapshot()
+	if len(slots) == 0 {
+		return WBAccount{}
+	}
+	return slots[0].snapshot()
 }
 
-// WorkBuddyLogout drops the account. The store copy is the caller's to clear;
-// this only takes the live snapshot down so in-flight code stops using it.
+// WorkBuddyLogout drops every account. The store copy is the caller's to
+// clear; this only takes the live pool down so in-flight code stops using it.
 func (l *Lane) WorkBuddyLogout() {
 	l.wbMu.Lock()
-	l.wbAcct = WBAccount{}
+	l.wbSlots = nil
+	l.wbActiveID = ""
 	l.wbLoginState = ""
 	l.wbMu.Unlock()
 	l.fireChange()
 }
 
-// workBuddyReady returns an enabled, token-bearing copy of the account.
-func (l *Lane) workBuddyReady() (WBAccount, bool) {
-	l.wbMu.Lock()
-	defer l.wbMu.Unlock()
-	if !l.wbAcct.Enabled || strings.TrimSpace(l.wbAcct.AccessToken) == "" {
-		return WBAccount{}, false
-	}
-	return l.wbAcct, true
-}
-
-// wbPersist writes the account back under the lock that guarantees one writer.
-func (l *Lane) wbPersistLocked() {
-	if l.wbPersist == nil {
-		return
-	}
-	l.wbPersist(l.wbAcct)
-}
-
 // wbPost is the one post entry every WorkBuddy turn goes through: the probe,
-// the daily activity claim, and user traffic. It refreshes a token that is
-// close to expiry before spending it, and on a credential refusal refreshes
-// once and retries — a rotated-but-unsaved pair would otherwise fail the turn
-// even though a valid refresh token is sitting right there.
+// the daily activity claim, and user traffic. It walks the account pool: a
+// quota refusal on one account continues the same turn on the next, as long as
+// nothing has been streamed to the client yet.
 func (l *Lane) wbPost(ctx context.Context, body map[string]any, conversationID string, onData func(payload []byte) error) (*Usage, error) {
-	acct, ok := l.workBuddyReady()
-	if !ok {
-		return nil, &UpstreamError{Code: CodeCredential, Message: "WorkBuddy 账号未登录或已停用"}
+	model, _ := body["model"].(string)
+
+	// Once a byte reaches the client the turn is committed: replaying it on
+	// another account would duplicate the visible answer.
+	emitted := false
+	tracked := func(payload []byte) error {
+		emitted = true
+		return onData(payload)
 	}
-	if wbTokenNearExpiry(acct) {
-		if rerr := l.refreshWorkBuddy(ctx); rerr == nil {
-			if fresh, ok := l.workBuddyReady(); ok {
-				acct = fresh
+
+	if len(l.wbSlotsSnapshot()) == 0 {
+		return nil, l.wbNoAccountError()
+	}
+
+	tried := map[string]bool{}
+	var (
+		sawQuota bool
+		sawCred  bool
+		lastErr  error
+	)
+	for i := 0; i < wbMaxAccountTries; i++ {
+		slot := l.wbAcquire(model, tried)
+		if slot == nil {
+			break
+		}
+		usage, err := func() (*Usage, error) {
+			defer l.wbRelease(slot)
+			acct := slot.snapshot()
+			if wbTokenNearExpiry(acct) {
+				if rerr := l.refreshWBSlot(ctx, slot); rerr == nil {
+					acct = slot.snapshot()
+				}
+				// A failed proactive refresh is not fatal: the old token may
+				// still answer, and the 401 path below gets one more chance.
+			}
+			u, err := PostWorkBuddyStreamed(ctx, body, acct, conversationID, tracked)
+			if ue := asUpstream(err); ue != nil && ue.Code == CodeCredential && !ue.Soft {
+				// A rotated-but-unsaved pair answers 401 even though a valid
+				// refresh token is sitting right there: refresh once, retry
+				// once, on this same account.
+				if rerr := l.refreshWBSlot(ctx, slot); rerr == nil {
+					acct = slot.snapshot()
+					u, err = PostWorkBuddyStreamed(ctx, body, acct, conversationID, tracked)
+				}
+			}
+			if err == nil {
+				l.wbMarkOK(slot)
+				l.wbSetActive(acct.ID)
+			}
+			return u, err
+		}()
+		tried[slot.acct.ID] = true
+		if err == nil {
+			return usage, nil
+		}
+		lastErr = err
+		ue := asUpstream(err)
+		if ue == nil {
+			return usage, err
+		}
+		switch ue.Code {
+		case CodeQuota:
+			sawQuota = true
+			// The classifier says how far the refusal reaches; without a scope
+			// the safe reading is "this model only", which never over-benches.
+			if ue.Scope == ScopeAccount {
+				l.wbCoolAccount(slot, ue.RetryAfter, ue.Message)
+			} else {
+				l.wbCoolModel(slot, model, ue.RetryAfter, ue.Message)
+			}
+			l.logf("WorkBuddy 账号 %s 限流（%s，%ds）：%s",
+				acctLabel(slot.snapshot()), model, ue.RetryAfter, truncate(ue.Message, 120))
+		case CodeCredential:
+			sawCred = true
+			l.wbMarkAuth(slot, ue.Soft, ue.Message)
+			l.logf("WorkBuddy 账号 %s 登录态问题：%s",
+				acctLabel(slot.snapshot()), truncate(ue.Message, 120))
+		case CodeServer, CodeTransport, CodeTimeout, CodeReset:
+			// Not the account's fault in a way another account could fix, but
+			// worth counting so a genuinely broken one backs off.
+			l.wbMarkServer(slot, ue.Message)
+			return usage, err
+		default:
+			// The request's own fault (malformed body, WAF verdict, content
+			// block): every account answers identically.
+			return usage, err
+		}
+		if emitted {
+			return usage, err
+		}
+		next := l.wbAcquire(model, tried)
+		if next != nil {
+			l.wbRelease(next) // peeking only; wbAcquire at the loop head re-takes it
+			l.logf("WorkBuddy 切换账号：%s → %s", acctLabel(slot.snapshot()), acctLabel(next.snapshot()))
+		}
+	}
+
+	if sawQuota {
+		// Prefer the upstream's own refusal: it carries the reset wall clock and
+		// the caller's classification (the daily-activity path tells a spent
+		// window from transient trouble by exactly that code). The synthesized
+		// "everyone is busy" answer is the fallback for the case where no
+		// account was even reachable.
+		if lastErr != nil {
+			if ue := asUpstream(lastErr); ue != nil && ue.Code == CodeQuota {
+				return nil, lastErr
 			}
 		}
-		// A failed proactive refresh is not fatal: the old token may still
-		// answer, and the 401 path below gets one more chance.
+		return nil, l.wbAllBusyError(model)
 	}
-	usage, err := PostWorkBuddyStreamed(ctx, body, acct, conversationID, onData)
-	if ue := asUpstream(err); ue != nil && ue.Code == CodeCredential {
-		if rerr := l.refreshWorkBuddy(ctx); rerr == nil {
-			if fresh, ok := l.workBuddyReady(); ok {
-				return PostWorkBuddyStreamed(ctx, body, fresh, conversationID, onData)
-			}
+	if sawCred {
+		msg := "所有 WorkBuddy 账号登录态失效，请到设置页重新登录"
+		if d := l.wbAccountDigest(); d != "" {
+			msg += "：" + d
 		}
+		return nil, &UpstreamError{Code: CodeCredential, Message: msg}
 	}
-	return usage, err
+	if lastErr == nil {
+		if l.wbHasToken() {
+			return nil, l.wbAllBusyError(model)
+		}
+		return nil, l.wbNoAccountError()
+	}
+	return nil, lastErr
 }
 
-// refreshWorkBuddy exchanges the refresh token for a fresh pair. Single-flight
-// by construction: the whole exchange holds wbMu, and a latecomer re-checks
-// freshness before doing anything, so N concurrent 401s produce one refresh.
-func (l *Lane) refreshWorkBuddy(ctx context.Context) error {
-	l.wbMu.Lock()
-	defer l.wbMu.Unlock()
-	acct := l.wbAcct
+// refreshWBSlot exchanges one account's refresh token for a fresh pair.
+// Single-flight per account: the whole exchange holds that slot's lock, and a
+// latecomer re-checks freshness before doing anything, so N concurrent 401s on
+// one account produce one refresh — while other accounts stay unblocked.
+func (l *Lane) refreshWBSlot(ctx context.Context, s *wbSlot) error {
+	if s == nil {
+		return errors.New("WorkBuddy 账号不存在")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	acct := s.acct
 	if acct.RefreshToken == "" {
 		return errors.New("WorkBuddy 没有 refresh token")
 	}
-	if !wbTokenNearExpiry(acct) && time.Since(l.wbRefreshedAt) < time.Minute {
+	if !wbTokenNearExpiry(acct) && time.Since(s.refreshedAt) < time.Minute {
 		return nil // someone just refreshed; the pair is current
 	}
 	rc := wbRealmConfig(wbRealmOf(acct))
@@ -156,15 +252,19 @@ func (l *Lane) refreshWorkBuddy(ctx context.Context) error {
 		// omits it (the old one may already be consumed).
 		acct.RefreshToken = payload.Data.RefreshToken
 	}
-	if _, iss, expMS, ok := wbJWTClaims(acct.AccessToken); ok {
-		if expMS > 0 {
-			acct.ExpiresAtMS = expMS
-		}
-		_ = iss
+	if _, _, expMS, ok := wbJWTClaims(acct.AccessToken); ok && expMS > 0 {
+		acct.ExpiresAtMS = expMS
 	}
-	l.wbAcct = acct
-	l.wbRefreshedAt = time.Now()
-	l.wbPersistLocked()
+	s.acct = acct
+	s.refreshedAt = time.Now()
+	s.authBad = false
+	s.authFails = 0
+	persist := l.wbPersist
+	go func() {
+		if persist != nil {
+			persist(acct)
+		}
+	}()
 	return nil
 }
 
@@ -263,14 +363,25 @@ func (l *Lane) WorkBuddyLoginPoll() (string, error) {
 	if err != nil {
 		return "", err
 	}
+	acct.ID = wbStableID(acct.UID)
+	l.wbUpsertSlot(acct)
 	l.wbMu.Lock()
-	l.wbAcct = acct
 	l.wbLoginState = ""
 	l.wbLoginRealm = ""
 	l.wbMu.Unlock()
-	l.wbPersist(acct)
+	l.wbPersistAcct(acct)
 	go l.RefreshCatalog(context.Background())
 	l.fireChange()
+	// A fresh account must collect today's reward now, not on the next hourly
+	// tick: the user just logged in to spend it.
+	go func() {
+		ctx := context.Background()
+		if acct.Realm == WBRealmCN {
+			_, _ = l.WorkBuddyDailyCheckin(ctx)
+		} else {
+			_, _ = l.WorkBuddyDailyActivity(ctx)
+		}
+	}()
 	return "ok", nil
 }
 
@@ -345,14 +456,12 @@ func wbAccountFromToken(t wbTokenResponse, hint string) (WBAccount, error) {
 
 // wbGet performs one identity-bearing GET against the account's publishment
 // root and returns (upstream code, body) without treating non-2xx as a Go
-// error — the callers read the envelope's own codes. Billing paths want
-// wbBillingGet: on CN the meter lives on a different host than the chat API.
+// error — the callers read the envelope's own codes. The billing meter is not
+// in this family: it answers GET with a bare "404 page not found" (measured
+// 2026-10-21, both publishments, both hosts) because those routes are
+// POST-only, so every meter read goes through wbBillingPost.
 func wbGet(path string, acct WBAccount) (int, []byte, error) {
 	return wbGetOn(wbRealmConfig(wbRealmOf(acct)).ChatBase, path, acct)
-}
-
-func wbBillingGet(path string, acct WBAccount) (int, []byte, error) {
-	return wbGetOn(wbRealmConfig(wbRealmOf(acct)).BillingBase, path, acct)
 }
 
 func wbGetOn(base, path string, acct WBAccount) (int, []byte, error) {
@@ -378,103 +487,175 @@ func wbGetOn(base, path string, acct WBAccount) (int, []byte, error) {
 
 // WorkBuddyDailyActivity claims the day's activity reward with one tiny
 // conversation on the free deepseek model — the intl pool's daily task, the
-// same move the desktop client's 每日活跃 makes. Runs at most once per local
-// calendar day; a spent free window (6004) also closes the day, since retrying
-// inside a spent window buys nothing.
+// same move the desktop client's 每日活跃 makes. Runs at most once per account
+// per local calendar day; a spent free window (6004) also closes that
+// account's day, since retrying inside a spent window buys nothing.
+//
+// Every account is covered, including the disabled ones: 停用 only means "stop
+// serving turns". Skipping them here would cut the one automatic way a benched
+// account ever recovers.
 func (l *Lane) WorkBuddyDailyActivity(ctx context.Context) (bool, error) {
-	acct, ok := l.workBuddyReady()
-	if !ok {
-		return false, nil
-	}
 	today := time.Now().Format("2006-01-02")
-	if acct.LastActivityDate == today {
-		return false, nil
+	ran := false
+	processed := 0
+	var firstErr error
+	for _, slot := range l.wbOrderedSlots() {
+		if processed >= wbDailyMaxPerRun {
+			break
+		}
+		acct := slot.snapshot()
+		if wbRealmOf(acct) != WBRealmIntl || strings.TrimSpace(acct.AccessToken) == "" {
+			continue
+		}
+		if acct.LastActivityDate == today {
+			continue
+		}
+		ran = true
+		processed++
+		body := map[string]any{
+			"model":      "deepseek-v4.1-flash",
+			"stream":     true,
+			"messages":   []map[string]any{{"role": RoleUser, "content": "Hi"}},
+			"max_tokens": 10,
+		}
+		// Ride the same envelope and model quirks as a chat turn (issue #85): a
+		// bare conversation id of "" and a hand-written reasoning_effort are
+		// both shapes the gate never sees from real traffic, and every hourly
+		// retry answered CLIENT_ERROR because of it. "light" keeps the forced
+		// deepseek thinking at its cheapest rung.
+		wbApplyModelQuirks(body, "deepseek-v4.1-flash", "light")
+		_, err := l.wbPost(ctx, body, wbConversationID("wb-daily-activity"), func([]byte) error { return nil })
+		if ue := asUpstream(err); err != nil && (ue == nil || ue.Code != CodeQuota) {
+			// Transient trouble (transport, 5xx, refresh failure): leave this
+			// account's day open so the next hourly tick retries it.
+			if firstErr == nil {
+				firstErr = err
+			}
+			time.Sleep(wbDailyGap)
+			continue
+		}
+		// A spent free window (6004) closes the day — retrying inside a spent
+		// window buys nothing — but the caller still hears about it.
+		l.wbMarkActivity(slot, today)
+		if err != nil && firstErr == nil {
+			firstErr = err
+		}
+		time.Sleep(wbDailyGap)
 	}
-	body := map[string]any{
-		"model":      "deepseek-v4.1-flash",
-		"stream":     true,
-		"messages":   []map[string]any{{"role": RoleUser, "content": "Hi"}},
-		"max_tokens": 10,
-	}
-	// Ride the same envelope and model quirks as a chat turn (issue #85): a
-	// bare conversation id of "" and a hand-written reasoning_effort are both
-	// shapes the gate never sees from real traffic, and every hourly retry
-	// answered CLIENT_ERROR because of it. "light" keeps the forced deepseek
-	// thinking at its cheapest rung.
-	wbApplyModelQuirks(body, "deepseek-v4.1-flash", "light")
-	_, err := l.wbPost(ctx, body, wbConversationID("wb-daily-activity"), func([]byte) error { return nil })
-	if ue := asUpstream(err); err != nil && (ue == nil || ue.Code != CodeQuota) {
-		// Transient trouble (transport, 5xx, refresh failure): leave the day
-		// open so the next hourly tick retries.
-		return true, err
-	}
-	l.wbMarkActivity(today)
-	return true, err
+	return ran, firstErr
 }
 
-func (l *Lane) wbMarkActivity(date string) {
-	l.wbMu.Lock()
-	l.wbAcct.LastActivityDate = date
-	acct := l.wbAcct
-	fn := l.wbPersist
-	l.wbMu.Unlock()
-	if fn != nil {
-		fn(acct)
+// wbMarkActivity stamps one account's activity day and persists it.
+func (l *Lane) wbMarkActivity(s *wbSlot, date string) {
+	if s == nil {
+		return
 	}
+	s.mu.Lock()
+	s.acct.LastActivityDate = date
+	acct := s.acct
+	s.mu.Unlock()
+	l.wbPersistAcct(acct)
 }
 
 // WorkBuddyDailyCheckin claims the CN publishment's daily reward on its own
-// endpoint. intl has no such endpoint — it earns its daily by conversing
-// (WorkBuddyDailyActivity) — so a CN account left on the activity chat would
-// collect nothing all week while still looking busy in the logs.
+// endpoint, once per account per day. intl has no such endpoint — it earns its
+// daily by conversing (WorkBuddyDailyActivity) — so a CN account left on the
+// activity chat would collect nothing all week while still looking busy.
 //
 // The meter answers code 0 on a fresh claim and 10001 (or any 已签到 wording,
 // sometimes behind an HTTP 400) once the day is claimed. Both mean the day is
 // finished, so both mark it; only a genuinely different code leaves the day
 // open for the next tick.
+//
+// An enterprise seat answers 10001「企业账号不支持该操作」: it has no personal
+// reward system at all, so that account is flagged and never asked again
+// instead of failing the pass every hour.
 func (l *Lane) WorkBuddyDailyCheckin(ctx context.Context) (bool, error) {
-	acct, ok := l.workBuddyReady()
-	if !ok || wbRealmOf(acct) != WBRealmCN {
-		return false, nil
-	}
 	today := time.Now().Format("2006-01-02")
-	if acct.LastCheckinDate == today {
-		return false, nil
-	}
-	if wbTokenNearExpiry(acct) {
-		if rerr := l.refreshWorkBuddy(ctx); rerr == nil {
-			if fresh, ok := l.workBuddyReady(); ok {
-				acct = fresh
+	ran := false
+	processed := 0
+	var firstErr error
+	for _, slot := range l.wbOrderedSlots() {
+		if processed >= wbDailyMaxPerRun {
+			break
+		}
+		slot.mu.Lock()
+		acct := slot.acct
+		skip := slot.noCheckin
+		slot.mu.Unlock()
+		if skip || wbRealmOf(acct) != WBRealmCN || strings.TrimSpace(acct.AccessToken) == "" {
+			continue
+		}
+		if acct.LastCheckinDate == today {
+			continue
+		}
+		ran = true
+		processed++
+		if wbTokenNearExpiry(acct) {
+			if rerr := l.refreshWBSlot(ctx, slot); rerr == nil {
+				acct = slot.snapshot()
 			}
 		}
+		status, body, err := wbBillingPost(ctx, wbCheckinPath, acct, "{}")
+		if err != nil {
+			// Transport trouble only; this account's day stays open.
+			if firstErr == nil {
+				firstErr = err
+			}
+			time.Sleep(wbDailyGap)
+			continue
+		}
+		var resp struct {
+			Code int    `json:"code"`
+			Msg  string `json:"msg"`
+		}
+		_ = json.Unmarshal(body, &resp)
+		if wbCheckinIsEnterprise(resp.Code, resp.Msg) {
+			l.WorkBuddyMarkNoCheckin(acct.ID, true)
+			l.logf("WorkBuddy 账号 %s 是企业账号，没有每日签到，已跳过", acctLabel(acct))
+			time.Sleep(wbDailyGap)
+			continue
+		}
+		if resp.Code != 0 && resp.Code != wbCheckinAlready && !strings.Contains(resp.Msg, "已签到") {
+			if firstErr == nil {
+				firstErr = fmt.Errorf("国内版签到未成功（HTTP %d，code %d）%s",
+					status, resp.Code, strings.TrimSpace(resp.Msg))
+			}
+			time.Sleep(wbDailyGap)
+			continue
+		}
+		l.wbMarkCheckin(slot, today)
+		// A balance that just came back is the one upstream fact that can end
+		// a 402 park early.
+		l.wbThaw(slot)
+		time.Sleep(wbDailyGap)
 	}
-	status, body, err := wbBillingPost(ctx, wbCheckinPath, acct, "{}")
-	if err != nil {
-		// Transport trouble only; the day stays open for the next tick.
-		return true, err
-	}
-	var resp struct {
-		Code int    `json:"code"`
-		Msg  string `json:"msg"`
-	}
-	_ = json.Unmarshal(body, &resp)
-	if resp.Code != 0 && resp.Code != wbCheckinAlready && !strings.Contains(resp.Msg, "已签到") {
-		return true, fmt.Errorf("国内版签到未成功（HTTP %d，code %d）%s",
-			status, resp.Code, strings.TrimSpace(resp.Msg))
-	}
-	l.wbMarkCheckin(today)
-	return true, nil
+	return ran, firstErr
 }
 
-func (l *Lane) wbMarkCheckin(date string) {
-	l.wbMu.Lock()
-	l.wbAcct.LastCheckinDate = date
-	acct := l.wbAcct
-	fn := l.wbPersist
-	l.wbMu.Unlock()
-	if fn != nil {
-		fn(acct)
+// wbCheckinIsEnterprise spots the meter's "this seat has no personal rewards"
+// answer. It arrives as a 400 with code 10001, the same code the meter uses for
+// "already claimed today", so the wording is what separates them.
+func wbCheckinIsEnterprise(code int, msg string) bool {
+	if code != wbCheckinAlready {
+		return false
 	}
+	if strings.Contains(msg, "已签到") {
+		return false
+	}
+	return strings.Contains(msg, "企业") || strings.Contains(msg, "enterprise")
+}
+
+// wbMarkCheckin stamps one account's checkin day and persists it.
+func (l *Lane) wbMarkCheckin(s *wbSlot, date string) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	s.acct.LastCheckinDate = date
+	acct := s.acct
+	s.mu.Unlock()
+	l.wbPersistAcct(acct)
 }
 
 // wbBillingPost is the POST twin of wbBillingGet: same meter host, same
@@ -501,109 +682,251 @@ func wbBillingPost(ctx context.Context, path string, acct WBAccount, payload str
 	return resp.StatusCode, data, nil
 }
 
-// WorkBuddyCredits reads the billing resource summary for the status card.
-// The response's numeric layout is not contractual, so the reader accepts any
-// numeric field named like a balance anywhere under data and reports the
-// first one it finds; an empty string means "nothing recognizable".
+// WorkBuddyCredits reads the billing resource summary for the status card,
+// using the account currently serving. See WorkBuddyCreditsFor for the pool.
+func (l *Lane) WorkBuddyCredits(ctx context.Context) (WBCredits, error) {
+	for _, slot := range l.wbOrderedSlots() {
+		acct := slot.snapshot()
+		if strings.TrimSpace(acct.AccessToken) == "" {
+			continue
+		}
+		if v, err := l.creditsForSlot(ctx, slot); err == nil {
+			return v, nil
+		}
+	}
+	return WBCredits{}, errors.New("没有可读积分的 WorkBuddy 账号")
+}
+
+// WorkBuddyCreditsFor reads one account's balance by id.
+func (l *Lane) WorkBuddyCreditsFor(ctx context.Context, id string) (WBCredits, error) {
+	slot := l.wbSlotByID(id)
+	if slot == nil {
+		return WBCredits{}, errors.New("WorkBuddy 账号不存在")
+	}
+	return l.creditsForSlot(ctx, slot)
+}
+
+// creditsForSlot reads one account's remaining credit from the billing meter.
+//
+// Two facts about that endpoint, both measured against the live meter
+// (2026-10-21, both publishments, both candidate hosts), and both contradicting
+// what this file used to assume:
+//
+//   - It is POST-only. A GET on the same URL answers a bare
+//     "404 page not found" from the router, which is why the card said
+//     积分查询返回 HTTP 404 on accounts whose chat path worked fine. The host
+//     was never the problem: copilot.tencent.com, www.codebuddy.cn and
+//     www.workbuddy.ai all answer the POST.
+//   - The balance is not a field. It is the sum of the account's still-spendable
+//     resource packs under data.Response.Data.Accounts[], each with an integer
+//     value and a *Precise string twin (CycleCapacityRemain 249 /
+//     "249.04"). Reporting any one field shows one pack, not the account.
 //
 // It rides the same refresh chain wbPost keeps: a near-expiry token is renewed
-// before the GET, and a 401 refreshes and retries once. Without it the card
-// reported "积分读不出" on a token the chat path still used fine (issue #46) —
-// the chat went through wbPost's refresh, this raw GET did not.
-func (l *Lane) WorkBuddyCredits(ctx context.Context) (string, error) {
-	acct, ok := l.workBuddyReady()
-	if !ok {
-		return "", errors.New("WorkBuddy 账号未登录")
+// before the request, and a 401 refreshes and retries once. Without it the card
+// reported "积分读不出" on a token the chat path still used fine (issue #46).
+func (l *Lane) creditsForSlot(ctx context.Context, slot *wbSlot) (WBCredits, error) {
+	acct := slot.snapshot()
+	if strings.TrimSpace(acct.AccessToken) == "" {
+		return WBCredits{}, errors.New("WorkBuddy 账号未登录")
 	}
 	if wbTokenNearExpiry(acct) {
-		if rerr := l.refreshWorkBuddy(ctx); rerr == nil {
-			if fresh, ok := l.workBuddyReady(); ok {
-				acct = fresh
-			}
+		if rerr := l.refreshWBSlot(ctx, slot); rerr == nil {
+			acct = slot.snapshot()
 		}
 	}
-	outerCode, body, err := wbBillingGetCancellable(ctx, wbUserResourcePath, acct)
+	code, body, err := wbBillingPost(ctx, wbUserResourcePath, acct, "{}")
 	if err != nil {
-		return "", err
+		return WBCredits{}, err
 	}
-	if outerCode == 401 {
+	if code == 401 {
 		// A credential refusal: refresh once and retry — same one chance wbPost
 		// gives a rotated-but-unsaved pair.
-		if rerr := l.refreshWorkBuddy(ctx); rerr != nil {
-			return "", fmt.Errorf("WorkBuddy 登录态失效（刷新失败：%v）", rerr)
+		if rerr := l.refreshWBSlot(ctx, slot); rerr != nil {
+			return WBCredits{}, fmt.Errorf("WorkBuddy 登录态失效（刷新失败：%v）", rerr)
 		}
-		fresh, ok := l.workBuddyReady()
-		if !ok {
-			return "", errors.New("WorkBuddy 账号未登录")
-		}
-		if outerCode, body, err = wbBillingGetCancellable(ctx, wbUserResourcePath, fresh); err != nil {
-			return "", err
+		acct = slot.snapshot()
+		if code, body, err = wbBillingPost(ctx, wbUserResourcePath, acct, "{}"); err != nil {
+			return WBCredits{}, err
 		}
 	}
-	if outerCode != 200 {
-		return "", fmt.Errorf("积分查询返回 HTTP %d", outerCode)
+	if code != 200 {
+		return WBCredits{}, fmt.Errorf("积分查询返回 HTTP %d", code)
 	}
-	var payload map[string]any
-	if json.Unmarshal(body, &payload) != nil {
-		return "", errors.New("积分响应无法解析")
-	}
-	data, _ := payload["data"].(map[string]any)
-	if v := wbFindBalance(data, 3); v != "" {
-		return v, nil
-	}
-	return "", nil
+	return wbMeterBalance(body, time.Now())
 }
 
-// wbGetCancellable runs one wbGet but honours ctx cancellation instead of the
-// bare 15s client timeout, so a status-card refresh cannot outlive its request.
-func wbGetCancellable(ctx context.Context, path string, acct WBAccount) (int, []byte, error) {
-	return wbGetOnCancellable(ctx, wbRealmConfig(wbRealmOf(acct)).ChatBase, path, acct)
+// wbMeterPack is one resource pack as the meter publishes it. Only the fields
+// this reader needs are decoded; the envelope carries ~50 more per pack.
+type wbMeterPack struct {
+	PackageName                string  `json:"PackageName"`
+	SubProductName             string  `json:"SubProductName"`
+	PackageCode                string  `json:"PackageCode"`
+	CapacityUnit               string  `json:"CapacityUnit"`
+	Status                     int     `json:"Status"`
+	ExpiredTime                string  `json:"ExpiredTime"`
+	DeductionEndTime           int64   `json:"DeductionEndTime"`
+	CycleCapacityRemain        float64 `json:"CycleCapacityRemain"`
+	CycleCapacityRemainPrecise string  `json:"CycleCapacityRemainPrecise"`
 }
 
-// wbBillingGetCancellable is wbGetCancellable against the meter host. On intl
-// the two hosts are the same, so this only matters for CN — where asking
-// copilot.tencent.com for a billing meter is what answers 404.
-func wbBillingGetCancellable(ctx context.Context, path string, acct WBAccount) (int, []byte, error) {
-	return wbGetOnCancellable(ctx, wbRealmConfig(wbRealmOf(acct)).BillingBase, path, acct)
-}
+// wbMeterPackExpired is the Status value the meter puts on a dead pack. It
+// still ships the pack with its numbers filled in, so a sum that ignores this
+// counts credit the account cannot spend.
+const wbMeterPackExpired = 3
 
-func wbGetOnCancellable(ctx context.Context, base, path string, acct WBAccount) (int, []byte, error) {
-	done := make(chan struct{})
-	var (
-		code int
-		body []byte
-		gerr error
-	)
-	go func() {
-		code, body, gerr = wbGetOn(base, path, acct)
-		close(done)
-	}()
-	select {
-	case <-ctx.Done():
-		return 0, nil, ctx.Err()
-	case <-done:
-		return code, body, gerr
+// remaining prefers the precise string the desktop client prints: the integer
+// field is truncated (249 vs "249.04"), and rounding a balance down by a
+// fraction is the difference between "still usable" and "spent".
+func (p wbMeterPack) remaining() float64 {
+	if f, err := strconv.ParseFloat(strings.TrimSpace(p.CycleCapacityRemainPrecise), 64); err == nil {
+		return f
 	}
+	return p.CycleCapacityRemain
 }
 
-func wbFindBalance(m map[string]any, depth int) string {
-	if m == nil || depth <= 0 {
-		return ""
+// spendable reports whether the account can still be charged against this pack.
+// Three independent signals say a pack is dead — Status, an ExpiredTime already
+// in the past, and a DeductionEndTime (the cut-off for charging) already in the
+// past — and the meter can send any one of them, so all three are checked. An
+// unparsable date is read as live: hiding spendable credit is worse than
+// showing a stale pack.
+func (p wbMeterPack) spendable(now time.Time) bool {
+	if p.Status == wbMeterPackExpired {
+		return false
 	}
-	for _, key := range []string{"credit", "credits", "balance", "remainCredit", "totalCredit", "point", "points"} {
-		if f, ok := toNum(m[key]); ok && f >= 0 {
-			return strconv.FormatFloat(f, 'f', -1, 64)
+	if s := strings.TrimSpace(p.ExpiredTime); s != "" {
+		if t, err := time.ParseInLocation("2006-01-02 15:04:05", s, now.Location()); err == nil && !t.After(now) {
+			return false
 		}
 	}
-	for _, v := range m {
-		if child, ok := v.(map[string]any); ok {
-			if s := wbFindBalance(child, depth-1); s != "" {
-				return s
-			}
+	if p.DeductionEndTime > 0 && !time.UnixMilli(p.DeductionEndTime).After(now) {
+		return false
+	}
+	return true
+}
+
+// diesWithin says the pack stops being chargeable within window of now. A pack
+// whose cut-off the meter never published is read as living longer: calling
+// unknown permanent is the conservative half of the split, since a wrong
+// "expiring" tag would spend long-lived credit first for no reason.
+func (p wbMeterPack) diesWithin(now time.Time, window time.Duration) bool {
+	if p.DeductionEndTime <= 0 {
+		return false
+	}
+	return time.UnixMilli(p.DeductionEndTime).Before(now.Add(window))
+}
+
+// isCredit says whether a pack is metered in credit at all. The unit string
+// arrives as both "credit" and "credits" for the same thing; a pack metered in
+// tokens is a different currency and summing it into 积分 would print a number
+// the account cannot spend as credit.
+func (p wbMeterPack) isCredit() bool {
+	switch strings.ToLower(strings.TrimSpace(p.CapacityUnit)) {
+	case "", "credit", "credits", "积分":
+		return true
+	default:
+		return false
+	}
+}
+
+// WBCredits is one account's spendable credit, split by when it dies.
+//
+// The split is not decoration: credit that is about to expire is only spendable
+// until it is not, and one blended total hides which half evaporates first.
+// Expiring means the pack's charging cut-off (DeductionEndTime) falls inside
+// WBExpiringWindowDays; every other pack — including one whose cut-off the
+// meter never published — lands in Permanent, which is the conservative
+// direction (see the reference client's same rule).
+type WBCredits struct {
+	Total     float64 `json:"total"`
+	Expiring  float64 `json:"expiring"`
+	Permanent float64 `json:"permanent"`
+	// Dead is the balance still attached to packs the meter has already closed.
+	// It is reported apart and never folded into Total: the meter keeps shipping
+	// those numbers, and summing them inflated a real account from 155.67 to
+	// 655.67 in the community's measurement.
+	Packs int     `json:"packs"`
+	Dead  float64 `json:"dead"`
+}
+
+// String is the display total: two decimals, no trailing zeros. Summing the
+// meter's float values surfaces their tail noise (55.67000031 + … =
+// 668.0400002), and the desktop client itself only ever shows cents.
+func (c WBCredits) String() string { return wbFormatCredits(c.Total) }
+
+func wbFormatCredits(v float64) string {
+	return strconv.FormatFloat(math.Round(v*100)/100, 'f', -1, 64)
+}
+
+// wbExpiringWindowDays is the horizon under which credit counts as dying soon.
+// It leaves the package as a function because the dashboard prints the number
+// in a label: a hard-coded label beside a rule that later drifts tells the user
+// a deadline we never applied.
+const wbExpiringWindowDays = 15
+
+// WBExpiringWindowDays publishes the window the split was made with.
+func WBExpiringWindowDays() int { return wbExpiringWindowDays }
+
+// wbMeterBalance turns one get-user-resource envelope into the account's
+// credit, bucketed by expiry. now is a parameter so the rules are testable
+// without waiting on a calendar.
+//
+// An error means "we cannot tell", which the card must not render as 0; a clean
+// envelope with nothing spendable is the real answer 0.
+func wbMeterBalance(body []byte, now time.Time) (WBCredits, error) {
+	var env struct {
+		Code int    `json:"code"`
+		Msg  string `json:"msg"`
+		Data struct {
+			Response struct {
+				Data struct {
+					Accounts []wbMeterPack `json:"Accounts"`
+				} `json:"Data"`
+			} `json:"Response"`
+		} `json:"data"`
+	}
+	var c WBCredits
+	if json.Unmarshal(body, &env) != nil {
+		return c, errors.New("积分响应无法解析")
+	}
+	if env.Code != 0 {
+		return c, fmt.Errorf("积分查询未成功（code %d）%s", env.Code, strings.TrimSpace(env.Msg))
+	}
+	if len(env.Data.Response.Data.Accounts) == 0 {
+		return c, errors.New("积分响应没有资源包列表")
+	}
+	window := time.Duration(wbExpiringWindowDays) * 24 * time.Hour
+	for _, p := range env.Data.Response.Data.Accounts {
+		if !p.isCredit() {
+			continue
+		}
+		remain := p.remaining()
+		if !p.spendable(now) {
+			c.Dead += remain
+			continue
+		}
+		if remain <= 0 {
+			// A closed-out pack is not a credit source; counting it as a pack
+			// would tell the user two pools are live when one is empty.
+			continue
+		}
+		c.Packs++
+		c.Total += remain
+		if p.diesWithin(now, window) {
+			c.Expiring += remain
+		} else {
+			c.Permanent += remain
 		}
 	}
-	return ""
+	c.Dead = round2(c.Dead)
+	c.Expiring = round2(c.Expiring)
+	c.Permanent = round2(c.Permanent)
+	c.Total = round2(c.Total)
+	return c, nil
 }
+
+func round2(v float64) float64 { return math.Round(v*100) / 100 }
 
 // probeWorkBuddy re-tests one WorkBuddy model with a minimal chat: the free
 // window's cheapest possible proof of life. The lane probe machinery calls
@@ -611,9 +934,9 @@ func wbFindBalance(m map[string]any, depth int) string {
 // endpoint.
 func (l *Lane) probeWorkBuddy(ctx context.Context, m ModelInfo) ProbeResult {
 	res := ProbeResult{Model: m.ID, State: StateUnknown, At: time.Now().UnixMilli()}
-	if _, ok := l.workBuddyReady(); !ok {
+	if !l.wbServeable() {
 		res.State = StateUnavailable
-		res.Detail = "WorkBuddy 未登录或已停用"
+		res.Detail = "WorkBuddy 未登录或全部账号已停用"
 		return res
 	}
 	body := map[string]any{

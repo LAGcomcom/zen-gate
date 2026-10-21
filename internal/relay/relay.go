@@ -211,6 +211,14 @@ type Turn struct {
 	// value must repeat across a conversation for routing and prompt cache to
 	// hold. Empty is fine for every other provider.
 	Session string
+
+	// ReasoningEffort is the thinking rung the caller asked for, already in the
+	// naming this provider answers to. It rides the OpenAI body verbatim
+	// because a provider that publishes rungs acts on them — dropping it is
+	// what made the picker a no-op. Anthropic-protocol providers are left
+	// alone: their thinking control is a budget object, not a level name, and
+	// inventing one would be a claim about a field they may reject.
+	ReasoningEffort string
 }
 
 // Complete streams one turn from the provider into lane chunks. Returns the
@@ -256,6 +264,9 @@ func Complete(ctx context.Context, t Turn, emit func(lane.Chunk)) (lane.Usage, s
 		body["max_tokens"] = maxTok
 		if tl := lane.ToToolDefs(t.Tools, style); tl != nil {
 			body["tools"] = tl
+		}
+		if t.ReasoningEffort != "" {
+			body["reasoning_effort"] = t.ReasoningEffort
 		}
 		body["stream_options"] = map[string]any{"include_usage": true}
 	}

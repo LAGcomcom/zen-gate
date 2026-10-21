@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"zen-gate/internal/qoderhub/httpapi"
+	"zen-gate/internal/qoderhub/remote"
 	"zen-gate/internal/qoderhub/service"
 )
 
@@ -34,6 +35,30 @@ type Hub struct {
 	svc    *service.Service
 	server *httpapi.Server
 	addr   string
+	pool   *remote.Pool
+}
+
+// loadPool opens the Qoder account directory. A missing or unreadable index is
+// not fatal: the hub then runs on the live IDE login alone, which is exactly
+// what it did before pooling existed.
+func loadPool() *remote.Pool {
+	dir, err := remote.DefaultAccountsDir()
+	if err != nil {
+		return nil
+	}
+	pool := remote.NewPool(dir)
+	if err := pool.Load(); err != nil {
+		return nil
+	}
+	return pool
+}
+
+// Pool exposes the account directory for the settings surface.
+func (h *Hub) Pool() *remote.Pool {
+	if h == nil {
+		return nil
+	}
+	return h.pool
 }
 
 // Start brings the hub up. Warmup happens asynchronously — a slow or absent
@@ -48,14 +73,19 @@ func Start() (*Hub, error) {
 		_ = ln.Close()
 	}
 
+	// The account pool is optional: an unreadable directory must not stop the
+	// hub, because a single IDE login is a perfectly good way to run.
+	pool := loadPool()
+
 	cfg := service.Config{
 		Host:        HubHost,
 		Port:        HubPort,
 		Model:       "kmodel",
 		SessionMode: "auto",
+		RemotePool:  pool,
 	}
 	svc := service.New(cfg)
-	h := &Hub{svc: svc, addr: addr}
+	h := &Hub{svc: svc, addr: addr, pool: pool}
 	h.server = httpapi.NewServer(addr, svc)
 
 	go func() {

@@ -526,20 +526,21 @@ func bearerOf(r *http.Request) string {
 // merged verdict the router filters on. Without it an agent can only learn
 // what 测试 / 能力实测 measured by scraping the dashboard.
 //
-// Reasoning models additionally expose (light)/(deep) variants so a client's
-// model picker can select the effort directly. User-added providers ("自定义
-// API") append their discovered models under "<providerID>/<model>" ids. Models
-// the user unchecked on the 模型 page are not advertised.
+// A reasoning model is ONE entry carrying its whole effort ladder in
+// `supported_reasoning_levels`; the client renders the levels as a selector on
+// that one model. It used to publish "id (light)" / "id (deep)" as extra rows
+// instead, which turned every thinking model into three look-alike models in a
+// picker — the same weights advertised three times, each looking like a
+// different model. The suffix form is still *accepted* on the request side
+// (EffortOf), so anything already configured keeps working; it is simply no
+// longer advertised. User-added providers ("自定义 API") append their
+// discovered models under "<providerID>/<model>" ids. Models the user
+// unchecked on the 模型 page are not advertised.
 func (s *Server) handleListModels(w http.ResponseWriter, r *http.Request) {
 	cfg := s.Store.Config()
 	data := []map[string]any{}
 	for _, m := range s.VisibleModels() {
 		data = append(data, s.modelCard(m, m.ID, "zen-gate", cfg, true))
-		if m.Reasoning {
-			for _, suffix := range []string{"(light)", "(deep)"} {
-				data = append(data, s.modelCard(m, m.ID+" "+suffix, "zen-gate", cfg, true))
-			}
-		}
 	}
 	hidden := s.hiddenSet()
 	for i := range cfg.Providers {
@@ -616,13 +617,30 @@ func (s *Server) modelCard(floor lane.ModelInfo, id, ownedBy string, cfg *store.
 	if maxOutput > 0 {
 		entry["max_output_tokens"] = maxOutput
 	}
-	if reasoning && freeLane {
-		if levels := lane.EffortsFor(floor, 0, cfg.DefaultMaxTokens, cfg.DefaultEffort); len(levels) > 0 {
+	if reasoning {
+		// The ladder belongs to the model, not to a separate entry: one id,
+		// one selectable rung list. `efforts` is the rich form (id/name/中文名/
+		// resolved token budget) and `supported_reasoning_levels` the plain id
+		// list the Codex-style catalog schema reads. A source that states its
+		// own rungs gets those — the gateway's light/balanced/deep ladder is
+		// only ever the fallback for a source that says nothing.
+		levels, def := effortLadder(floor, caps, cfg)
+		if len(levels) > 0 {
 			ids := make([]string, 0, len(levels))
+			rich := make([]map[string]any, 0, len(levels))
 			for _, l := range levels {
 				ids = append(ids, l.ID)
+				rich = append(rich, map[string]any{
+					"id":         l.ID,
+					"name":       l.Name,
+					"zh":         l.ZH,
+					"tokens":     l.Tokens,
+					"is_default": l.IsDefault,
+				})
 			}
 			entry["supported_reasoning_levels"] = ids
+			entry["efforts"] = rich
+			entry["default_effort"] = def
 		}
 	}
 	return entry

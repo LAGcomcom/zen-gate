@@ -28,10 +28,13 @@ type Config struct {
 	RemoteAuthFile string
 	RemoteProxyURL string
 	RemoteVersion  string
-	Model          string
-	SessionMode    SessionMode
-	Timeout        time.Duration
-	WarmupTimeout  time.Duration
+	// RemotePool holds several IDE logins. Nil means "no pool": every call
+	// falls back to the single live credential in the IDE cache.
+	RemotePool    *remote.Pool
+	Model         string
+	SessionMode   SessionMode
+	Timeout       time.Duration
+	WarmupTimeout time.Duration
 	// AuthKeysFile points at an inbound API-key allowlist (one key per line).
 	// Empty disables inbound authentication (open access, the default).
 	AuthKeysFile string
@@ -181,6 +184,17 @@ func (s *Service) Warmup(ctx context.Context) error {
 }
 
 func (s *Service) Close() error { return nil }
+
+// Pool exposes the Qoder account directory, or nil when the hub runs on the
+// live IDE login alone.
+func (s *Service) Pool() *remote.Pool {
+	if s == nil {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.cfg.RemotePool
+}
 
 func contextWithOptionalTimeout(parent context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
 	if timeout <= 0 {
@@ -504,6 +518,7 @@ func (s *Service) remoteClientLocked() *remote.Client {
 			ProxyURL:    s.cfg.RemoteProxyURL,
 			CosyVersion: s.cfg.RemoteVersion,
 			Timeout:     s.cfg.Timeout,
+			Pool:        s.cfg.RemotePool,
 		})
 	}
 	return s.remoteClient

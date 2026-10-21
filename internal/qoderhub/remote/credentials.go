@@ -23,6 +23,10 @@ type Credential struct {
 	UserID          string
 	MachineID       string
 	AccessToken     string // OAuth-style token for the openapi host (quota, user info)
+	// RefreshToken is what a device grant hands back alongside the access
+	// token. It is stored, not yet spent: the access token is good for a month,
+	// so the refresh path is an optimisation for later, not a requirement.
+	RefreshToken    string
 	Source          string
 	TokenExpireTime int64
 }
@@ -57,6 +61,7 @@ type storedCredentialFile struct {
 		UserID          string `json:"user_id"`
 		MachineID       string `json:"machine_id"`
 		AccessToken     string `json:"access_token,omitempty"`
+		RefreshToken    string `json:"refresh_token,omitempty"`
 	} `json:"auth"`
 }
 
@@ -111,6 +116,7 @@ func SaveCredentialFile(cred Credential, path string) error {
 	stored.Auth.UserID = cred.UserID
 	stored.Auth.MachineID = cred.MachineID
 	stored.Auth.AccessToken = cred.AccessToken
+	stored.Auth.RefreshToken = cred.RefreshToken
 
 	data, err := json.MarshalIndent(stored, "", "  ")
 	if err != nil {
@@ -183,6 +189,7 @@ func loadCredentialFile(path string) (Credential, error) {
 		UserID:          stored.Auth.UserID,
 		MachineID:       stored.Auth.MachineID,
 		AccessToken:     stored.Auth.AccessToken,
+		RefreshToken:    stored.Auth.RefreshToken,
 		Source:          valueOr(stored.Source, path),
 		TokenExpireTime: parseExpire(stored.TokenExpireTime),
 	}

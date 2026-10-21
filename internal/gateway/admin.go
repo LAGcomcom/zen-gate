@@ -120,6 +120,8 @@ func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request, rest string
 		s.adminAgent(w, r, strings.TrimPrefix(rest, "agent/"))
 	case rest == "qoder/status" && r.Method == http.MethodGet:
 		s.adminQoderStatus(w, r)
+	case rest == "qoder/pool" && r.Method == http.MethodPost:
+		s.adminQoderPool(w, r)
 	case rest == "workbuddy/status" && r.Method == http.MethodGet:
 		s.adminWorkBuddyStatus(w, r)
 	case rest == "workbuddy/login/start" && r.Method == http.MethodPost:
@@ -129,7 +131,11 @@ func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request, rest string
 	case rest == "workbuddy/checkin" && r.Method == http.MethodPost:
 		s.adminWorkBuddyCheckin(w)
 	case rest == "workbuddy/logout" && r.Method == http.MethodPost:
-		s.adminWorkBuddyLogout(w)
+		s.adminWorkBuddyLogout(w, r)
+	case rest == "workbuddy/account/toggle" && r.Method == http.MethodPost:
+		s.adminWorkBuddyAccountToggle(w, r)
+	case rest == "workbuddy/account/primary" && r.Method == http.MethodPost:
+		s.adminWorkBuddyAccountPrimary(w, r)
 	case rest == "codearts/status" && r.Method == http.MethodGet:
 		s.adminCodeartsStatus(w, r)
 	case rest == "codearts/login/start" && r.Method == http.MethodPost:
@@ -310,6 +316,15 @@ func (s *Server) adminState(w http.ResponseWriter) {
 			}
 			caps := s.modalityCapsOf(mid)
 			row.Reasoning, row.ContextWindow, row.MaxOutput = caps.Reasoning, caps.ContextWindow, caps.MaxOutput
+			// The same rungs /v1/models advertises: the 模型 page must not show
+			// a ladder the model's own source never publishes (or hide one it
+			// does), or the two views disagree about what the picker offers.
+			if row.Reasoning {
+				row.Efforts, _ = effortLadder(lane.ModelInfo{
+					ID: mid, Reasoning: true,
+					ContextWindow: row.ContextWindow, MaxOutput: row.MaxOutput,
+				}, caps, cfg)
+			}
 			if caps.Known {
 				row.Vision, row.AudioInput, row.FileInput = caps.Vision, caps.Audio, caps.File
 				row.TagSource = caps.Source
@@ -361,7 +376,7 @@ func (s *Server) adminState(w http.ResponseWriter) {
 		"routingStrategy":         cfg.RoutingStrategy,
 		"laneFallbackToProviders": cfg.LaneFallbackToProviders,
 		"autoTagEnabled":          cfg.AutoTagEnabled,
-		"workBuddyEnabled":        cfg.WorkBuddy.Enabled,
+		"workBuddyEnabled":        cfg.WorkBuddyEnabled(),
 		"codeArtsEnabled":         cfg.CodeArts.Enabled,
 		"allowLan":                cfg.AllowLan,
 	}
@@ -600,7 +615,12 @@ func (s *Server) adminSettings(w http.ResponseWriter, r *http.Request) {
 		dirty["autoTagEnabled"] = true
 	}
 	if in.WorkBuddyEnabled != nil {
-		cfg.WorkBuddy.Enabled = *in.WorkBuddyEnabled
+		// The channel has no switch of its own: it serves when any account is
+		// enabled. The settings toggle therefore means "all accounts on/off",
+		// which is what a user expects from one switch on a pool card.
+		for i := range cfg.WorkBuddyAccounts {
+			cfg.WorkBuddyAccounts[i].Enabled = *in.WorkBuddyEnabled
+		}
 		changed = true
 		dirty["workBuddyEnabled"] = true
 	}
@@ -651,7 +671,7 @@ func (s *Server) adminSettings(w http.ResponseWriter, r *http.Request) {
 	if dirty["workBuddyEnabled"] {
 		// The published copy is the account of record; push it into the lane
 		// and let the catalog rebuild decide whether the roster appears.
-		s.Lane.SetWorkBuddyAccount(cfg.WorkBuddy)
+		s.Lane.SetWorkBuddyAccounts(cfg.WorkBuddyAccounts)
 		go s.Lane.RefreshCatalog(context.Background())
 	}
 	if dirty["codeArtsEnabled"] {
@@ -738,14 +758,18 @@ func (s *Server) commitSettings(next *store.Config, dirty map[string]bool) {
 		if dirty["autoTagEnabled"] {
 			c.AutoTagEnabled = next.AutoTagEnabled
 		}
-		// The WorkBuddy switch needs its own branch: the handler sets
-		// cfg.WorkBuddy.Enabled and marks the field dirty, so without this the
-		// dashboard answered {"changed":true} and the next boot read the old
-		// value back — a toggle that only looked like it worked. Only Enabled
-		// is copied: the persisted credential must never be replaced by the
-		// masked copy the settings snapshot carries.
+		// The WorkBuddy switch is a whole-pool flag: the handler sets Enabled on
+		// every account and marks the field dirty, so without this branch the
+		// dashboard answered {"changed":true} while the next boot read the old
+		// values back — a toggle that only looked like it worked. Only Enabled
+		// is copied: the persisted credentials must never be replaced by the
+		// masked copies the settings snapshot carries.
 		if dirty["workBuddyEnabled"] {
-			c.WorkBuddy.Enabled = next.WorkBuddy.Enabled
+			for i := range c.WorkBuddyAccounts {
+				if i < len(next.WorkBuddyAccounts) {
+					c.WorkBuddyAccounts[i].Enabled = next.WorkBuddyAccounts[i].Enabled
+				}
+			}
 		}
 		if dirty["codeArtsEnabled"] {
 			// Same discipline as WorkBuddy: only Enabled is copied, so the
@@ -1294,6 +1318,16 @@ func (s *Server) adminImport(w http.ResponseWriter, r *http.Request) {
 			incoming.Subscriptions[i].URL = ""
 		}
 	}
+	// Every WorkBuddy account, not just the first: a masked export must not
+	// land its placeholders as credentials on any row.
+	for i := range incoming.WorkBuddyAccounts {
+		if incoming.WorkBuddyAccounts[i].AccessToken == store.MaskedValue {
+			incoming.WorkBuddyAccounts[i].AccessToken = ""
+		}
+		if incoming.WorkBuddyAccounts[i].RefreshToken == store.MaskedValue {
+			incoming.WorkBuddyAccounts[i].RefreshToken = ""
+		}
+	}
 	port := s.Store.Config().Port
 	incoming.Port = port
 	if incoming.AgentKeys == nil {
@@ -1316,8 +1350,14 @@ func (s *Server) adminImport(w http.ResponseWriter, r *http.Request) {
 	}
 	s.Store.Replace(incoming)
 	_ = s.Store.Save()
+	// Push the imported pool into the lane now: without this the imported
+	// accounts only took effect on the next boot.
+	s.Lane.SetWorkBuddyAccounts(incoming.WorkBuddyAccounts)
+	wbBumpPoolGen()
+	go s.Lane.RefreshCatalog(context.Background())
 	if s.logger != nil {
-		s.logger.Infof("config imported; %d agent keys", len(incoming.AgentKeys))
+		s.logger.Infof("config imported; %d agent keys, %d WorkBuddy accounts",
+			len(incoming.AgentKeys), len(incoming.WorkBuddyAccounts))
 	}
 	writeJSON(w, 200, map[string]any{"ok": true})
 }
