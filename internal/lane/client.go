@@ -2,6 +2,7 @@ package lane
 
 import (
 	"context"
+	"strings"
 	"sync"
 	"time"
 )
@@ -523,6 +524,13 @@ func (l *Lane) SetHidden(ids []string) {
 func (l *Lane) probeTargets() []ModelInfo {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
+	return l.probeTargetsLocked()
+}
+
+// probeTargetsLocked is probeTargets for callers that already hold l.mu.
+// sync.RWMutex is not reentrant, so ProbeRound must not take the read lock
+// while it is still holding the write lock.
+func (l *Lane) probeTargetsLocked() []ModelInfo {
 	out := make([]ModelInfo, 0, len(l.catalog))
 	for _, m := range l.catalog {
 		if l.hidden[m.ID] {
@@ -546,7 +554,7 @@ func (l *Lane) ProbeRound(ctx context.Context, manual bool) {
 		return
 	}
 	l.probing.Set(true)
-	cat := l.probeTargets()
+	cat := l.probeTargetsLocked()
 	l.mu.Unlock()
 	defer l.probing.Set(false)
 
