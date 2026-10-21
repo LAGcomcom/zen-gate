@@ -101,6 +101,11 @@ type Lane struct {
 	ttft             TTFTSource
 	throttle         *ThrottleBook
 
+	// hidden is the set of model ids the user unchecked on the 模型 page.
+	// They stay servable if requested explicitly but are excluded from
+	// automatic probing and failover candidate selection.
+	hidden map[string]bool
+
 	// WorkBuddy 账号渠道 state. The pool lives in workbuddy_pool.go: wbMu
 	// guards the slot slice and the active pointer only, while each slot
 	// carries its own mutex — upstream rotates the refresh token on every
@@ -499,6 +504,35 @@ func fetchListingWithColdBootRetry[T any](ctx context.Context, cached int, fetch
 	return rows, err
 }
 
+// SetHidden replaces the lane's hidden-model set. Hidden models stay servable
+// when requested explicitly but are excluded from automatic probing and
+// failover candidate selection.
+func (l *Lane) SetHidden(ids []string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.hidden = make(map[string]bool, len(ids))
+	for _, id := range ids {
+		id = strings.TrimSpace(id)
+		if id != "" {
+			l.hidden[id] = true
+		}
+	}
+}
+
+// probeTargets returns the catalog minus the models the user hid.
+func (l *Lane) probeTargets() []ModelInfo {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	out := make([]ModelInfo, 0, len(l.catalog))
+	for _, m := range l.catalog {
+		if l.hidden[m.ID] {
+			continue
+		}
+		out = append(out, m)
+	}
+	return out
+}
+
 // ProbeRound re-probes availability once, with exponential backoff after an
 // all-429 round (the quota wall must not be probed away).
 func (l *Lane) ProbeRound(ctx context.Context, manual bool) {
@@ -512,8 +546,7 @@ func (l *Lane) ProbeRound(ctx context.Context, manual bool) {
 		return
 	}
 	l.probing.Set(true)
-	cat := make([]ModelInfo, len(l.catalog))
-	copy(cat, l.catalog)
+	cat := l.probeTargets()
 	l.mu.Unlock()
 	defer l.probing.Set(false)
 
@@ -916,6 +949,10 @@ func (l *Lane) nextCandidate(needs Needs, tried map[string]bool) string {
 	smart := l.smartRouting
 	strategy := l.strategy
 	ttftFn := l.ttft
+	hidden := make(map[string]bool, len(l.hidden))
+	for k := range l.hidden {
+		hidden[k] = true
+	}
 	l.mu.RUnlock()
 
 	best, bestKey := "", candidateKey{avail: 99}
@@ -923,7 +960,7 @@ func (l *Lane) nextCandidate(needs Needs, tried map[string]bool) string {
 		if m.SystemOne || m.Wire == "systemone" {
 			continue
 		}
-		if tried[m.ID] || l.throttle.Throttled(m.ID) {
+		if tried[m.ID] || l.throttle.Throttled(m.ID) || hidden[m.ID] {
 			continue
 		}
 		switch FreshState(av[m.ID]) {

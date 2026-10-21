@@ -116,6 +116,7 @@ func main() {
 	ln.SetDefaultMaxTokens(cfg.DefaultMaxTokens)
 	ln.SetExposeRegion(cfg.ExposeRegion)
 	ln.SetFailover(cfg.FailoverEnabled, cfg.FailoverMax)
+	ln.SetHidden(cfg.HiddenModels)
 	// Smart routing: master switch + failover ordering strategy + the runtime
 	// first-token sample ring that the latency strategy ranks by.
 	ln.SetSmartRouting(cfg.SmartRouting)

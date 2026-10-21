@@ -845,6 +845,9 @@ func (s *Server) adminModelVisibility(w http.ResponseWriter, r *http.Request) {
 			out = append(out, h)
 		}
 		s.Store.Mutate(func(cfg *store.Config) { cfg.HiddenModels = out })
+		if s.Lane != nil {
+			s.Lane.SetHidden(out)
+		}
 		if err := s.Store.Save(); err != nil {
 			writeJSON(w, 500, map[string]any{"ok": false, "error": err.Error()})
 			return
