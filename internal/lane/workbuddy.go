@@ -29,10 +29,10 @@ import (
 // with code 6004 and a reset wall clock, 14003 (or its text) for momentary
 // crowding, 402 when paid balance is gone, and 403 with codes 11140/11128 when
 // the WAF pattern-matches client fingerprints inside the system prompt — that
-// last one is retried once with the known marker strings rewritten. The three
-// free ids (hy4-preview-f, hy3, deepseek-v4.1-flash) are shipped as a static
-// catalog: the dynamic listing endpoint sits behind the WAF and flakes, and a
-// roster this small is cheaper to curate than to fetch.
+// last one is retried once with the known marker strings rewritten. The free
+// ids (hy4-preview-f, hy3, deepseek-v4.1-flash, step-5-preview) are shipped
+// as a static catalog: the dynamic listing endpoint sits behind the WAF and
+// flakes, and a roster this small is cheaper to curate than to fetch.
 //
 // Prompts may be logged by the upstream; the blurb says so in front of the
 // user, same discipline as the Kilo pool.
@@ -259,9 +259,16 @@ func wbTokenNearExpiry(acct WBAccount) bool {
 // deepseek-v4.1-flash runs thinking forced — hence CanDisableThinking false on
 // all three; the reasoning_effort field is still set per rung (see
 // wbApplyModelQuirks) but the off rung is never offered.
+//
+// step-5-preview joins the roster for as long as the official partnership
+// window makes it free (the app's own promotion badge: "Free now", 2026-10-12
+// through 2026-10-25, unlimited daily credits). After the window the model
+// bills the account's credits instead, so it leaves this roster rather than
+// quietly spending a balance the user never agreed to spend: the roster's
+// promise is that every row in it is free.
 func buildWorkBuddyCatalog() []ModelInfo {
 	blurb := "WorkBuddy 账号免费模型，24h 窗口限量；提示词可能被上游记录，别交机密内容"
-	return []ModelInfo{
+	roster := []ModelInfo{
 		{ID: "hy4-preview-f", Name: "Hy4 Preview", Blurb: blurb,
 			Wire: "chat", Channel: ChannelWorkBuddy,
 			Reasoning: true, ContextWindow: 1000000, MaxOutput: 64000, CanDisableThinking: false},
@@ -273,7 +280,23 @@ func buildWorkBuddyCatalog() []ModelInfo {
 			Vision: true, FileInput: true, Reasoning: true,
 			ContextWindow: 1000000, MaxOutput: 128000, CanDisableThinking: false},
 	}
+	if time.Now().Before(wbStep5FreeUntil) {
+		roster = append(roster, ModelInfo{
+			ID: "step-5-preview", Name: "Step-5 Preview",
+			Blurb: "WorkBuddy 账号免费模型（官方合作期 10-12 至 10-25 不限额度），24h 窗口限量；提示词可能被上游记录，别交机密内容",
+			Wire: "chat", Channel: ChannelWorkBuddy,
+			Vision: true, Reasoning: true,
+			ContextWindow: 1000000, MaxOutput: 64000, CanDisableThinking: false})
+	}
+	return roster
 }
+
+// wbStep5FreeUntil is the end of the official partnership window that made
+// step-5-preview free: the promotion the app itself publishes runs
+// 2026-10-12T00:00+08:00 through 2026-10-26T00:00+08:00, so the last free
+// day is the 25th.
+var wbStep5FreeUntil = time.Date(2026, 10, 26, 0, 0, 0, 0, time.FixedZone("CST", 8*3600))
+
 
 // workBuddyHeaders assembles the full desktop-client header set for one chat
 // request: the base web layer, the identity layer, and the uid-derived
@@ -385,22 +408,27 @@ func wbEnsureSystemFirst(body map[string]any) {
 // wbApplyModelQuirks layers this source's body extensions onto a chat body:
 // forced streaming with usage, and per-family thinking fields (deepseek wants
 // the thinking switch plus its own effort spelling; the hy family only
-// accepts "high").
+// accepts "high"; the step family is a plain OpenAI-compatible vendor whose
+// rung rides on reasoning_effort alone).
 func wbApplyModelQuirks(body map[string]any, model, effort string) {
 	body["stream_options"] = map[string]any{"include_usage": true}
 	switch {
 	case strings.HasPrefix(model, "deepseek"):
 		body["thinking"] = map[string]any{"type": "enabled"}
-		body["reasoning_effort"] = wbDeepseekEffort(effort)
+		body["reasoning_effort"] = wbOpenAIRungEffort(effort)
 	case strings.HasPrefix(model, "hy"):
 		body["reasoning_effort"] = "high"
+	case strings.HasPrefix(model, "step"):
+		body["reasoning_effort"] = wbOpenAIRungEffort(effort)
 	}
 }
 
-// wbDeepseekEffort maps the rung ladder onto the effort spelling deepseek
-// accepts. Thinking stays on for every rung (forced reasoning), the rung only
-// picks how hard it thinks.
-func wbDeepseekEffort(effort string) string {
+// wbOpenAIRungEffort maps the rung ladder onto the effort spelling the
+// OpenAI-compatible families accept: low / medium / high, the same three
+// levels the upstream's own listing publishes for them. Thinking stays on for
+// every rung (these models reason always), the rung only picks how hard it
+// thinks.
+func wbOpenAIRungEffort(effort string) string {
 	switch effort {
 	case "light":
 		return "low"

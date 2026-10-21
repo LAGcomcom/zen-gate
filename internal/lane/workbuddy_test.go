@@ -278,8 +278,9 @@ func TestRefreshCatalogGatesTheWorkBuddyBucketOnTheAccount(t *testing.T) {
 	t.Cleanup(func() { KiloBase = oldKilo })
 
 	l := NewLane()
-	// Logged in: the three free models enter the catalog even though every
-	// fetched source just failed.
+	// Logged in: the free models enter the catalog even though every
+	// fetched source just failed. The count is the roster's own — step-5-preview
+	// only rides along while its partnership window makes it free.
 	l.SetWorkBuddyAccount(wbAcct())
 	l.RefreshCatalog(context.Background())
 	cat, _, _ := l.Snapshot()
@@ -289,8 +290,8 @@ func TestRefreshCatalogGatesTheWorkBuddyBucketOnTheAccount(t *testing.T) {
 			n++
 		}
 	}
-	if n != 3 {
-		t.Fatalf("catalog holds %d WorkBuddy models, want 3", n)
+	if want := len(buildWorkBuddyCatalog()); n != want {
+		t.Fatalf("catalog holds %d WorkBuddy models, want %d", n, want)
 	}
 
 	// Logged out: the roster must leave the pickers — a subtract that is the
@@ -605,6 +606,67 @@ func TestWBApplyModelQuirks(t *testing.T) {
 	}
 	if _, ok := body["stream_options"].(map[string]any); !ok {
 		t.Fatal("usage-bearing streams are mandatory on this lane")
+	}
+}
+
+// The step family is a plain OpenAI-compatible vendor: its rung rides on
+// reasoning_effort alone, with the three levels the upstream's own listing
+// publishes (low / medium / high), and no deepseek-style thinking switch.
+func TestWBStepFamilyRungRidesOnEffortAlone(t *testing.T) {
+	for rung, want := range map[string]string{"light": "low", "balanced": "medium", "deep": "high"} {
+		body := map[string]any{}
+		wbApplyModelQuirks(body, "step-5-preview", rung)
+		if body["reasoning_effort"] != want {
+			t.Fatalf("step %s effort = %v, want %s", rung, body["reasoning_effort"], want)
+		}
+		if _, ok := body["thinking"]; ok {
+			t.Fatalf("step %s must not carry a thinking switch: %v", rung, body["thinking"])
+		}
+	}
+}
+
+// step-5-preview is free while the official partnership window runs, and it
+// joins the free roster with the capacities its own listing declares.
+func TestWBCatalogCarriesStep5PreviewWhileItIsFree(t *testing.T) {
+	old := wbStep5FreeUntil
+	wbStep5FreeUntil = time.Now().Add(24 * time.Hour)
+	t.Cleanup(func() { wbStep5FreeUntil = old })
+
+	var got *ModelInfo
+	for _, m := range buildWorkBuddyCatalog() {
+		if m.ID == "step-5-preview" {
+			row := m
+			got = &row
+		}
+	}
+	if got == nil {
+		t.Fatal("step-5-preview must be in the free roster while the partnership window runs")
+	}
+	if got.Channel != ChannelWorkBuddy {
+		t.Fatalf("channel = %q, want %q", got.Channel, ChannelWorkBuddy)
+	}
+	if !got.Vision || !got.Reasoning {
+		t.Fatalf("step-5-preview capabilities = vision %v reasoning %v, want both true", got.Vision, got.Reasoning)
+	}
+	if got.ContextWindow != 1000000 || got.MaxOutput != 64000 {
+		t.Fatalf("step-5-preview capacities = %d/%d, want 1000000/64000", got.ContextWindow, got.MaxOutput)
+	}
+	if got.CanDisableThinking {
+		t.Fatal("step-5-preview is an always-reasoning model: thinking cannot be switched off")
+	}
+}
+
+// After the window the model bills the account's credits, so the free roster
+// must drop it rather than quietly spend a balance the user never agreed to.
+func TestWBCatalogDropsStep5PreviewAfterTheFreeWindow(t *testing.T) {
+	old := wbStep5FreeUntil
+	wbStep5FreeUntil = time.Now().Add(-time.Hour)
+	t.Cleanup(func() { wbStep5FreeUntil = old })
+
+	for _, m := range buildWorkBuddyCatalog() {
+		if m.ID == "step-5-preview" {
+			t.Fatal("step-5-preview must leave the free roster once it bills credits")
+		}
 	}
 }
 
