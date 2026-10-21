@@ -443,7 +443,7 @@ func (s *Server) route(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	switch {
-	case path == "/health":
+	case path == "/health", path == "/healthz":
 		writeJSON(w, 200, map[string]any{"ok": true, "service": "zen-gate"})
 	case path == "/v1/models" && r.Method == http.MethodGet:
 		if !s.authorized(w, r) {
