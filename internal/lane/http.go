@@ -620,7 +620,7 @@ func readSSE(r io.Reader, onData func([]byte) error) (*Usage, error) {
 				if usage == nil {
 					usage = u
 				} else {
-					usage.Merge(u)
+					usage.Absorb(u)
 				}
 			}
 			if _, has := frame["error"]; has {
@@ -703,6 +703,8 @@ func toNum(v any) (float64, bool) {
 }
 
 // Merge folds one partial usage into another (fields present on either side).
+// Used for cross-request aggregation (e.g. truncated continuations where the
+// prompt is genuinely paid twice).
 func (u *Usage) Merge(o *Usage) {
 	if o == nil {
 		return
@@ -713,6 +715,36 @@ func (u *Usage) Merge(o *Usage) {
 	u.CacheRead += o.CacheRead
 	u.CacheWrite += o.CacheWrite
 	u.TotalTokens += o.TotalTokens
+}
+
+// Absorb folds one usage frame into the running total by taking the larger
+// value per field. Some upstreams repeat cumulative usage on every chunk
+// (prompt_tokens constant, completion_tokens increasing); summing those
+// inflates input by 30-1400x. Taking the max is correct for OpenAI single-
+// terminal-frame, Anthropic cumulative message_delta, and the repeated-
+// cumulative case alike.
+func (u *Usage) Absorb(o *Usage) {
+	if o == nil {
+		return
+	}
+	if o.Input > u.Input {
+		u.Input = o.Input
+	}
+	if o.Output > u.Output {
+		u.Output = o.Output
+	}
+	if o.Reasoning > u.Reasoning {
+		u.Reasoning = o.Reasoning
+	}
+	if o.CacheRead > u.CacheRead {
+		u.CacheRead = o.CacheRead
+	}
+	if o.CacheWrite > u.CacheWrite {
+		u.CacheWrite = o.CacheWrite
+	}
+	if o.TotalTokens > u.TotalTokens {
+		u.TotalTokens = o.TotalTokens
+	}
 }
 
 func jsonString(v any) string {

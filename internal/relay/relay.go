@@ -370,7 +370,7 @@ func postStreamed(ctx context.Context, p *store.Provider, session string, body m
 				if usage == nil {
 					usage = u
 				} else {
-					usage.Merge(u)
+					usage.Absorb(u)
 				}
 			}
 			if _, has := frame["error"]; has {
