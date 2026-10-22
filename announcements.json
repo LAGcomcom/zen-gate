@@ -1,6 +1,15 @@
 {
   "announcements": [
     {
+      "id": "2026-10-22-v1.8.5-release",
+      "title": "v1.8.5：上游内容门记下了 DeepSeek Harness 的默认开场白，现在不再被拒",
+      "body": "如果你用 DeepSeek Harness 走 WorkBuddy 渠道，最近大概率见过这个 400：\n\n上游内容门拦截了请求里的客户端特征文本，改写后仍被拒绝——换一个说法或去掉相关系统提示\n\n原因已经查清：上游的内容门把 DSH 每轮都会带上的固定开场白「You are an AI agent powered by DeepSeek Harness」记成了客户端特征，直接拒掉整条请求。网关原本的改写表里有 Claude Code、OpenCode 这类特征，但没有 DSH 这一句，于是第一次被拒、改写后第二次还是被拒。\n\n本版把这一句也加进改写表：改写后请求变成「You are an AI agent」，句子还在，产品名没了，上游放行。对照实测（同一网关、同一模型）：\n- 带 DSH 开场白 → 400（内容门拦截）\n- 把开场白改成中性说法 → 200 正常出字\n- 只留「DeepSeek Harness」四个词、或只留「You are an AI agent powered by X」→ 200 正常出字（说明上游匹配的是整句，不是单个词）\n\n注意：改写只作用于发给上游的那一份，调用方自己的请求体不会被改。其余渠道（Kilo 免费池、CodeArts、Qoder、自定义 API）不受影响。\n4. 升级方式：总览页「一键更新」或 Releases 页下载。",
+      "level": "info",
+      "start": "2026-10-22",
+      "end": "2026-10-29",
+      "url": "https://github.com/LAGcomcom/zen-gate/releases/latest"
+    },
+    {
       "id": "2026-10-21-v1.8.4-release",
       "title": "v1.8.4：WorkBuddy 免费名单新增 Step-5 Preview（官方合作期免费）",
       "body": "本次是小版本更新，给 WorkBuddy 渠道再加一个免费模型：\n1. 新增 Step-5 Preview：StepFun 的旗舰模型，走 WorkBuddy 账号渠道，官方合作期（2026-10-12 至 10-25）内不限额度，因此按免费模型收录——100 万上下文、6.4 万输出、支持图片、思考档位 low / medium / high（只能思考，不能关）。登录 WorkBuddy 账号后它会直接出现在「模型」页和所有 Agent 选择器里，与免费车道共用探测、限流自动切换和 24h 窗口限量；\n2. 合作期结束后它会按积分计费，所以到期后自动移出免费名单（而不是留在名单里悄悄扣你的余额）——名单里的每一行都保证是免费的；\n3. 其余渠道（Kilo 免费池、CodeArts、Qoder、自定义 API）不受影响。\n4. 升级方式：总览页「一键更新」或 Releases 页下载。",
