@@ -213,6 +213,44 @@ func TestPostWorkBuddyStreamedSanitizesFingerprintsOn403(t *testing.T) {
 	}
 }
 
+// DeepSeek Harness opens every turn with a fixed self-introduction, and the
+// upstream's WAF has learned it: the request is refused outright, and the
+// sanitize pass has to take that one apart as well or the client never gets
+// a turn at all.
+func TestPostWorkBuddyStreamedSanitizesDeepSeekHarnessOpener(t *testing.T) {
+	var calls atomic.Int64
+	var secondBody string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		if calls.Add(1) == 1 {
+			w.WriteHeader(403)
+			fmt.Fprint(w, `{"code":11140,"message":"Illegal API invocation from an unapproved channel"}`)
+			return
+		}
+		secondBody = string(body)
+		w.Header().Set("content-type", "text/event-stream")
+		fmt.Fprint(w, wbChatSSE(`{"choices":[{"delta":{},"finish_reason":"stop"}]}`))
+	}))
+	defer srv.Close()
+	old := WorkBuddyBase
+	WorkBuddyBase = srv.URL
+	t.Cleanup(func() { WorkBuddyBase = old })
+
+	body := map[string]any{"messages": []map[string]any{
+		{"role": "developer", "content": "You are an AI agent powered by DeepSeek Harness."},
+		{"role": "user", "content": "hi"},
+	}}
+	if _, err := PostWorkBuddyStreamed(context.Background(), body, wbAcct(), "", func([]byte) error { return nil }); err != nil {
+		t.Fatalf("the sanitized retry must clear the WAF hit: %v", err)
+	}
+	if strings.Contains(secondBody, "DeepSeek Harness") {
+		t.Errorf("the retry still carries the Harness opener: %q", secondBody)
+	}
+	if !strings.Contains(secondBody, "You are an AI agent") {
+		t.Errorf("the retry lost its meaning: %q", secondBody)
+	}
+}
+
 func TestWBPostRefreshesOn401AndRetries(t *testing.T) {
 	var chatCalls, refreshCalls atomic.Int64
 	var secondAuth atomic.Value

@@ -588,6 +588,11 @@ var wbFingerprintRewrites = []struct {
 	{regexp.MustCompile(`(?i)x-anthropic-billing-header[^\n"]*`), ""},
 	{regexp.MustCompile(`(?i)\bcc_[a-z_]+=[^\s"']*`), ""},
 	{regexp.MustCompile(`You are Claude Code`), "You are a CLI tool for Claude"},
+	// DeepSeek Harness opens every turn with this fixed self-introduction.
+	// The upstream's WAF has learned it and refuses the request outright
+	// (11140/11128 on the first try and on the sanitized retry alike), so the
+	// client never gets a turn at all. Keep the sentence, drop the product.
+	{regexp.MustCompile(`(?i)You are an AI agent powered by DeepSeek Harness`), "You are an AI agent"},
 	{regexp.MustCompile(`Main branch \(you will usually use this for PRs\)`), "Default branch (you will usually use this for PRs)"},
 	{regexp.MustCompile(`(?i)OhMyOpenCode`), "OpenCode"},
 	{regexp.MustCompile(`11128`), "11-128"},
