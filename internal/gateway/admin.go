@@ -1317,6 +1317,17 @@ func (s *Server) adminImport(w http.ResponseWriter, r *http.Request) {
 		if incoming.Providers[i].APIKey == store.MaskedValue {
 			incoming.Providers[i].APIKey = ""
 		}
+		// A masked multi-key export must not land its placeholders as keys;
+		// drop each masked entry and keep the real ones.
+		if len(incoming.Providers[i].APIKeys) > 0 {
+			kept := incoming.Providers[i].APIKeys[:0]
+			for _, k := range incoming.Providers[i].APIKeys {
+				if k != store.MaskedValue {
+					kept = append(kept, k)
+				}
+			}
+			incoming.Providers[i].APIKeys = kept
+		}
 	}
 	for i := range incoming.Subscriptions {
 		if incoming.Subscriptions[i].URL == store.MaskedValue {
