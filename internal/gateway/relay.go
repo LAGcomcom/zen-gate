@@ -416,9 +416,15 @@ func (s *Server) providerViews() []map[string]any {
 	for _, p := range s.Store.Config().Providers {
 		models := []string{}
 		models = append(models, p.Models...)
+		keys := p.EffectiveKeys()
+		masked := make([]string, 0, len(keys))
+		for _, k := range keys {
+			masked = append(masked, maskKey(k))
+		}
 		out = append(out, map[string]any{
 			"id": p.ID, "name": p.Name, "baseUrl": p.BaseURL,
 			"apiKeyMasked": maskKey(p.APIKey), "hasKey": p.APIKey != "",
+			"apiKeysMasked": masked, "keyCount": len(keys),
 			"protocol": p.Protocol, "enabled": p.Enabled,
 			"models": models, "note": p.Note,
 		})
@@ -432,11 +438,56 @@ type providerIn struct {
 	Name     string             `json:"name"`
 	BaseURL  string             `json:"baseUrl"`
 	APIKey   string             `json:"apiKey"`
+	APIKeys  []string           `json:"apiKeys"` // 多 key 负载均衡 (issue #104)
 	Protocol string             `json:"protocol"`
 	Enabled  *bool              `json:"enabled"`
 	Models   []string           `json:"models"`
 	Catalog  []lane.ListingMeta `json:"catalog"` // listing rows, numbers included
 	Save     *bool              `json:"save"`    // models fetch: false = probe only, don't persist
+}
+
+// mergeProviderKeys combines the legacy single APIKey with the new APIKeys
+// list into one deduplicated, non-empty slice (issue #104). List entries come
+// first, then the single field, so a migrated config keeps its new pool primary.
+func mergeProviderKeys(single string, list []string) []string {
+	seen := make(map[string]struct{})
+	out := make([]string, 0, len(list)+1)
+	add := func(k string) {
+		k = strings.TrimSpace(k)
+		if k == "" {
+			return
+		}
+		if _, dup := seen[k]; dup {
+			return
+		}
+		seen[k] = struct{}{}
+		out = append(out, k)
+	}
+	for _, k := range list {
+		add(k)
+	}
+	add(single)
+	return out
+}
+
+// providerFirstKey returns the first effective credential of a stored provider,
+// for paths that only need one key (catalog fetch) and must not load-balance.
+func providerFirstKey(p store.Provider) string {
+	ks := p.EffectiveKeys()
+	if len(ks) == 0 {
+		return ""
+	}
+	return ks[0]
+}
+
+// firstMergedKey returns the first credential of an incoming provider payload,
+// before it is persisted, for the save-preview catalog fetch.
+func firstMergedKey(in providerIn) string {
+	merged := mergeProviderKeys(in.APIKey, in.APIKeys)
+	if len(merged) == 0 {
+		return ""
+	}
+	return merged[0]
 }
 
 func catalogIDs(catalog []lane.ListingMeta) []string {
@@ -562,8 +613,19 @@ func (s *Server) adminProviderSave(w http.ResponseWriter, r *http.Request) {
 				}
 				p := &c.Providers[k]
 				p.Name, p.BaseURL, p.Protocol = in.Name, in.BaseURL, in.Protocol
-				if in.APIKey != "" {
-					p.APIKey = strings.TrimSpace(in.APIKey)
+				// issue #104: a provider may carry several keys. Merge the
+				// legacy single field with the new list, dedupe, and normalise
+				// to the backward-compatible shape (one key -> APIKey, many ->
+				// APIKeys) so old clients and configs still read it.
+				if in.APIKey != "" || len(in.APIKeys) > 0 {
+					merged := mergeProviderKeys(in.APIKey, in.APIKeys)
+					if len(merged) == 1 {
+						p.APIKey = merged[0]
+						p.APIKeys = nil
+					} else {
+						p.APIKeys = merged
+						p.APIKey = ""
+					}
 				}
 				p.Enabled = enabled
 				if in.Models != nil {
@@ -591,10 +653,15 @@ func (s *Server) adminProviderSave(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 200, map[string]any{"ok": true, "id": in.ID})
 		return
 	}
+	merged := mergeProviderKeys(in.APIKey, in.APIKeys)
 	p := store.Provider{
 		ID: s.mintProviderID(in.Name), Name: in.Name, BaseURL: in.BaseURL,
-		APIKey: strings.TrimSpace(in.APIKey), Protocol: in.Protocol,
-		Enabled: enabled, Models: cleanModels(in.Models),
+		Protocol: in.Protocol, Enabled: enabled, Models: cleanModels(in.Models),
+	}
+	if len(merged) == 1 {
+		p.APIKey = merged[0]
+	} else if len(merged) >= 2 {
+		p.APIKeys = merged
 	}
 	mergeCatalog(&p, in.Catalog)
 	s.Store.Mutate(func(c *store.Config) {
@@ -672,7 +739,7 @@ func (s *Server) adminProviderModels(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, 404, map[string]any{"ok": false, "error": "供应商不存在: " + in.ID})
 			return
 		}
-		catalog, err := relay.FetchModelCatalog(ctx, p.BaseURL, p.APIKey, p.Protocol)
+		catalog, err := relay.FetchModelCatalog(ctx, p.BaseURL, providerFirstKey(p), p.Protocol)
 		if err != nil {
 			writeJSON(w, 200, map[string]any{"ok": false, "error": err.Error()})
 			return
@@ -727,7 +794,7 @@ func (s *Server) adminProviderModels(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 400, map[string]any{"ok": false, "error": err.Error()})
 		return
 	}
-	catalog, err := relay.FetchModelCatalog(ctx, in.BaseURL, strings.TrimSpace(in.APIKey), in.Protocol)
+	catalog, err := relay.FetchModelCatalog(ctx, in.BaseURL, firstMergedKey(in), in.Protocol)
 	if err != nil {
 		writeJSON(w, 200, map[string]any{"ok": false, "error": err.Error()})
 		return

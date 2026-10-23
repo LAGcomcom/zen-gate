@@ -78,11 +78,41 @@ type Provider struct {
 	Name      string               `json:"name"`
 	BaseURL   string               `json:"baseUrl"`
 	APIKey    string               `json:"apiKey,omitempty"`
+	// APIKeys lets one provider carry several credentials so the gateway can
+	// spread requests across them (issue #104). It is the preferred field;
+	// APIKey stays for backward compatibility with single-key configs and
+	// clients. EffectiveKeys merges both, deduplicated and non-empty.
+	APIKeys   []string             `json:"apiKeys,omitempty"`
 	Protocol  string               `json:"protocol"`
 	Enabled   bool                 `json:"enabled"`
 	Models    []string             `json:"models,omitempty"`
 	ModelMeta map[string]ModelMeta `json:"modelMeta,omitempty"` // by upstream model id
 	Note      string               `json:"note,omitempty"`      // preset provenance / key-application hint
+}
+
+// EffectiveKeys returns the deduplicated, non-empty credentials for this
+// provider, merging the legacy single APIKey with the APIKeys list. List
+// entries come first so a migrated config keeps its new pool as primary; the
+// single APIKey trails only when it is not already in the list.
+func (p *Provider) EffectiveKeys() []string {
+	seen := make(map[string]struct{})
+	out := make([]string, 0, len(p.APIKeys)+1)
+	add := func(k string) {
+		k = strings.TrimSpace(k)
+		if k == "" {
+			return
+		}
+		if _, dup := seen[k]; dup {
+			return
+		}
+		seen[k] = struct{}{}
+		out = append(out, k)
+	}
+	for _, k := range p.APIKeys {
+		add(k)
+	}
+	add(p.APIKey)
+	return out
 }
 
 // Subscription is one user-added proxy subscription URL: the fetched body is
@@ -666,6 +696,13 @@ func (s *Store) Masked() *Config {
 		if cfg.Providers[i].APIKey != "" {
 			cfg.Providers[i].APIKey = MaskedValue
 		}
+		if len(cfg.Providers[i].APIKeys) > 0 {
+			masked := make([]string, len(cfg.Providers[i].APIKeys))
+			for j := range masked {
+				masked[j] = MaskedValue
+			}
+			cfg.Providers[i].APIKeys = masked
+		}
 	}
 	for i := range cfg.Subscriptions {
 		if cfg.Subscriptions[i].URL != "" {
@@ -729,11 +766,12 @@ func (c *Config) clone() *Config {
 	if c.CodeArts.DPoPKey != nil {
 		next.CodeArts.DPoPKey = cloneMap(c.CodeArts.DPoPKey)
 	}
-	if c.Providers != nil {
+		if c.Providers != nil {
 		next.Providers = make([]Provider, len(c.Providers))
 		for i, p := range c.Providers {
 			p.Models = cloneSlice(p.Models)
 			p.ModelMeta = cloneMeta(p.ModelMeta)
+			p.APIKeys = cloneSlice(p.APIKeys)
 			next.Providers[i] = p
 		}
 	}
