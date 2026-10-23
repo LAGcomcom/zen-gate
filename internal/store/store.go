@@ -191,6 +191,11 @@ type Config struct {
 	// they stay servable if requested explicitly but disappear from agent
 	// pickers and /v1/models.
 	HiddenModels []string `json:"hiddenModels,omitempty"`
+	// HiddenAuto lists ids hidden by the 隐藏全部不可用 batch button. Unlike a
+	// manual uncheck, an auto-hide is an opinion about a moment: the moment a
+	// probe verdict says available again, the entry self-clears (see
+	// gateway/probe hidden sync). A manual uncheck never expires.
+	HiddenAuto []string `json:"hiddenAuto,omitempty"`
 	// WorkBuddyAccounts is the WorkBuddy 账号渠道 pool: one entry per login,
 	// in the order the user wants them tried. The lane writes rotated token
 	// pairs and activity dates back through its persist callback; Masked()
@@ -761,6 +766,7 @@ func (c *Config) clone() *Config {
 	next.LogCategories = cloneBoolMap(c.LogCategories)
 	next.SeenAnnouncements = cloneSlice(c.SeenAnnouncements)
 	next.HiddenModels = cloneSlice(c.HiddenModels)
+	next.HiddenAuto = cloneSlice(c.HiddenAuto)
 	next.Subscriptions = cloneSlice(c.Subscriptions)
 	next.WorkBuddyAccounts = cloneSlice(c.WorkBuddyAccounts)
 	// The CodeArts credential carries a DPoP key map; aliasing it across

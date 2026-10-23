@@ -279,7 +279,13 @@ func (s *Server) adminState(w http.ResponseWriter) {
 			Reasoning:     m.Reasoning,
 			SystemOne:     m.SystemOne,
 			ContextWindow: m.ContextWindow, MaxOutput: m.MaxOutput,
-			Efforts: lane.EffortsFor(m, 0, cfg.DefaultMaxTokens, cfg.DefaultEffort),
+			// The same ladder /v1/models advertises (vendor-declared rungs win
+			// over the generic light/balanced/deep): the card and the picker
+			// must never disagree about what the model offers.
+			Efforts: func() []lane.LevelBudget {
+				lv, _ := effortLadder(m, s.modalityCapsOf(m.ID), cfg)
+				return lv
+			}(),
 			Hidden:  hidden[m.ID],
 		}
 		row.Channel = m.Channel
@@ -831,6 +837,10 @@ func (s *Server) adminModelVisibility(w http.ResponseWriter, r *http.Request) {
 		ID     string   `json:"id"`
 		IDs    []string `json:"ids"`
 		Hidden bool     `json:"hidden"`
+		// Auto marks a batch opinion about the CURRENT probe verdict (the
+		// 隐藏全部不可用 button) rather than a standing user choice: these
+		// entries self-clear when a later probe says available.
+		Auto bool `json:"auto"`
 	}
 	if err := decodeBody(r, &in); err != nil {
 		writeJSON(w, 400, map[string]any{"ok": false, "error": err.Error()})
@@ -849,6 +859,16 @@ func (s *Server) adminModelVisibility(w http.ResponseWriter, r *http.Request) {
 	for _, h := range cur.HiddenModels {
 		set[h] = true
 	}
+	// The auto list only participates when the request is itself an auto-hide
+	// or an unhide: a manual uncheck clears both (a standing opinion beats a
+	// batch one), a manual hide never lands in the expiring list.
+	manual := set
+	if in.Auto {
+		set = map[string]bool{}
+		for _, h := range cur.HiddenAuto {
+			set[h] = true
+		}
+	}
 	changed := 0
 	for _, id := range ids {
 		id = strings.TrimSpace(id)
@@ -865,14 +885,60 @@ func (s *Server) adminModelVisibility(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if changed > 0 {
-		out := make([]string, 0, len(set))
-		for _, h := range cur.HiddenModels {
-			if set[h] {
+		if in.Auto {
+			out := make([]string, 0, len(set))
+			for h := range set {
 				out = append(out, h)
-				delete(set, h)
+			}
+			s.Store.Mutate(func(cfg *store.Config) { cfg.HiddenAuto = out })
+			if err := s.Store.Save(); err != nil {
+				writeJSON(w, 500, map[string]any{"ok": false, "error": err.Error()})
+				return
+			}
+			s.Lane.SetHidden(s.hiddenSet())
+			if s.logger != nil {
+				s.logger.Infof("模型可见性(自动): 隐藏 %v", ids)
+			}
+			if s.registry != nil {
+				time.AfterFunc(1500*time.Millisecond, func() {
+					if s.modelsSync != nil {
+						s.modelsSync()
+					}
+					if n := s.registry.ResyncEnabled(); n > 0 && s.logger != nil {
+						s.logger.Infof("可见性变化，已重新注入 %d 个已开启 Agent 的配置", n)
+					}
+				})
+			}
+			writeJSON(w, 200, map[string]any{"ok": true, "changed": changed})
+			return
+		}
+		if !in.Hidden {
+			// A manual uncheck is a standing opinion: also clear any batch
+			// auto-hide on the same ids so the model actually reappears.
+			dead := map[string]bool{}
+			for _, id := range ids {
+				id = strings.TrimSpace(id)
+				if id != "" {
+					dead[id] = true
+				}
+			}
+			keptAuto := cur.HiddenAuto[:0]
+			for _, h := range cur.HiddenAuto {
+				if dead[h] {
+					continue
+				}
+				keptAuto = append(keptAuto, h)
+			}
+			s.Store.Mutate(func(cfg *store.Config) { cfg.HiddenAuto = keptAuto })
+		}
+		out := make([]string, 0, len(manual))
+		for _, h := range cur.HiddenModels {
+			if manual[h] {
+				out = append(out, h)
+				delete(manual, h)
 			}
 		}
-		for h := range set {
+		for h := range manual {
 			out = append(out, h)
 		}
 		s.Store.Mutate(func(cfg *store.Config) { cfg.HiddenModels = out })

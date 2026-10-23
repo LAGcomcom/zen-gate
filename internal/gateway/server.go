@@ -544,7 +544,10 @@ func bearerOf(r *http.Request) string {
 func (s *Server) handleListModels(w http.ResponseWriter, r *http.Request) {
 	cfg := s.Store.Config()
 	data := []map[string]any{}
-	for _, m := range s.VisibleModels() {
+	vis := s.VisibleModels()
+	// The same ordering the Codex catalog uses: two pickers, one truth.
+	s.sortPickerEntries(vis)
+	for _, m := range vis {
 		data = append(data, s.modelCard(m, m.ID, "zen-gate", cfg, true))
 	}
 	hidden := s.hiddenSet()
@@ -562,6 +565,35 @@ func (s *Server) handleListModels(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	writeJSON(w, 200, map[string]any{"object": "list", "data": data})
+}
+
+// sortPickerEntries orders a model picker the same way everywhere — /v1/models
+// and the Codex catalog must not disagree: free models before providers,
+// region-gated rows sink (with a CN egress they only ever answer RegionError),
+// then by probe state — available first, unknown middle, throttled last.
+func (s *Server) sortPickerEntries(models []lane.ModelInfo) {
+	_, av, _ := s.Lane.Snapshot()
+	priority := map[string]int{
+		lane.StateAvailable: 100,
+		lane.StateUnknown:   50,
+		lane.StateThrottled: 20,
+	}
+	stateOf := func(id string) string {
+		if p, ok := av[id]; ok {
+			return lane.FreshState(p)
+		}
+		return lane.StateUnknown
+	}
+	sort.SliceStable(models, func(i, j int) bool {
+		pi, pj := isProviderID(models[i].ID), isProviderID(models[j].ID)
+		if pi != pj {
+			return pj // free models first
+		}
+		if models[i].RegionSensitive != models[j].RegionSensitive {
+			return models[j].RegionSensitive
+		}
+		return priority[stateOf(models[i].ID)] > priority[stateOf(models[j].ID)]
+	})
 }
 
 // modelCard is one /v1/models entry: the OpenAI fields plus the capability
@@ -654,13 +686,49 @@ func (s *Server) modelCard(floor lane.ModelInfo, id, ownedBy string, cfg *store.
 	return entry
 }
 
-// hiddenSet snapshots the user-hidden model ids.
+// hiddenSet snapshots the user-hidden model ids: manual unchecks plus the
+// auto-hidden ones the batch button wrote. A manual uncheck is a standing
+// opinion; an auto-hide expires the moment a probe says available again.
 func (s *Server) hiddenSet() map[string]bool {
+	cfg := s.Store.Config()
 	set := map[string]bool{}
-	for _, h := range s.Store.Config().HiddenModels {
+	for _, h := range cfg.HiddenModels {
+		set[h] = true
+	}
+	for _, h := range cfg.HiddenAuto {
 		set[h] = true
 	}
 	return set
+}
+
+// ClearAutoHidden drops ids from the auto-hidden list once the lane reports
+// them available again: the "this model is dead" opinion that hid it has been
+// factually overturned, and a hidden-forever verdict would keep a healthy
+// model out of every picker until the next restart.
+func (s *Server) ClearAutoHidden(ids ...string) {
+	if len(ids) == 0 {
+		return
+	}
+	dead := map[string]bool{}
+	for _, id := range ids {
+		dead[id] = true
+	}
+	changed := false
+	s.Store.Mutate(func(cfg *store.Config) {
+		kept := cfg.HiddenAuto[:0]
+		for _, h := range cfg.HiddenAuto {
+			if dead[h] {
+				changed = true
+				continue
+			}
+			kept = append(kept, h)
+		}
+		cfg.HiddenAuto = kept
+	})
+	if changed {
+		_ = s.Store.Save()
+		s.Lane.SetHidden(s.hiddenSet())
+	}
 }
 
 // isProviderID reports whether a gateway id names a custom-provider model.
@@ -773,17 +841,8 @@ func (s *Server) handleCodexCatalog(w http.ResponseWriter, r *http.Request) {
 	// the picker's live refresh instead of being drowned back out.
 	models := s.InjectableModels()
 	_, av, _ := s.Lane.Snapshot()
-	customName := map[string]string{}
-	providers := s.Store.Config().Providers
-	for i := range providers {
-		p := &providers[i]
-		if !p.Enabled {
-			continue
-		}
-		for _, m := range p.Models {
-			customName[p.ID+"/"+m] = p.Name
-		}
-	}
+	// The same state vocabulary the shared picker sort uses; the per-entry
+	// descriptions below still read it.
 	priority := map[string]int{
 		lane.StateAvailable: 100,
 		lane.StateUnknown:   50,
@@ -795,21 +854,22 @@ func (s *Server) handleCodexCatalog(w http.ResponseWriter, r *http.Request) {
 		}
 		return lane.StateUnknown
 	}
+	customName := map[string]string{}
+	providers := s.Store.Config().Providers
+	for i := range providers {
+		p := &providers[i]
+		if !p.Enabled {
+			continue
+		}
+		for _, m := range p.Models {
+			customName[p.ID+"/"+m] = p.Name
+		}
+	}
 	// Provider models sink below every free model — including region-gated
 	// ones. The free lane is the product; a provider is the user's own
 	// addition, and its entries carry no live state to rank by anyway.
-	sort.SliceStable(models, func(i, j int) bool {
-		pi, pj := isProviderID(models[i].ID), isProviderID(models[j].ID)
-		if pi != pj {
-			return pj // free models first
-		}
-		// Region-gated models sink to the bottom of the free half: with a CN
-		// egress they only ever answer with a RegionError.
-		if models[i].RegionSensitive != models[j].RegionSensitive {
-			return models[j].RegionSensitive
-		}
-		return priority[stateOf(models[i].ID)] > priority[stateOf(models[j].ID)]
-	})
+	// The comparator itself is shared with /v1/models: two pickers, one truth.
+	s.sortPickerEntries(models)
 	levels := []map[string]any{
 		{"effort": "low", "description": "轻量，最省额度"},
 		{"effort": "medium", "description": "均衡"},

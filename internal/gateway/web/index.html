@@ -348,12 +348,41 @@
   .mcard:hover { border-color:var(--accent); transform:translateY(-1px); box-shadow:0 12px 28px rgba(0,0,0,.16); }
   .mcard.st-available { border-top-color:var(--ok); }
   .mcard.st-custom { border-top-color:color-mix(in srgb,var(--accent) 45%,var(--hairline)); }
-  .mcard.st-throttled, .mcard.st-region-blocked { border-top-color:var(--warn); }
+  /* 四种异常状态四种颜色：限流(琥珀) / 地区门(紫) / 不可用(红) / 未探测(虚线灰) */
+  .mcard.st-throttled { border-top-color:#f59e0b; }
+  .mcard.st-region-blocked { border-top-color:#a78bfa; }
   .mcard.st-unavailable { border-top-color:var(--bad); }
+  .mcard.st-unknown { border-top-style:dashed; border-top-color:var(--hairline); }
   .mcard.st-hidden { border-top-color:var(--hairline); }
   .mcard.dimmed { opacity:.5; }
   .pill.custom { background:var(--accent-soft); color:var(--accent); }
+  .pill.region { background:rgba(167,139,250,.16); color:#c4b5fd; }
   .pill.hidsync { background:var(--panel-2); color:var(--ink-mute); }
+  /* 渠道徽章：每个渠道一个固定色相，跟分组节头一致 */
+  .chan-badge { flex:none; font-size:10px; font-weight:600; letter-spacing:.4px; padding:2px 7px; border-radius:6px; }
+  .chan-zen { background:rgba(56,189,248,.14); color:#7dd3fc; }
+  .chan-kilo { background:rgba(45,212,191,.13); color:#5eead4; }
+  .chan-workbuddy { background:rgba(244,114,182,.13); color:#f9a8d4; }
+  .chan-codearts { background:rgba(251,146,60,.14); color:#fdba74; }
+  .chan-custom { background:var(--accent-soft); color:var(--accent); }
+  /* 按渠道分组的节头（Magpie 的 profile 卡思路：一组一个主开关） */
+  .msec { display:flex; align-items:center; gap:10px; margin:16px 2px 8px; }
+  .msec .chname { font-size:13px; font-weight:600; color:var(--ink); }
+  .msec .chdesc { font-size:11.5px; color:var(--ink-mute); }
+  .msec .chcount { font-size:11.5px; color:var(--ink-mute); margin-left:auto; }
+  .msec .dot { width:8px; height:8px; border-radius:50%; flex:none; }
+  .msec .dot.on { background:var(--ok); } .msec .dot.off { background:var(--bad); }
+  .msec .ghost { padding:3px 10px; font-size:11.5px; }
+  /* 筛选 chips 行 */
+  .mfilters { display:flex; align-items:center; gap:6px; flex-wrap:wrap; margin-top:10px; }
+  .mchip { font-size:11.5px; padding:3px 10px; border-radius:999px; border:1px solid var(--hairline);
+    background:var(--panel-2); color:var(--ink-mute); cursor:pointer; user-select:none; }
+  .mchip:hover { border-color:var(--accent); color:var(--ink); }
+  .mchip.on { background:var(--accent-soft); border-color:var(--accent); color:var(--accent); font-weight:500; }
+  .msearch { font-size:12px; padding:4px 10px; border-radius:8px; border:1px solid var(--hairline);
+    background:var(--panel-2); color:var(--ink); width:180px; outline:none; }
+  .msearch:focus { border-color:var(--accent); }
+  .mempty { padding:26px 0 8px; text-align:center; color:var(--ink-mute); font-size:12.5px; }
   .mcard .mhead { display:flex; align-items:center; gap:8px; min-width:0; }
   .mcard .mhead .mname { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
   .mcard .mfoot { display:flex; justify-content:space-between; align-items:center; gap:8px;
@@ -373,7 +402,8 @@
   .mcard .meff .eff { font-size:11px; color:var(--ink-dim); background:var(--panel-2); border-radius:5px; padding:1px 7px; }
   .mcard .meff .eff b { color:var(--accent); font-family:var(--mono); }
   .mcard .mblurb { font-size:11.5px; line-height:1.55; color:var(--ink-dim); background:var(--panel-2);
-    border-left:2px solid var(--accent); border-radius:0 5px 5px 0; padding:5px 8px; margin-top:7px; }
+    border-left:2px solid var(--accent); border-radius:0 5px 5px 0; padding:5px 8px; margin-top:7px;
+    display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden; }
   /* 收进页首的那一条重复说明：一行细条，不抢卡片里的规格 */
   .mnote { display:flex; gap:10px; align-items:flex-start; padding:9px 13px; margin:0 0 12px;
     border:1px solid var(--hairline-soft); border-left:2px solid var(--accent); border-radius:8px;
@@ -763,7 +793,7 @@ async function withButtonBusy(button, busyLabel, task){
     button.textContent = original;
   }
 }
-function statePill(st){ const c={available:"ok",unknown:"unknown","region-blocked":"warn",throttled:"warn",unavailable:"bad",custom:"custom"}[st]||"unknown";
+function statePill(st){ const c={available:"ok",unknown:"unknown","region-blocked":"region",throttled:"warn",unavailable:"bad",custom:"custom"}[st]||"unknown";
   const t={available:"可用",unknown:"未探测","region-blocked":"地区受限",throttled:"暂时限流·可重试",unavailable:"不可用",custom:"自定义"}[st]||st;
   return `<span class="pill ${c}">${t}</span>`; }
 const cssVar = (n,f) => (getComputedStyle(document.documentElement).getPropertyValue(n)||f).trim();
@@ -1267,8 +1297,52 @@ async function openTaskDrawer(model){
 }
 document.addEventListener("keydown", e=>{ if(e.key === "Escape" && drawerFor) closeTaskDrawer(); });
 
+// 模型页筛选状态：渠道 × 状态 × 搜索词，纯前端过滤，跨刷新保留。
+let mf = { q: "", chan: "", state: "" };
+
+const CHAN_META = {
+  zen:       { name: "OpenCode Zen 车道", desc: "免登录免费池，按出口 IP 限额" },
+  kilo:      { name: "Kilo 免费池",       desc: "免凭证，在列即可用" },
+  workbuddy: { name: "WorkBuddy 账号渠道", desc: "账号登录后出模型" },
+  codearts:  { name: "CodeArts 账号渠道",  desc: "华为账号，含轮换福利模型" },
+  custom:    { name: "自定义 API",        desc: "你自己的供应商" },
+};
+
+// 上游原始错误 → 一句人话；原文收进 title，不再把 JSON 印在卡片上。
+function humanDetail(m){
+  const d = String(m.detail || "");
+  if(!d) return "";
+  const map = [
+    [/FreeUsageLimitError/i, "本出口的免费额度已用完，等限额窗口刷新或换出口再试"],
+    [/FreeTierError/i,       "上游客户端门拦下了这次请求"],
+    [/RegionError/i,         "当前出口被上游地区门拦下（海外出口可用）"],
+    [/实时限额（等待恢复）/,   "暂时限流，等它恢复或手动重测"],
+    [/在列（免费池名单即判定）/, ""],
+  ];
+  for(const [re, msg] of map) if(re.test(d)) return msg;
+  if(d.trim().startsWith("{")){
+    const t = (d.match(/"type"\s*:\s*"([A-Za-z]+(?:Error|Exception))"/) || [])[1];
+    return t ? "上游返回 " + t + " · 悬浮看原文" : "上游返回了非预期响应 · 悬浮看原文";
+  }
+  return d.length > 90 ? d.slice(0, 90) + "…" : d;
+}
+function rawDetailTitle(m){
+  const d = String(m.detail || "");
+  return d.trim().startsWith("{") ? d : "";
+}
+const chanBadge = (ch) => `<span class="chan-badge chan-${esc(ch)}">${esc(ch)}</span>`;
+
 function renderModels(s){
   const el = $("#page-models");
+  // 任何输入没变就不重画：任务运行时的 1s 轮询只动数字的话，整页 innerHTML
+  // 重建会闪、还会丢滚动位置。
+  const sig = JSON.stringify([mf, s.probingModel, s.channels,
+    s.models.map(m => [m.id, m.state, m.hidden, m.ttftMs, m.ttftMedMs,
+      m.quotaUsed, m.quotaEstimate, m.throttledAt, m.task && m.task.status, m.detail])]);
+  if(el.dataset.sig === sig) return;
+  const scrollY = window.scrollY;
+  el.dataset.sig = sig;
+
   const sorted = [...s.models].sort((a,b)=>{
     if(a.id===s.probingModel) return -1;
     if(b.id===s.probingModel) return 1;
@@ -1287,36 +1361,71 @@ function renderModels(s){
   const sharedBlurbSet = new Set(sharedBlurbs);
   const sharedNote = sharedBlurbs.length
     ? `<div class="mnote"><span class="k">说明</span><div>${sharedBlurbs.map(b=>`<div>${esc(b)}</div>`).join("")}</div></div>` : "";
-  el.innerHTML = `<h2 class="pt">模型 <span class="sub">可用性由本机网络出口实测（每 ${s.settings.probeIntervalMinutes} 分钟）· ${avail}/${laneModels.length} 个免费车道可用${customModels.length?` · 自定义 ${customProbed}/${customModels.length} 已实测`:""} · 勾选「选用」才会出现在 Agent 的模型选择器里${hiddenCount?` · 已隐藏 ${hiddenCount} 个`:""}</span></h2>
-    <div class="card"><div class="row">
+
+  // ---- 筛选 chips ----
+  const chanChip = (id, label) =>
+    `<span class="mchip ${mf.chan===id?"on":""}" data-chan="${id}">${label}</span>`;
+  const stateChip = (id, label) =>
+    `<span class="mchip ${mf.state===id?"on":""}" data-state="${id}">${label}</span>`;
+  const toolbar = `<div class="card"><div class="row">
       <button class="ghost" id="reprobe">重新探测可用性</button>
-      <button class="ghost" id="hide-dead" title="把探测为不可用 / 地区受限的模型全部从 Agent 选择器隐藏（随时可单卡恢复）">隐藏全部不可用</button>
+      <button class="ghost" id="hide-dead" title="把探测为不可用 / 地区受限的模型从 Agent 选择器隐藏；这是对当前探测结果的意见，探到可用会自动解除">隐藏全部不可用</button>
       <button class="ghost" id="show-all" title="恢复全部隐藏的模型${hiddenCount?`（当前 ${hiddenCount} 个）`:""}">恢复全部显示</button>
       <span class="muted" style="font-size:12px" id="eg-line"></span>
-      <span class="muted" style="font-size:12px;margin-left:12px" id="ch-line"></span>
-       <span class="muted" style="font-size:12px">思考档位：默认档在「设置」里改；支持思考的模型在 Agent 里是一个模型 + 一个档位选择器。</span>
-    </div></div>
-    ${sharedNote}
-    <div class="mgrid" id="mgrid"></div>`;
-  el.querySelector("#eg-line").textContent = s.egress&&s.egress.ip ? `出口: ${s.egress.ip} (${s.egress.country||"?"})` : "出口未知";
+      <span class="muted" style="font-size:12px;margin-left:12px">思考档位：默认档在「设置」里改；支持思考的模型在 Agent 里是一个模型 + 一个档位选择器。</span>
+    </div>
+    <div class="mfilters">
+      <input class="msearch" id="m-q" placeholder="搜索模型 id / 名称…" value="${esc(mf.q)}">
+      <span class="mchip ${mf.chan===""?"on":""}" data-chan="">全部渠道</span>
+      ${["zen","kilo","workbuddy","codearts","custom"].map(c=>chanChip(c, c==="custom"?"自定义":c)).join("")}
+      <span style="width:8px"></span>
+      <span class="mchip ${mf.state===""?"on":""}" data-state="">全部状态</span>
+      ${stateChip("available","可用")}${stateChip("throttled","限流")}${stateChip("region-blocked","地区受限")}${stateChip("unavailable","不可用")}${stateChip("unknown","未测")}
+    </div></div>`;
+
+  // ---- 按渠道分组（一组一节，节头带主开关；Magpie 的 profile 卡思路） ----
   const chans = s.channels || [];
-  const chEl = el.querySelector("#ch-line");
-  if(chEl) chEl.textContent = "渠道: " + (chans.length ? chans.map(c=>`${c.id}${c.enabled?"":"(已停用)"}·${c.models}`).join("  ") : "—");
-  el.querySelector("#reprobe").onclick = async ()=>{ toast("探测中，稍后刷新…"); await api("/reprobe", {}); setTimeout(refresh, 4000); };
-  el.querySelector("#hide-dead").onclick = async ()=>{
-    const ids = s.models.filter(m=>!m.hidden && (m.state==="unavailable"||m.state==="region-blocked")).map(m=>m.id);
-    if(!ids.length){ toast("没有探测为不可用的模型"); return; }
-    const j = await api("/models/visibility", { ids, hidden: true });
-    if(j){ toast("已隐藏 " + ids.length + " 个模型，正在重新注入已开启的 Agent"); refresh(); }
-  };
-  el.querySelector("#show-all").onclick = async ()=>{
-    const ids = s.models.filter(m=>m.hidden).map(m=>m.id);
-    if(!ids.length){ toast("没有隐藏中的模型"); return; }
-    const j = await api("/models/visibility", { ids, hidden: false });
-    if(j){ toast("已全部恢复显示"); refresh(); }
-  };
-  const grid = el.querySelector("#mgrid");
-  for(const m of sorted){
+  const chanState = Object.fromEntries(chans.map(c=>[c.id, c]));
+  const match = (m) =>
+    (!mf.q || (m.id+" "+(m.name||"")).toLowerCase().includes(mf.q.toLowerCase()))
+    && (!mf.chan || mf.chan === (m.custom ? "custom" : (m.channel || "zen")))
+    && (!mf.state || m.state === mf.state);
+
+  const groups = [];
+  for(const ch of ["zen","kilo","workbuddy","codearts"]){
+    const meta = CHAN_META[ch];
+    const st = chanState[ch] || { enabled: true, models: 0 };
+    groups.push({ ch, meta, enabled: st.enabled, roster: st.models,
+      cards: sorted.filter(m => !m.custom && (m.channel||"zen") === ch) });
+  }
+  groups.push({ ch: "custom", meta: CHAN_META.custom, enabled: true, roster: customModels.length,
+    cards: sorted.filter(m => m.custom) });
+
+  let body = "";
+  let anyShown = false;
+  for(const g of groups){
+    const shown = g.cards.filter(match);
+    const disabled = !g.enabled;
+    if(!shown.length && (mf.q || mf.state || (mf.chan && mf.chan !== g.ch))) continue;
+    anyShown = anyShown || shown.length > 0;
+    body += `<div class="msec">
+      <span class="dot ${disabled?"off":"on"}"></span>
+      <span class="chname">${esc(g.meta.name)}</span>
+      ${g.ch!=="custom"?chanBadge(g.ch):`<span class="chan-badge chan-custom">custom</span>`}
+      <span class="chdesc">${esc(g.meta.desc)}</span>
+      ${disabled?`<span class="pill region">已停用</span><button class="ghost" data-en="${g.ch}">启用</button>`
+                :`<span class="chcount">${shown.length}/${g.cards.length} 个模型${g.ch!=="custom"&&g.roster?` · 渠道文件名单 ${g.roster}`:""}</span>`}
+    </div>`;
+    if(disabled && !shown.length){
+      body += `<div class="mempty">渠道已停用 —— 它的 ${g.roster||0} 个模型已从所有 Agent 选择器撤下；点「启用」按渠道文件里的名单恢复。</div>`;
+      continue;
+    }
+    if(!shown.length){
+      body += `<div class="mempty">${mf.q?"没有匹配的模型":"这个渠道当前没有可展示的模型"}</div>`;
+      continue;
+    }
+    body += `<div class="mgrid">`;
+    for(const m of shown){
     const card = document.createElement("div");
     card.className = "mcard st-" + (m.hidden ? "hidden" : (m.state||"unknown")) + (m.hidden ? " dimmed" : "");
     const eff = (m.efforts||[]).map(e=>`<span class="eff">${esc(e.zh || e.name || e.id)} <b>${(e.tokens/1024|0)}K</b>${e.isDefault?" ★":""}</span>`).join("");
@@ -1345,28 +1454,30 @@ function renderModels(s){
       }
       if(parts.length) quotaRow = `<div class="mquota">${parts.join("")}</div>`;
     }
-    // 渠道归属：两个渠道可能带同一个模型 id，卡片必须写明它由谁服务。
-    const chanTag = m.custom ? "" : `<span class="tag chan" title="这个 id 由哪个免费渠道服务" style="opacity:.8">${esc(m.channel||"zen")}</span>`;
+    // 标签只留影响决策的：判断模型、模态；能力来源只标「实测」（规则/未标注是噪音）。
     const tags = (m.systemOne?'<span class="pill warn">判断模型</span>':"")
-      + chanTag
       + (m.vision?'<span class="tag">视觉</span>':"")
       + (m.audioInput?'<span class="tag">音频</span>':"")
       + (m.fileInput?'<span class="tag">文件</span>':"")
-      + (m.reasoning?'<span class="tag">思考</span>':(m.custom||m.tagSource==="未标注"?"":'<span class="tag">纯文本</span>'))
-      + (m.tagSource?`<span class="tag" title="能力标签来源：${esc(m.tagSource)}" style="opacity:.65">${esc(m.tagSource)}</span>`:"");
+      + (m.reasoning?'<span class="tag">思考</span>':"")
+      + (m.tagSource==="实测"?'<span class="tag" style="opacity:.65">实测</span>':"");
+    // 关键数字一行：没有实测样本就不占位，两个首字合并成一条。
+    const meta = [];
+    if(m.ttftMs || m.ttftMedMs){
+      meta.push(`<span title="最近一次探测的首字${m.ttftCount?`；近 ${m.ttftCount} 次样本中位数 ${m.ttftMedMs?(m.ttftMedMs/1000).toFixed(1)+"s":"—"}，路由按它排序`:""}">首字 <b>${m.ttftMs?(m.ttftMs/1000).toFixed(1)+"s":"—"}</b>${m.ttftMedMs?` <span style="opacity:.7">· 典型 ${(m.ttftMedMs/1000).toFixed(1)}s</span>`:""}</span>`);
+    }
+    if(m.contextWindow) meta.push(`<span title="${m.custom?"供应商 /v1/models 声明或 AI 标注给出":"本地能力表"}">上下文 <b>${fmtCap(m.contextWindow)}</b></span>`);
+    if(m.maxOutput) meta.push(`<span title="${m.custom?"供应商声明的完成上限（只写回显上下文窗口的供应商不显示）":"本地能力表"}">输出 <b>${fmtCap(m.maxOutput)}</b></span>`);
+    const hd = humanDetail(m);
+    const rawTitle = rawDetailTitle(m);
     card.innerHTML = `
       <div class="mhead"><span class="mname" title="${esc(m.name)}">${esc(m.name)}</span>${pill}</div>
-      <div class="mid">${esc(m.id)}</div>
+      <div class="mid">${chanBadge(m.custom?"custom":(m.channel||"zen"))} <span style="opacity:.85">${esc(m.id)}</span></div>
       ${m.blurb && !sharedBlurbSet.has(m.blurb)?`<div class="mblurb" title="${esc(m.blurb)}">${esc(m.blurb)}</div>`:""}
-      <div class="mmeta">
-        <span title="最近一次探测的首字；排队中的请求会把这一个值拉高">首字 <b>${m.ttftMs?(m.ttftMs/1000).toFixed(1)+"s":"—"}</b></span>
-        <span title="${m.ttftCount?("近 "+m.ttftCount+" 次样本的中位数，路由按它排序"):"暂无探测样本"}">典型首字 <b>${m.ttftMedMs?(m.ttftMedMs/1000).toFixed(1)+"s":"—"}</b></span>
-        ${m.contextWindow?`<span title="${m.custom?"供应商 /v1/models 声明或 AI 标注给出":"本地能力表"}">上下文 <b>${fmtCap(m.contextWindow)}</b></span>`:""}
-        ${m.maxOutput?`<span title="${m.custom?"供应商声明的完成上限（只写回显上下文窗口的供应商不显示）":"本地能力表"}">输出 <b>${fmtCap(m.maxOutput)}</b></span>`:""}
-      </div>
+      ${meta.length?`<div class="mmeta">${meta.join("")}</div>`:""}
       ${(tags||eff)?`<div class="mtags">${tags}${eff?`<span class="meff">${eff}</span>`:""}</div>`:""}
       ${quotaRow}
-      ${m.detail?`<div class="mdetail">${esc(m.detail).slice(0,120)}</div>`:""}
+      ${hd?`<div class="mdetail" ${rawTitle?`title="${esc(rawTitle)}"`:""}>${esc(hd)}</div>`:""}
       ${taskBand(m)}
       <div class="mfoot">
         <label class="vispick" title="勾选 = 出现在 Agent 的模型选择器里；取消勾选只是不对外展示，直接点名调用仍可用">
@@ -1374,10 +1485,50 @@ function renderModels(s){
         <button class="ghost mtest" data-m="${esc(m.id)}" ${probeBusy?"disabled":""} title="${m.custom?"向该供应商发一个最小请求，实测可用性与首字延迟":"单独探测这个模型的可用性"}">${probeBusy?"测试中…":"测试"}</button>
         ${m.custom?`<button class="ghost capstest" data-m="${esc(m.id)}" ${capsBusy?"disabled":""} title="用你的 Key 发最小图像 / 音频 / PDF 请求，实测该模型真正支持的输入模态（结果最优先）">${capsBusy?"实测中…":"能力实测"}</button>`:""}
       </div>`;
-    grid.appendChild(card);
+    body += card.outerHTML;
+    }
+    body += `</div>`;
   }
+  if(!anyShown && (mf.q || mf.chan || mf.state)){
+    body += `<div class="mempty">没有匹配的模型 —— 换个筛选条件试试</div>`;
+  }
+  el.innerHTML = `<h2 class="pt">模型 <span class="sub">可用性由本机网络出口实测（每 ${s.settings.probeIntervalMinutes} 分钟）· ${avail}/${laneModels.length} 个免费车道可用${customModels.length?` · 自定义 ${customProbed}/${customModels.length} 已实测`:""} · 勾选「选用」才会出现在 Agent 的模型选择器里${hiddenCount?` · 已隐藏 ${hiddenCount} 个`:""}</span></h2>
+    ${toolbar}
+    ${sharedNote}
+    ${body}`;
+
+  el.querySelector("#eg-line").textContent = s.egress&&s.egress.ip ? `出口: ${s.egress.ip} (${s.egress.country||"?"})` : "出口未知";
+  el.querySelector("#reprobe").onclick = async ()=>{ toast("探测中，稍后刷新…"); await api("/reprobe", {}); setTimeout(refresh, 4000); };
+  el.querySelector("#hide-dead").onclick = async ()=>{
+    const ids = s.models.filter(m=>!m.hidden && (m.state==="unavailable"||m.state==="region-blocked")).map(m=>m.id);
+    if(!ids.length){ toast("没有探测为不可用的模型"); return; }
+    const j = await api("/models/visibility", { ids, hidden: true, auto: true });
+    if(j){ toast("已隐藏 " + ids.length + " 个（探到可用会自动恢复）；正在重新注入已开启的 Agent"); refresh(); }
+  };
+  el.querySelector("#show-all").onclick = async ()=>{
+    const ids = s.models.filter(m=>m.hidden).map(m=>m.id);
+    if(!ids.length){ toast("没有隐藏中的模型"); return; }
+    const j = await api("/models/visibility", { ids, hidden: false });
+    if(j){ toast("已全部恢复显示"); refresh(); }
+  };
+  // 筛选 chips 与搜索框
+  el.querySelectorAll(".mchip[data-chan]").forEach(ch=>{
+    ch.onclick = ()=>{ mf.chan = ch.dataset.chan; renderModels(s); };
+  });
+  el.querySelectorAll(".mchip[data-state]").forEach(ch=>{
+    ch.onclick = ()=>{ mf.state = ch.dataset.state; renderModels(s); };
+  });
+  const qEl = el.querySelector("#m-q");
+  qEl.oninput = ()=>{ mf.q = qEl.value; renderModels(s); const n = el.querySelector("#m-q"); n.focus(); n.setSelectionRange(n.value.length, n.value.length); };
+  // 渠道主开关（节头）
+  el.querySelectorAll("[data-en]").forEach(b=>{
+    b.onclick = async ()=>{
+      const j = await api("/channel/"+b.dataset.en+"/enabled", { enabled: true });
+      if(j){ toast("渠道已启用，模型按渠道文件名单恢复"); refresh(); }
+    };
+  });
   // 处理器必须在卡片入 DOM 之后再绑定：#mgrid 在渲染前是空的，绑早了等于没绑。
-  grid.querySelectorAll(".mtest").forEach(b=>{
+  el.querySelectorAll(".mtest").forEach(b=>{
     b.onclick = async ()=>{
       b.disabled = true; b.textContent = "测试中…";
       const j = await api("/probe/"+encodeURIComponent(b.dataset.m), {});
@@ -1386,14 +1537,14 @@ function renderModels(s){
         const r = j.result;
         const sec = r.ttftMs ? "首字 " + (r.ttftMs/1000).toFixed(1) + "s" : "";
         if(r.state==="available") toast("✓ 可用" + (sec?" · "+sec:""));
-        else if(r.state==="throttled") toast("暂时限流·可重试 —— 请求在生成前就被拒绝，没有首字数据" + (r.detail?" · "+String(r.detail).slice(0,80):""));
+        else if(r.state==="throttled") toast("暂时限流·可重试 —— 请求在生成前就被拒绝，没有首字数据" + (r.detail?" · "+humanDetail({detail:r.detail}):""));
         else if(r.state==="unavailable") toast("不可用 · " + (r.detail||""));
         else toast("探测未成功 · " + (r.detail||"上游无响应，稍后再试"));
       }
       refresh();
     };
   });
-  grid.querySelectorAll(".capstest").forEach(b=>{
+  el.querySelectorAll(".capstest").forEach(b=>{
     b.onclick = async ()=>{
       b.disabled = true; b.textContent = "实测中…";
       const j = await api("/tags/probe", { id: b.dataset.m });
@@ -1403,10 +1554,10 @@ function renderModels(s){
       refresh();
     };
   });
-  grid.querySelectorAll(".tdet").forEach(b=>{
+  el.querySelectorAll(".tdet").forEach(b=>{
     b.onclick = ()=>openTaskDrawer(b.dataset.m);
   });
-  grid.querySelectorAll("[data-vis]").forEach(cb=>{
+  el.querySelectorAll("[data-vis]").forEach(cb=>{
     cb.onchange = async ()=>{
       const j = await api("/models/visibility", { id: cb.dataset.vis, hidden: !cb.checked });
       if(j) toast(cb.checked ? "已选用，正在重新注入已开启的 Agent" : "已隐藏，正在重新注入已开启的 Agent");
@@ -1417,6 +1568,7 @@ function renderModels(s){
   startTaskTicker();
   clearTimeout(fastPollTimer);
   if(sorted.some(m=>m.task && m.task.status === "running")) fastPollTimer = setTimeout(refresh, 1000);
+  window.scrollTo(0, scrollY);
 }
 
 /* ---- 自定义 API ---- */

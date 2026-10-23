@@ -189,6 +189,14 @@ func main() {
 	}
 	reg := agents.NewRegistry(st)
 	gw := gateway.New(ln, st)
+	// A probe verdict that says available overturns the batch auto-hide that
+	// was standing on the model: healthy models re-enter the pickers without
+	// a restart.
+	ln.OnProbeResult = func(r lane.ProbeResult) {
+		if r.State == lane.StateAvailable {
+			gw.ClearAutoHidden(r.Model)
+		}
+	}
 	gw.SetAgents(reg)
 	// Warm the Detect cache: the first /state after boot would otherwise shell
 	// out to every installed agent (~3s on Windows) and the dashboard would

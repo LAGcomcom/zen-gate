@@ -1058,14 +1058,29 @@ func (l *Lane) attemptModel(ctx context.Context, req Request, model, effort stri
 	base := model
 
 	l.mu.RLock()
+	defMax := l.defaultMaxTokens
 	var entry *ModelInfo
+	// One id can be published by two channel buckets at once (a rotation
+	// mirrors ids across the Zen lane and the Kilo pool). Catalog order says
+	// nothing about which copy is healthy right now, and the caller asked for
+	// this MODEL — the channel is an implementation detail — so among same-id
+	// copies prefer one whose probe verdict is usable, then the fastest first
+	// token, then catalog order.
+	var matches []*ModelInfo
 	for i := range l.catalog {
 		if l.catalog[i].ID == base {
-			entry = &l.catalog[i]
-			break
+			matches = append(matches, &l.catalog[i])
 		}
 	}
-	defMax := l.defaultMaxTokens
+	if len(matches) > 0 {
+		entry = matches[0]
+		best := channelCopyRank(entry, l.availability)
+		for _, m := range matches[1:] {
+			if r := channelCopyRank(m, l.availability); r < best {
+				entry, best = m, r
+			}
+		}
+	}
 	l.mu.RUnlock()
 	if entry == nil {
 		entry = &ModelInfo{ID: base, Name: base, Wire: WireFor(base),
@@ -1452,4 +1467,31 @@ func asUpstream(err error) *UpstreamError {
 		return ue
 	}
 	return &UpstreamError{Code: CodeTransport, Message: err.Error()}
+}
+
+// channelCopyRank orders same-id copies across channels: a usable probe
+// verdict first (available beats unknown beats throttled beats region-blocked
+// beats unavailable), then the faster first token, then catalog order.
+func channelCopyRank(m *ModelInfo, av map[string]ProbeResult) int {
+	score := 0
+	switch FreshState(av[m.ID]) {
+	case StateAvailable:
+		score = 0
+	case StateUnknown, "":
+		score = 1
+	case StateThrottled:
+		score = 2
+	case StateRegionBlock:
+		score = 3
+	default:
+		score = 4
+	}
+		ttft := av[m.ID].TTFTMs
+	if ttft < 0 {
+		ttft = 999_999_999
+	}
+	if ttft > 999_999_999 {
+		ttft = 999_999_999
+	}
+	return score*1_000_000_000 + int(ttft)
 }
