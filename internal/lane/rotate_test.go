@@ -226,8 +226,8 @@ func TestRotateUsesANodeForRemoteTargets(t *testing.T) {
 // live, the same request must be re-offered to other exits before the model is
 // declared throttled.
 func TestQuotaUnderRotationTriesOtherEgressesFirst(t *testing.T) {
-	oldKilo := KiloBase
-	t.Cleanup(func() { KiloBase = oldKilo; SetRotator(nil) })
+	old := UpstreamBase
+	t.Cleanup(func() { UpstreamBase = old; SetRotator(nil) })
 
 	var mu sync.Mutex
 	hits := 0
@@ -246,14 +246,15 @@ func TestQuotaUnderRotationTriesOtherEgressesFirst(t *testing.T) {
 		fmt.Fprint(w, "data: [DONE]\n\n")
 	}))
 	defer up.Close()
-	KiloBase = up.URL
+	UpstreamBase = up.URL
 
 	SetRotator(&countRotator{forward: true})
-	l := kiloLane("kilo-auto/free")
+	l := NewLane()
+	l.catalog = []ModelInfo{{ID: "space-bunny-free", Wire: "chat"}}
 	l.SetFailover(false, 1)
 
 	var got []string
-	_, uerr := l.Complete(context.Background(), Request{Model: "kilo-auto/free"}, func(c Chunk) {
+	_, uerr := l.Complete(context.Background(), Request{Model: "space-bunny-free"}, func(c Chunk) {
 		if c.Kind == ChunkTextDelta {
 			got = append(got, c.Delta)
 		}
@@ -270,7 +271,7 @@ func TestQuotaUnderRotationTriesOtherEgressesFirst(t *testing.T) {
 	if n != 3 {
 		t.Errorf("attempts = %d, want 3 (two 429 exits, then success)", n)
 	}
-	if l.RecoveryETA("kilo-auto/free") != 0 {
+	if l.RecoveryETA("space-bunny-free") != 0 {
 		t.Errorf("a model that answered successfully got marked throttled")
 	}
 }

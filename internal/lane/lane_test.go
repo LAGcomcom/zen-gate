@@ -1,12 +1,71 @@
 package lane
 
 import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 )
 
+// --- identity minting -------------------------------------------------------
+
+func TestMintSessionIdShape(t *testing.T) {
+	re := regexp.MustCompile(`^ses_[0-9a-f]{12}[0-9A-Za-z]{14}$`)
+	for i := 0; i < 50; i++ {
+		id := MintSessionId(0)
+		if !re.MatchString(id) {
+			t.Fatalf("minted session id does not match gateway shape: %s", id)
+		}
+	}
+}
+
+// The free-tier gate decodes the 12-hex prefix back to a timestamp and 403s
+// any session whose prefix is not mint-shaped and fresh (#47). The mint
+// keeps the LOW 48 bits of ~(ms<<12|seq), so decoding recovers only the low
+// 36 bits of the minted millisecond stamp — which is exactly what the gate
+// can check against wall clock.
+func decodePrefixMsBits(id string) (uint64, bool) {
+	raw, err := hex.DecodeString(strings.TrimPrefix(id, "ses_")[:12])
+	if err != nil {
+		return 0, false
+	}
+	var v uint64
+	for _, b := range raw {
+		v = v<<8 | uint64(b)
+	}
+	return (^v & 0xFFFFFFFFFFFF) >> 12, true
+}
+
+func TestConversationSessionPrefixDecodesToFreshTimestamp(t *testing.T) {
+	for _, seed := range []string{"conv-1", "conv-2"} {
+		id := SessionForConversation(seed)
+		got, ok := decodePrefixMsBits(id)
+		if !ok {
+			t.Fatalf("prefix of %s is not decodable hex", id)
+		}
+		now := uint64(time.Now().UnixMilli()) & 0xFFFFFFFFF
+		if diff := int64(now) - int64(got); diff < -60_000 || diff > 60_000 {
+			t.Fatalf("prefix of %s decodes to %d, now-bits %d — the gate wants a fresh mint", id, got, now)
+		}
+	}
+	// A digest-shaped id (old behaviour) decodes to a nonsense stamp —
+	// exactly why the gate rejected it. This pins the contrast.
+	sum := sha256.Sum256([]byte("zen-gate\x00old-style"))
+	old := "ses_" + hex.EncodeToString(sum[:6]) + base62From(sum[6:20])
+	if got, ok := decodePrefixMsBits(old); ok {
+		now := uint64(time.Now().UnixMilli()) & 0xFFFFFFFFF
+		if diff := int64(now) - int64(got); diff > -60_000 && diff < 60_000 {
+			t.Fatalf("digest-style id %s decodes fresh (%d) — test lost its meaning", old, got)
+		}
+	}
+}
 
 func TestSessionForConversationStable(t *testing.T) {
 	a := SessionForConversation("conv-123")
@@ -20,6 +79,16 @@ func TestSessionForConversationStable(t *testing.T) {
 	}
 	if SessionForConversation("") == SessionForConversation("other") {
 		t.Fatal("empty seed must not collide with a named seed")
+	}
+}
+
+func TestRequestIdForStablePerTurn(t *testing.T) {
+	s := SessionForConversation("c1")
+	if RequestIdFor(s, "turn-1") != RequestIdFor(s, "turn-1") {
+		t.Fatal("retries of one turn must share a request id")
+	}
+	if RequestIdFor(s, "turn-1") == RequestIdFor(s, "turn-2") {
+		t.Fatal("different turns must differ")
 	}
 }
 
@@ -171,6 +240,103 @@ func chatSSE(frames ...string) string {
 	}
 	b.WriteString("data: [DONE]\n\n")
 	return b.String()
+}
+
+func TestPostStreamedChatHappyPath(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("authorization") != "Bearer public" {
+			t.Errorf("missing pooled credential")
+		}
+		if r.Header.Get("x-opencode-session") == "" || r.Header.Get("user-agent") != ClientUA {
+			t.Errorf("fingerprint headers missing")
+		}
+		w.Header().Set("content-type", "text/event-stream")
+		fmt.Fprint(w, chatSSE(
+			`{"choices":[{"delta":{"role":"assistant","content":"he"}}]}`,
+			`{"choices":[{"delta":{"content":"llo"}}]}`,
+			`{"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":2}}`,
+		))
+	}))
+	defer srv.Close()
+	old := UpstreamBase
+	UpstreamBase = srv.URL
+	defer func() { UpstreamBase = old }()
+
+	var chunks [][]byte
+	usage, err := PostStreamed(context.Background(), "/zen/v1/chat/completions",
+		map[string]any{"model": "m", "stream": true}, "ses_x", "msg_y", func(p []byte) error {
+			chunks = append(chunks, p)
+			return nil
+		})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(chunks) != 3 {
+		t.Fatalf("expected 3 frames, got %d", len(chunks))
+	}
+	if usage == nil || usage.Input != 10 || usage.Output != 2 {
+		t.Fatalf("usage not captured: %+v", usage)
+	}
+}
+
+func TestPostStreamedSSPUnderJSONHeader(t *testing.T) {
+	// Issue #6: the gateway answers with SSE frames under application/json.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("content-type", "application/json")
+		fmt.Fprint(w, chatSSE(`{"choices":[{"delta":{"content":"ok"}}]}`, `{"choices":[{"delta":{},"finish_reason":"stop"}]}`))
+	}))
+	defer srv.Close()
+	old := UpstreamBase
+	UpstreamBase = srv.URL
+	defer func() { UpstreamBase = old }()
+
+	var texts []string
+	dec := NewDecoder("chat", nil, func(c Chunk) {
+		if c.Kind == ChunkTextDelta {
+			texts = append(texts, c.Delta)
+		}
+	})
+	_, err := PostStreamed(context.Background(), "/zen/v1/chat/completions",
+		map[string]any{"model": "m", "stream": true}, "s", "r", func(p []byte) error {
+			dec.Decode(p)
+			return nil
+		})
+	if err != nil {
+		t.Fatal(err)
+	}
+	res := dec.Finish()
+	if strings.Join(texts, "") != "ok" || res.Finish != FinishStop {
+		t.Fatalf("SSE-under-JSON not decoded: %v finish=%s", texts, res.Finish)
+	}
+}
+
+func TestPostStreamedCutStreamDetected(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("content-type", "text/event-stream")
+		fmt.Fprint(w, "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"deep thought\"}}]}\n\n")
+		// no finish frame, no [DONE], connection just ends
+	}))
+	defer srv.Close()
+	old := UpstreamBase
+	UpstreamBase = srv.URL
+	defer func() { UpstreamBase = old }()
+
+	dec := NewDecoder("chat", nil, func(Chunk) {})
+	_, err := PostStreamed(context.Background(), "/zen/v1/chat/completions",
+		map[string]any{"model": "m", "stream": true}, "s", "r", func(p []byte) error {
+			dec.Decode(p)
+			return nil
+		})
+	if err != nil {
+		t.Fatal(err)
+	}
+	res := dec.Finish()
+	if res.SawFinish {
+		t.Fatal("a stream closed without a finish frame must not be marked finished")
+	}
+	if !res.SawReasoning || res.ReasoningText != "deep thought" {
+		t.Fatalf("checkpoint reasoning lost: %+v", res)
+	}
 }
 
 func TestClassifyFailures(t *testing.T) {
@@ -364,6 +530,26 @@ func TestBudgetForExplicitRequestWins(t *testing.T) {
 }
 
 // --- catalog -----------------------------------------------------------------
+
+func TestBuildCatalogFiltersAndDedupes(t *testing.T) {
+	ids := []string{
+		"mimo-v2.6-flash-free", "mimo-v2.6-flash-free", "gpt-5.5",
+		"muse-spark-1.3-contributor-free", "union-alpha",
+	}
+	cat := BuildCatalog(ids)
+	if len(cat) != 3 {
+		t.Fatalf("want 3 free models, got %d: %+v", len(cat), cat)
+	}
+	if cat[0].ID != "mimo-v2.6-flash-free" || cat[0].CanDisableThinking {
+		t.Fatalf("mimo v2.6 capability wrong: %+v", cat[0])
+	}
+	if cat[1].Wire != "responses" {
+		t.Fatalf("muse-spark must ride the responses wire, got %s", cat[1].Wire)
+	}
+	if cat[2].Wire != "messages" {
+		t.Fatalf("union-alpha must ride the messages wire, got %s", cat[2].Wire)
+	}
+}
 
 func TestParseListingShapes(t *testing.T) {
 	a := ParseListing(map[string]any{"data": []any{map[string]any{"id": "x-free"}, "y-free"}})
@@ -604,5 +790,34 @@ func TestFreeTierErrorIsALaneVerdictNotACredentialOne(t *testing.T) {
 	}
 	if switchableFailure(auth) {
 		t.Fatal("a real credential error must not fail over")
+	}
+}
+
+func TestUpstreamBodyPreservesAngleBracketsAndV2KeyOrder(t *testing.T) {
+	body := map[string]any{
+		"model":    "deepseek-v4.1-flash-free",
+		"stream":   true,
+		"messages": []any{map[string]any{"role": "user", "content": "hi"}},
+	}
+	ApplyFingerprint(body, "chat")
+	raw, err := marshalUpstreamBody(body)
+	if err != nil {
+		t.Fatalf("marshalUpstreamBody: %v", err)
+	}
+	s := string(raw)
+	if strings.Contains(s, `\u003c`) || strings.Contains(s, `\u003e`) {
+		t.Fatalf("chat body HTML-escaped angle brackets in tool description: %s", s)
+	}
+	if !strings.Contains(s, `<line>: <content>`) {
+		t.Fatalf("chat body missing literal <line>: <content> in read tool description")
+	}
+	if !strings.Contains(s, `"strict":false`) {
+		t.Fatalf("chat tools must carry strict:false on v2 lane")
+	}
+	if !strings.Contains(s, `"max_completion_tokens":32000`) {
+		t.Fatalf("chat body must default max_completion_tokens to 32000 on v2 lane")
+	}
+	if !strings.HasPrefix(s, `{"model":`) {
+		t.Fatalf("chat body must start with model key, got: %s", s[:32])
 	}
 }

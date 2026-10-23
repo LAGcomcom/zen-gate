@@ -2,6 +2,7 @@ package lane
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -11,6 +12,7 @@ import (
 	"net/http"
 	neturl "net/url"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -224,9 +226,9 @@ const streamIdleTimeout = 90 * time.Second
 func SetProxy(mode, url string) {
 	t := &http.Transport{
 		ResponseHeaderTimeout: responseHeaderTimeout,
-		// Pool tuning. Every upstream request funnels to a handful of hosts
-		// (the Kilo pool, WorkBuddy, CodeArts), yet the global upstream
-		// semaphore allows up to maxConcurrentUpstream (6) in flight at once. Go's
+		// Pool tuning. Every upstream request funnels to a single host
+		// (opencode.ai / the model API), yet the global upstream semaphore
+		// allows up to maxConcurrentUpstream (6) in flight at once. Go's
 		// default MaxIdleConnsPerHost is 2, so four of those six must re-do the
 		// TCP+TLS handshake on every turn: handshake flapping, ECONNRESET, and
 		// first-byte latency spikes -- the more agents you run at once, the
@@ -365,6 +367,157 @@ func classifyConnErr(err error) string {
 	return CodeTransport
 }
 
+// marshalNoEscape encodes v as JSON without HTML-escaping '<', '>' and '&'.
+// Go's encoding/json escapes them as \u003c, \u003e and \u0026 by default,
+// whereas Bun's JSON.stringify (used by the real OpenCode CLI) never does.
+// Because realReadDesc contains "<line>: <content>", plain json.Marshal
+// produces a body that differs byte-for-byte from a genuine client.
+func marshalNoEscape(v any) ([]byte, error) {
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(v); err != nil {
+		return nil, err
+	}
+	return bytes.TrimSuffix(buf.Bytes(), []byte("\n")), nil
+}
+
+var v2ChatKeyOrder = []string{"model", "messages", "tools", "stream", "stream_options", "max_completion_tokens"}
+
+// marshalUpstreamBody encodes a request body without HTML escaping and keeps
+// the OpenCode 2.x client's top-level key order on chat payloads.
+func marshalUpstreamBody(body map[string]any) ([]byte, error) {
+	if _, isChat := body["messages"]; !isChat {
+		return marshalNoEscape(body)
+	}
+	var buf bytes.Buffer
+	buf.WriteByte('{')
+	written := make(map[string]bool, len(body))
+	first := true
+	writeKey := func(k string) error {
+		val, ok := body[k]
+		if !ok {
+			return nil
+		}
+		kb, err := marshalNoEscape(k)
+		if err != nil {
+			return err
+		}
+		vb, err := marshalNoEscape(val)
+		if err != nil {
+			return err
+		}
+		if !first {
+			buf.WriteByte(',')
+		}
+		first = false
+		buf.Write(kb)
+		buf.WriteByte(':')
+		buf.Write(vb)
+		written[k] = true
+		return nil
+	}
+	for _, k := range v2ChatKeyOrder {
+		if err := writeKey(k); err != nil {
+			return nil, err
+		}
+	}
+	for k := range body {
+		if !written[k] {
+			if err := writeKey(k); err != nil {
+				return nil, err
+			}
+		}
+	}
+	buf.WriteByte('}')
+	return buf.Bytes(), nil
+}
+
+// PostStreamed posts one completion request and delivers decoded `data:`
+// payloads to onData. The first ≤4 KiB are sniffed by body shape — the gateway
+// sometimes answers a stream request with SSE under an application/json
+// content-type — and the sniffed bytes are replayed ahead of the live reader.
+// An idle deadline resets on every chunk; total duration is unbounded.
+func PostStreamed(ctx context.Context, path string, body map[string]any, session, requestID string, onData func(payload []byte) error) (*Usage, error) {
+	payload, err := marshalUpstreamBody(body)
+	if err != nil {
+		return nil, &UpstreamError{Code: CodeTransport, Message: err.Error()}
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, UpstreamBase+path, bytes.NewReader(payload))
+	if err != nil {
+		return nil, &UpstreamError{Code: CodeTransport, Message: err.Error()}
+	}
+	for k, v := range GatewayHeaders(session, requestID, true, "") {
+		req.Header.Set(k, v)
+	}
+	resp, err := laneHTTP.Do(req)
+	if err != nil {
+		if ctx.Err() != nil {
+			return nil, &UpstreamError{Code: CodeAborted, Message: "cancelled"}
+		}
+		return nil, &UpstreamError{Code: classifyConnErr(err), Message: err.Error()}
+	}
+	defer resp.Body.Close()
+
+	upstreamRID := headerRID(resp.Header)
+	retryAfter := 0
+	if ra := resp.Header.Get("retry-after"); ra != "" {
+		if n, perr := strconv.Atoi(ra); perr == nil && n > 0 && n < 3600 {
+			retryAfter = n
+		}
+	}
+
+	// One pump owns resp.Body for the whole call; the head bytes are read
+	// through it for shape inspection and then unread so decoding sees the
+	// full stream.
+	pump := newStreamReader(ctx, resp.Body, streamIdleTimeout)
+	defer pump.Close()
+	head := readUpTo(pump, 4096, 20*time.Second)
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		rest, _ := io.ReadAll(io.LimitReader(pump, 1<<20))
+		return nil, withRID(ClassifyFailure(resp.StatusCode, string(head)+string(rest), retryAfter), upstreamRID)
+	}
+
+	switch sniffBody(head) {
+	case "empty":
+		return nil, &UpstreamError{Code: CodeEmpty, Message: "empty response body", UpstreamRID: upstreamRID}
+	case "json", "unknown":
+		rest, _ := io.ReadAll(io.LimitReader(pump, 8<<20))
+		full := string(head) + string(rest)
+		var parsed any
+		if jerr := json.Unmarshal([]byte(full), &parsed); jerr != nil {
+			return nil, &UpstreamError{Code: CodeServer, Message: truncate(full, 300), UpstreamRID: upstreamRID}
+		}
+		if m, ok := parsed.(map[string]any); ok {
+			if _, has := m["error"]; has {
+				return nil, withRID(ClassifyFailure(resp.StatusCode, jsonString(m["error"]), retryAfter), upstreamRID)
+			}
+		}
+		if uerr := onData([]byte(full)); uerr != nil {
+			return nil, uerr
+		}
+		if m, ok := parsed.(map[string]any); ok {
+			return usageFromBody(m), nil
+		}
+		return nil, nil
+	}
+
+	pump.Unread(head)
+	// SSE body (whatever the header claimed).
+	usage, err := readSSE(pump, onData)
+	if err != nil {
+		if ctx.Err() != nil {
+			return usage, &UpstreamError{Code: CodeAborted, Message: "cancelled", UpstreamRID: upstreamRID}
+		}
+		if ue, ok := err.(*UpstreamError); ok {
+			return usage, withRID(ue, upstreamRID)
+		}
+		return usage, &UpstreamError{Code: CodeTransport, Message: err.Error(), UpstreamRID: upstreamRID}
+	}
+	return usage, nil
+}
+
 // headerRID reads the provider's trace id under either spelling it uses.
 func headerRID(h http.Header) string {
 	for _, key := range []string{"X-Request-Id", "Request-Id"} {
@@ -381,6 +534,42 @@ func withRID(e *UpstreamError, rid string) *UpstreamError {
 		e.UpstreamRID = rid
 	}
 	return e
+}
+
+// GetJSON performs a fingerprinted GET (model listing).
+func GetJSON(ctx context.Context, path string, session, requestID string, out any) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, UpstreamBase+path, nil)
+	if err != nil {
+		return err
+	}
+	for k, v := range GatewayHeaders(session, requestID, false, "application/json") {
+		req.Header.Set(k, v)
+	}
+	// Reuse the shared, proxy-aware client (and its tuned connection pool)
+	// instead of allocating a fresh client -- and a hard 15s Timeout -- on
+	// every listing call. The 15s cap is what fails cold-start / under-load
+	// listings (#41/#36): the response is alive but slow to arrive. Bound the
+	// call with the caller's context; only when that context carries no
+	// deadline do we fall back to a 30s cap, so a hung listing is still
+	// reclaimed instead of blocking forever.
+	if _, hasDeadline := ctx.Deadline(); !hasDeadline {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, 30*time.Second)
+		defer cancel()
+	}
+	resp, err := laneHTTP.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	data, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
+	if err != nil {
+		return err
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return ClassifyFailure(resp.StatusCode, string(data), 0)
+	}
+	return json.Unmarshal(data, out)
 }
 
 // --- body-shape sniffing -------------------------------------------------
