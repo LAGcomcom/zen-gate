@@ -278,6 +278,8 @@ func (s *Server) adminState(w http.ResponseWriter) {
 		}
 		if tag, ok := s.Store.ModelTagOf(m.ID); ok {
 			row.TagSource = tag.Source
+		} else if lane.CapabilityMatched(m.ID) {
+			row.TagSource = store.TagSourceHeuris
 		} else {
 			row.TagSource = store.TagSourceUnknown
 		}
@@ -376,6 +378,7 @@ func (s *Server) adminState(w http.ResponseWriter) {
 		"routingStrategy":         cfg.RoutingStrategy,
 		"laneFallbackToProviders": cfg.LaneFallbackToProviders,
 		"autoTagEnabled":          cfg.AutoTagEnabled,
+		"openRefEnabled":          cfg.OpenRefEnabled,
 		"workBuddyEnabled":        cfg.WorkBuddyEnabled(),
 		"codeArtsEnabled":         cfg.CodeArts.Enabled,
 		"allowLan":                cfg.AllowLan,
@@ -467,6 +470,7 @@ func (s *Server) adminSettings(w http.ResponseWriter, r *http.Request) {
 		RoutingStrategy         *string          `json:"routingStrategy"`
 		LaneFallbackToProviders *bool            `json:"laneFallbackToProviders"`
 		AutoTagEnabled          *bool            `json:"autoTagEnabled"`
+		OpenRefEnabled          *bool            `json:"openRefEnabled"`
 		WorkBuddyEnabled        *bool            `json:"workBuddyEnabled"`
 		CodeArtsEnabled         *bool            `json:"codeArtsEnabled"`
 		AllowLan                *bool            `json:"allowLan"`
@@ -614,6 +618,13 @@ func (s *Server) adminSettings(w http.ResponseWriter, r *http.Request) {
 		changed = true
 		dirty["autoTagEnabled"] = true
 	}
+	openRefOn := false
+	if in.OpenRefEnabled != nil {
+		cfg.OpenRefEnabled = *in.OpenRefEnabled
+		openRefOn = *in.OpenRefEnabled
+		changed = true
+		dirty["openRefEnabled"] = true
+	}
 	if in.WorkBuddyEnabled != nil {
 		// The channel has no switch of its own: it serves when any account is
 		// enabled. The settings toggle therefore means "all accounts on/off",
@@ -677,6 +688,12 @@ func (s *Server) adminSettings(w http.ResponseWriter, r *http.Request) {
 	if dirty["codeArtsEnabled"] {
 		s.Lane.SetCodeArtsAccount(cfg.CodeArts)
 		go s.Lane.RefreshCatalog(context.Background())
+	}
+	if openRefOn {
+		// Turning the reference on should fill capacities now, not when the
+		// 6-hour loop next fires — one detached pull after the commit, so it
+		// reads the just-published setting.
+		go s.OpenRefPull(context.Background())
 	}
 	if lanChanged {
 		// The reply must leave before the switchover: Rebind closes the very
@@ -757,6 +774,9 @@ func (s *Server) commitSettings(next *store.Config, dirty map[string]bool) {
 		}
 		if dirty["autoTagEnabled"] {
 			c.AutoTagEnabled = next.AutoTagEnabled
+		}
+		if dirty["openRefEnabled"] {
+			c.OpenRefEnabled = next.OpenRefEnabled
 		}
 		// The WorkBuddy switch is a whole-pool flag: the handler sets Enabled on
 		// every account and marks the field dirty, so without this branch the
@@ -990,17 +1010,16 @@ func (s *Server) adminProxyTest(w http.ResponseWriter, r *http.Request) {
 	client := &http.Client{Timeout: 10 * time.Second, Transport: transport}
 
 	t0 := time.Now()
-	// The probe rides the Kilo listing: it is the keyless source the gateway
-	// actually serves free models from, so "can this proxy reach upstream"
-	// means reaching that host. The retired Zen endpoint answered 200 here
-	// long after it stopped serving inference, which made the button lie.
 	req, err := http.NewRequestWithContext(r.Context(), http.MethodGet,
-		lane.KiloBase+"/models", nil)
+		lane.UpstreamBase+"/zen/v1/models", nil)
 	if err != nil {
 		writeJSON(w, 500, map[string]any{"ok": false, "error": err.Error()})
 		return
 	}
-	req.Header.Set("accept", "application/json")
+	for k, v := range lane.GatewayHeaders(lane.SessionForConversation("proxy-test"),
+		lane.MintRequestId(0), false, "application/json") {
+		req.Header.Set(k, v)
+	}
 	resp, err := client.Do(req)
 	latency := time.Since(t0).Milliseconds()
 	if err != nil {

@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"zen-gate/internal/lane"
 	"zen-gate/internal/store"
 )
 
@@ -202,6 +203,12 @@ func TestReasoningModelCarriesItsLadderNotVariantRows(t *testing.T) {
 // The picker's modality list came from vision alone, so a model that was
 // measured taking audio and PDF still looked text-only to Codex.
 func TestCodexCatalogNamesAudioAndFileInputs(t *testing.T) {
+	laneUp := laneUpstreamByModel(t, nil)
+	defer laneUp.Close()
+	old := lane.UpstreamBase
+	lane.UpstreamBase = laneUp.URL
+	t.Cleanup(func() { lane.UpstreamBase = old })
+
 	home := t.TempDir()
 	t.Setenv("ZEN_GATE_HOME", home)
 	st, err := store.Open()
@@ -217,7 +224,7 @@ func TestCodexCatalogNamesAudioAndFileInputs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	s := New(testLane(), st2)
+	s := New(lane.NewLane(), st2)
 
 	ts := httptest.NewServer(s.mux)
 	defer ts.Close()
@@ -264,7 +271,7 @@ func TestStoredTagsSurviveRestartIntoTheLane(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	l := testLane()
+	l := lane.NewLane()
 	New(l, st2)
 	for _, m := range l.ServableModels() {
 		if m.ID == "nemotron-3.5-lightning-free" {

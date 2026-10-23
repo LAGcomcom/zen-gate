@@ -13,7 +13,11 @@ import (
 // and not in attemptModel.
 
 func TestNextCandidateSkipsHidden(t *testing.T) {
-	l := strategyLane()
+	l := NewLane()
+	l.SetCatalog([]ModelInfo{
+		{ID: "mimo-v2.6-flash-free", Wire: "chat", ContextWindow: 1024, MaxOutput: 16},
+		{ID: "space-bunny-free", Wire: "chat", ContextWindow: 1024, MaxOutput: 16},
+	})
 	// Unchecked models stay probed-available here: the filter under test is
 	// the hidden set, not the probe verdict.
 	l.SetHidden(map[string]bool{"mimo-v2.6-flash-free": true})
@@ -22,10 +26,8 @@ func TestNextCandidateSkipsHidden(t *testing.T) {
 	}
 
 	l.SetHidden(map[string]bool{
-		"space-bunny-free":            true,
-		"mimo-v2.6-flash-free":        true,
-		"nemotron-3.5-lightning-free": true,
-		"ll-alpha-free":               true,
+		"mimo-v2.6-flash-free": true,
+		"space-bunny-free":     true,
 	})
 	if got := l.nextCandidate(Needs{}, map[string]bool{}); got != "" {
 		t.Fatalf("next = %q, want empty when every model is hidden", got)
@@ -38,8 +40,8 @@ func TestNextCandidateSkipsHidden(t *testing.T) {
 
 	// Re-showing a model restores it immediately — the set swap is atomic.
 	l.SetHidden(nil)
-	if got := l.nextCandidate(Needs{}, map[string]bool{}); got != "space-bunny-free" {
-		t.Fatalf("next = %q after clearing the hidden set, want space-bunny-free", got)
+	if got := l.nextCandidate(Needs{}, map[string]bool{}); got != "mimo-v2.6-flash-free" {
+		t.Fatalf("next = %q after clearing the hidden set, want mimo-v2.6-flash-free", got)
 	}
 }
 

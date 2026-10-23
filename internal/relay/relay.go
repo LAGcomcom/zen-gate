@@ -109,8 +109,8 @@ func identityHeaders(h http.Header, p *store.Provider, session string) {
 	h.Set("x-opencode-session", session)
 }
 
-// isOpenCodeHost reports whether a provider points at opencode.ai (the paid
-// OpenCode Go tier, which gates on the session header).
+// isOpenCodeHost reports whether a provider points at opencode.ai (the Zen
+// free lane or the paid Go tier — both gate on the session header).
 func isOpenCodeHost(baseURL string) bool {
 	host := strings.ToLower(NormalizeBaseURL(baseURL))
 	return strings.Contains(host, "//opencode.ai") || strings.Contains(host, ".opencode.ai")

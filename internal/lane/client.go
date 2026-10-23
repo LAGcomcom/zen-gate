@@ -175,12 +175,10 @@ func (f *atomicFlag) Set(b bool) {
 }
 func (f *atomicFlag) Get() bool { return f.v == 1 }
 
-// NewLane seeds an empty catalog: the surviving sources (Kilo, WorkBuddy,
-// CodeArts) are fetched on the first RefreshCatalog, and the retired Zen lane
-// no longer has a static roster to seed from.
+// NewLane seeds the lane with the fallback catalog.
 func NewLane() *Lane {
 	return &Lane{
-		catalog:          nil,
+		catalog:          BuildCatalog(FallbackCatalogIDs),
 		availability:     map[string]ProbeResult{},
 		realOK:           map[string]int64{},
 		defaultMaxTokens: 32768,
@@ -402,11 +400,7 @@ func (l *Lane) RefreshCatalog(ctx context.Context) {
 	prev := l.catalog
 	l.mu.Unlock()
 
-	// The OpenCode Zen lane used to be the first source here. It is retired:
-	// the upstream answers FreeTierError to every unauthenticated call, so a
-	// row from it could never serve a turn. Rows carrying the empty channel
-	// (old persisted catalogs) are dropped instead of resurrected.
-	var kilo, wb, ca []ModelInfo
+	var zen, kilo, wb, ca []ModelInfo
 	for _, m := range prev {
 		switch m.Channel {
 		case ChannelKilo:
@@ -415,7 +409,12 @@ func (l *Lane) RefreshCatalog(ctx context.Context) {
 			wb = append(wb, m)
 		case ChannelCodeArts:
 			ca = append(ca, m)
+		default:
+			zen = append(zen, m)
 		}
+	}
+	if ids, err := fetchListingWithColdBootRetry(ctx, len(zen), FetchListing); err == nil && len(ids) > 0 {
+		zen = BuildCatalog(ids)
 	}
 	if rows, err := fetchListingWithColdBootRetry(ctx, len(kilo), FetchKiloListing); err == nil && len(rows) > 0 {
 		kilo = BuildKiloCatalog(rows)
@@ -451,13 +450,11 @@ func (l *Lane) RefreshCatalog(ctx context.Context) {
 		}
 		ca = nil
 	}
-	cat := make([]ModelInfo, 0, len(kilo)+len(wb)+len(ca))
+	cat := make([]ModelInfo, 0, len(zen)+len(kilo)+len(wb)+len(ca))
+	cat = append(cat, zen...)
 	cat = append(cat, kilo...)
 	cat = append(cat, wb...)
 	cat = append(cat, ca...)
-	// An empty result is a no-op only when no source asked for a subtraction:
-	// a failed fetch must keep the cached rows, while logging out is a
-	// deliberate minus that has to reach the pickers even as the last row goes.
 	if len(cat) == 0 && !subtracted {
 		return
 	}
@@ -646,12 +643,9 @@ func (l *Lane) ProbeOneCtx(ctx context.Context, model string) ProbeResult {
 	var r ProbeResult
 	if entry.Channel == ChannelKilo {
 		// Presence in the free-pool roster is the verdict; probing would only
-		// spend a scheduling slot. The dashboard still gets the two phases a
-		// click reports, so the progress band is not blank.
-		EmitProbeStep(ctx, PhaseRequest, StepOK, 0, "免费池名单即判定（未请求上游）")
+		// spend a scheduling slot.
 		r = ProbeResult{Model: entry.ID, State: StateAvailable, At: time.Now().UnixMilli(),
 			Detail: "在列（免费池名单即判定）"}
-		EmitProbeStep(ctx, PhaseVerdict, StatusForProbeState(r.State), 0, r.Detail)
 		l.applyVerdict(model, r)
 	} else {
 		// The button asks "can this model answer right now", so the raw verdict
@@ -674,9 +668,8 @@ func (l *Lane) ProbeOneCtx(ctx context.Context, model string) ProbeResult {
 }
 
 // probeModelFor routes one availability probe to the source that can answer
-// it. The Zen prober that used to be the fallthrough is gone with its lane, so
-// a row with no owning source reports itself unusable instead of dialing an
-// endpoint that can only answer FreeTierError.
+// it: the WorkBuddy channel probes through its own account (ProbeModel is
+// hardwired to the Zen endpoint), everything else goes to the shared prober.
 func (l *Lane) probeModelFor(ctx context.Context, m ModelInfo) ProbeResult {
 	if m.Channel == ChannelWorkBuddy {
 		return l.probeWorkBuddy(ctx, m)
@@ -684,8 +677,7 @@ func (l *Lane) probeModelFor(ctx context.Context, m ModelInfo) ProbeResult {
 	if m.Channel == ChannelCodeArts {
 		return l.probeCodeArts(ctx, m)
 	}
-	return ProbeResult{Model: m.ID, State: StateUnavailable, At: time.Now().UnixMilli(),
-		Detail: "没有可用的车道（免费车道已退役）"}
+	return ProbeModel(ctx, m)
 }
 
 // StartLoops runs the periodic catalog refresh + probe + egress watch until
@@ -1033,13 +1025,14 @@ func (l *Lane) attemptModel(ctx context.Context, req Request, model, effort stri
 	}
 	ctx = WithExitPlan(ctx, plan)
 
-	// The Kilo pool has no tool-name gate and no session concept — its models
-	// see the caller's tools exactly as declared, and a plain POST per turn.
-	// WorkBuddy still runs the tool gate (its identity headers are account-
-	// derived, not session-minted) and carries its own account credential and
-	// body quirks. CodeArts is likewise fingerprint-free (an OpenAI-compatible
-	// endpoint) but keys on a per-conversation chat id and demands the
-	// canonical (case-sensitive) registered model name.
+	// The Zen lane fingerprints tools and mints session/request ids; the Kilo
+	// pool has no tool-name gate and no session concept — its models see the
+	// caller's tools exactly as declared, and a plain POST per turn. The
+	// WorkBuddy channel is like Kilo on the fingerprint front (its identity
+	// headers are account-derived, not session-minted) but carries its own
+	// account credential and body quirks. CodeArts is likewise fingerprint-
+	// free (an OpenAI-compatible endpoint) but keys on a per-conversation chat
+	// id and demands the canonical (case-sensitive) registered model name.
 	kilo := entry.Channel == ChannelKilo
 	wb := entry.Channel == ChannelWorkBuddy
 	ca := entry.Channel == ChannelCodeArts
@@ -1102,10 +1095,8 @@ func (l *Lane) attemptModel(ctx context.Context, req Request, model, effort stri
 	// The Zen lane fingerprints tools and mints session/request ids; the Kilo
 	// pool has no tool-name gate and no session concept — its models see the
 	// caller's tools exactly as declared, and a plain POST per turn.
-	// The Zen lane used to be the fallthrough here: it fingerprinted tools and
-	// minted session/request ids. That lane is retired, so a row that reaches
-	// this branch has no serving surface at all — say so instead of posting to
-	// an endpoint that answers FreeTierError.
+	session := SessionForExit(req.SessionSeed, plan.ExitKey)
+	requestID := RequestIdFor(session, req.TurnSeed)
 	caChatID := caChatID(req.SessionSeed)
 	post := func(cctx context.Context, body map[string]any, onData func(payload []byte) error) (*Usage, error) {
 		if wb {
@@ -1121,15 +1112,12 @@ func (l *Lane) attemptModel(ctx context.Context, req Request, model, effort stri
 		if kilo {
 			return PostKiloStreamed(cctx, body, onData)
 		}
-		return nil, &UpstreamError{Code: CodeServer,
-			Message: base + " has no serving channel: the free lane that used to serve it is retired"}
+		return PostStreamed(cctx, EndpointFor(base), body, session, requestID, onData)
 	}
 
 	body := buildBody(messages, req.Tools, budget)
 	rename := map[string]string{}
-	if wb {
-		// WorkBuddy keeps the historical tool aliasing until it is re-tested
-		// against the live channel; every other surfacing source needs none.
+	if !kilo && !ca {
 		rename = ApplyFingerprint(body, style)
 	}
 
