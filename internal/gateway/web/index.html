@@ -1721,8 +1721,8 @@ function renderProviders(s){
         <div class="frow"><span class="flbl">名称</span><input class="tin" id="pv-name" style="width:220px" placeholder="NVIDIA NIM">
           <span class="flbl" style="width:52px">协议</span><span id="pv-proto"></span></div>
         <div class="frow"><span class="flbl">Base URL</span><input class="tin" id="pv-url" style="width:340px" placeholder="https://integrate.api.nvidia.com/v1"></div>
-        <div class="frow"><span class="flbl">API Key</span><textarea class="tin" id="pv-keys" rows="2" style="width:340px;resize:vertical" placeholder="每行一个 Key；填多个会自动负载均衡分摊请求。本地服务可留空"></textarea></div>
-        <div class="frow"><span class="muted" style="font-size:11.5px" id="pv-key-hint">支持多个 Key：每行一个，请求会在它们之间轮询，还能自动避开失效 / 被限流的 Key。</span></div>
+        <div class="frow"><span class="flbl">API Key</span><input class="tin" id="pv-key" type="password" style="width:260px" placeholder="自己的 Key；本地服务可留空">
+          <span class="muted" style="font-size:11.5px" id="pv-key-hint"></span></div>
         <div class="frow">
           <button class="ghost" id="pv-fetch">拉取模型列表</button>
           <button class="act" id="pv-save">保存</button>
@@ -1742,9 +1742,7 @@ function renderProviders(s){
           <div class="muted" style="font-size:11px; margin-top:5px">勾选的模型才会计入保存；保存后仍可随时回来调整。</div>
         </div>
       </div>
-        <div class="pgrid" id="pv-list"></div>`;
-    // 多 Key 负载均衡 (issue #104)：每行一个 Key，保存时整体作为 apiKeys 数组下发。
-    const readKeys = () => el.querySelector("#pv-keys").value.split(/\r?\n/).map(s=>s.trim()).filter(Boolean);
+      <div class="pgrid" id="pv-list"></div>`;
     makeDropdown(el.querySelector("#pv-proto"),
       [["openai","OpenAI 兼容"],["anthropic","Anthropic 兼容"]], "openai", null);
     el.querySelector("#pv-cancel").onclick = ()=>{ pvResetForm(); };
@@ -1762,12 +1760,11 @@ function renderProviders(s){
       const btn = el.querySelector("#pv-fetch");
       btn.disabled = true; btn.textContent = "拉取中…";
       // 编辑时 Key 是写-only 的（留空=保持原值），用存储的 Key 以 save:false 拉取
-      const keys = readKeys();
       let body, usingStored = false;
-      if(pvEditing && !keys.length){
+      if(pvEditing && !el.querySelector("#pv-key").value){
         body = { id: pvEditing, save:false }; usingStored = true;
       } else {
-        body = { name: name||"provider", baseUrl: url, apiKeys: keys, protocol: pvProto() };
+        body = { name: name||"provider", baseUrl: url, apiKey: el.querySelector("#pv-key").value, protocol: pvProto() };
       }
       const r = await fetch("/admin/api/providers/models", {method:"POST",
         headers:{"content-type":"application/json"}, body: JSON.stringify(body)});
@@ -1787,9 +1784,8 @@ function renderProviders(s){
       const name = el.querySelector("#pv-name").value.trim();
       const url = el.querySelector("#pv-url").value.trim();
       if(!name || !url){ toast("名称和 Base URL 必填"); return; }
-      const keys = readKeys();
-      const body = { name, baseUrl: url, protocol: pvProto(), enabled: true };
-      if(keys.length) body.apiKeys = keys;
+      const body = { name, baseUrl: url, apiKey: el.querySelector("#pv-key").value,
+        protocol: pvProto(), enabled: true };
       if(pvEditing){
         body.id = pvEditing;
         if(pvFetched.length){
@@ -1801,7 +1797,7 @@ function renderProviders(s){
         if(!pvFetched.length){
           const fr = await fetch("/admin/api/providers/models", {method:"POST",
             headers:{"content-type":"application/json"}, body: JSON.stringify({name, baseUrl: url,
-              apiKeys: keys, protocol: body.protocol})});
+              apiKey: body.apiKey, protocol: body.protocol})});
           const fj = await fr.json().catch(()=>({}));
           if(fj.ok){
             pvFetched = fj.models || [];
@@ -1837,7 +1833,8 @@ function renderProviders(s){
         el.querySelector("#pv-form-title").textContent = "添加供应商";
         el.querySelector("#pv-name").value = p.name;
         el.querySelector("#pv-url").value = p.baseUrl;
-        el.querySelector("#pv-keys").value = "";
+        el.querySelector("#pv-key").value = "";
+        el.querySelector("#pv-key").type = "text";
         makeDropdown(el.querySelector("#pv-proto"),
           [["openai","OpenAI 兼容"],["anthropic","Anthropic 兼容"]], p.protocol||"openai", null);
         el.querySelector("#pv-preset-hint").innerHTML =
@@ -2112,8 +2109,9 @@ function pvResetForm(){
   pvEditing = ""; pvFetched = []; pvCatalog = []; pvSelected = new Set(); pvEditSaved = [];
   const el = $("#page-providers"); if(!el) return;
   el.querySelector("#pv-form-title").textContent = "添加供应商";
-  ["#pv-name","#pv-url","#pv-keys","#pv-pick-filter"].forEach(sel=>{ const n = el.querySelector(sel); if(n) n.value = ""; });
-  el.querySelector("#pv-keys").placeholder = "每行一个 Key；填多个会自动负载均衡分摊请求。本地服务可留空";
+  ["#pv-name","#pv-url","#pv-key","#pv-pick-filter"].forEach(sel=>{ const n = el.querySelector(sel); if(n) n.value = ""; });
+  el.querySelector("#pv-key").type = "password";
+  el.querySelector("#pv-key").placeholder = "自己的 Key；本地服务可留空";
   el.querySelector("#pv-cancel").style.display = "none";
   const hint = el.querySelector("#pv-fetch-hint"); if(hint) hint.textContent = "";
   pvRenderPicker();
@@ -2141,7 +2139,7 @@ function renderProviderList(s){
         <span class="pvdot ${p.enabled?"on":""}" title="${p.enabled?"已启用":"已停用"}"></span>
         <div class="pvt">
           <div class="pvn"><span class="nm">${esc(p.name)}</span><span class="pvpill">${esc(p.protocol)}</span></div>
-          <div class="pvu"><span class="k">${esc(p.apiKeyMasked||"未设置")}${p.keyCount>1?` · ${p.keyCount} 个 Key 负载均衡`:""}</span></div>
+          <div class="pvu"><span class="k">Key ${esc(p.apiKeyMasked||"未设置")}</span></div>
         </div>
         <button class="tgl${p.enabled?" on":""}" role="switch" aria-checked="${p.enabled?"true":"false"}"
           title="${p.enabled?"停用":"启用"}"></button>
@@ -2165,8 +2163,8 @@ function renderProviderList(s){
       el.querySelector("#pv-form-title").textContent = "编辑：" + p.name;
       el.querySelector("#pv-name").value = p.name;
       el.querySelector("#pv-url").value = p.baseUrl;
-      el.querySelector("#pv-keys").value = "";
-      el.querySelector("#pv-keys").placeholder = "留空 = 保持原有 Key" + (p.keyCount>1 ? `（${p.keyCount} 个）` : (p.hasKey ? "" : "（未设置）"));
+      el.querySelector("#pv-key").value = "";
+      el.querySelector("#pv-key").placeholder = "留空 = 保持原 Key" + (p.hasKey ? "" : "（未设置）");
       makeDropdown(el.querySelector("#pv-proto"),
         [["openai","OpenAI 兼容"],["anthropic","Anthropic 兼容"]], p.protocol||"openai", null);
       el.querySelector("#pv-cancel").style.display = "";

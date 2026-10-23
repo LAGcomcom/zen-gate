@@ -294,7 +294,7 @@ func Complete(ctx context.Context, t Turn, emit func(lane.Chunk)) (lane.Usage, s
 // 探测 button. Kept trivial: one listing fetch, latency of that round trip.
 func ProbeTiming(ctx context.Context, p *store.Provider) (int64, error) {
 	t0 := time.Now()
-	_, err := FetchModels(ctx, p.BaseURL, firstKey(p), p.Protocol)
+	_, err := FetchModels(ctx, p.BaseURL, p.APIKey, p.Protocol)
 	return time.Since(t0).Milliseconds(), err
 }
 
@@ -312,11 +312,7 @@ func postStreamed(ctx context.Context, p *store.Provider, session string, body m
 	}
 	req.Header.Set("content-type", "application/json")
 	req.Header.Set("accept", "text/event-stream")
-	// Spread load across the provider's keys (issue #104): pick one here, and
-	// park it below if the response shows it is auth/quota/server-broken.
-	keys := p.EffectiveKeys()
-	key, _ := pickKey(p.ID, keys)
-	authHeaders(req.Header, key, p.Protocol)
+	authHeaders(req.Header, p.APIKey, p.Protocol)
 	identityHeaders(req.Header, p, session)
 
 	resp, err := relayHTTP().Do(req)
@@ -339,9 +335,7 @@ func postStreamed(ctx context.Context, p *store.Provider, session string, body m
 				retryAfter = n
 			}
 		}
-		ue := lane.ClassifyFailure(resp.StatusCode, string(data), retryAfter)
-		coolKey(p.ID, key, cooldownFor(ue.Code))
-		return nil, ue
+		return nil, lane.ClassifyFailure(resp.StatusCode, string(data), retryAfter)
 	}
 
 	// Idle-bounded pump: an upstream that answers 200 and then queues in
@@ -430,7 +424,7 @@ func ProbeModel(ctx context.Context, p *store.Provider, model string) (res lane.
 	}
 	req.Header.Set("content-type", "application/json")
 	req.Header.Set("accept", "text/event-stream")
-	authHeaders(req.Header, firstKey(p), p.Protocol)
+	authHeaders(req.Header, p.APIKey, p.Protocol)
 
 	client := *lane.Client()
 	client.Timeout = probeHTTPTimeout
