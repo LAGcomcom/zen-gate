@@ -94,6 +94,7 @@ type Lane struct {
 	egress           Egress
 	defaultMaxTokens int
 	exposeRegion     bool
+	hidden           map[string]bool // model ids the user unchecked on the 模型 page; skipped by probing and failover
 	failoverEnabled  bool
 	failoverMax      int
 	smartRouting     bool
@@ -319,6 +320,22 @@ func (l *Lane) SetExposeRegion(b bool) {
 	l.mu.Unlock()
 }
 
+// SetHidden installs the set of model ids the user unchecked on the 模型 page
+// (store.Config.HiddenModels). A hidden model is still reachable by an explicit
+// request naming it, but the lane must not spend a probe slot on it nor pick it
+// as an automatic failover/rate-limit-switch target (issue #103). The whole map
+// is swapped, never mutated in place, so concurrent reads in ProbeRound and
+// nextCandidate stay safe without holding the lock for the entire scan.
+func (l *Lane) SetHidden(ids []string) {
+	set := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		set[id] = true
+	}
+	l.mu.Lock()
+	l.hidden = set
+	l.mu.Unlock()
+}
+
 // ProbingModel returns the id currently under probe ("" when idle).
 func (l *Lane) ProbingModel() string {
 	l.mu.RLock()
@@ -514,6 +531,7 @@ func (l *Lane) ProbeRound(ctx context.Context, manual bool) {
 	l.probing.Set(true)
 	cat := make([]ModelInfo, len(l.catalog))
 	copy(cat, l.catalog)
+	hidden := l.hidden
 	l.mu.Unlock()
 	defer l.probing.Set(false)
 
@@ -525,6 +543,11 @@ func (l *Lane) ProbeRound(ctx context.Context, manual bool) {
 	for _, m := range cat {
 		if ctx.Err() != nil {
 			break
+		}
+		if hidden[m.ID] {
+			// User unchecked this model on the 模型 page: don't burn a probe
+			// slot on it (issue #103). Explicit named calls still serve it.
+			continue
 		}
 		if m.Channel == ChannelKilo {
 			l.mu.Lock()
@@ -916,11 +939,18 @@ func (l *Lane) nextCandidate(needs Needs, tried map[string]bool) string {
 	smart := l.smartRouting
 	strategy := l.strategy
 	ttftFn := l.ttft
+	hidden := l.hidden
 	l.mu.RUnlock()
 
 	best, bestKey := "", candidateKey{avail: 99}
 	for i, m := range cat {
 		if m.SystemOne || m.Wire == "systemone" {
+			continue
+		}
+		if hidden[m.ID] {
+			// User unchecked this model on the 模型 page: never auto-pick it
+			// as a failover/rate-limit-switch target (issue #103). An explicit
+			// request naming it still goes straight to the model.
 			continue
 		}
 		if tried[m.ID] || l.throttle.Throttled(m.ID) {
