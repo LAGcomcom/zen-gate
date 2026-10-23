@@ -849,6 +849,9 @@ func (s *Server) adminModelVisibility(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, 500, map[string]any{"ok": false, "error": err.Error()})
 			return
 		}
+		// The lane filters probes and failover candidates by its own copy of
+		// the set; push the new one now or the change waits for a reboot.
+		s.Lane.SetHidden(s.hiddenSet())
 		if s.logger != nil {
 			action := "恢复显示"
 			if in.Hidden {
@@ -1312,6 +1315,13 @@ func (s *Server) adminImport(w http.ResponseWriter, r *http.Request) {
 		if incoming.Providers[i].APIKey == store.MaskedValue {
 			incoming.Providers[i].APIKey = ""
 		}
+		// A masked export lists every balanced key as a placeholder; dropping
+		// them leaves an empty (harmless) entry rather than a fake credential.
+		for j, k := range incoming.Providers[i].APIKeys {
+			if k == store.MaskedValue {
+				incoming.Providers[i].APIKeys[j] = ""
+			}
+		}
 	}
 	for i := range incoming.Subscriptions {
 		if incoming.Subscriptions[i].URL == store.MaskedValue {
@@ -1353,6 +1363,9 @@ func (s *Server) adminImport(w http.ResponseWriter, r *http.Request) {
 	// Push the imported pool into the lane now: without this the imported
 	// accounts only took effect on the next boot.
 	s.Lane.SetWorkBuddyAccounts(incoming.WorkBuddyAccounts)
+	// Same for the hidden set: the lane's probe and failover filters read
+	// their own copy.
+	s.Lane.SetHidden(s.hiddenSet())
 	wbBumpPoolGen()
 	go s.Lane.RefreshCatalog(context.Background())
 	if s.logger != nil {

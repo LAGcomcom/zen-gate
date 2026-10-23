@@ -91,6 +91,13 @@ type Lane struct {
 	catalog          []ModelInfo
 	availability     map[string]ProbeResult
 	realOK           map[string]int64 // model -> unix-milli until which live traffic vouches for it
+	// hidden holds the ids the user unchecked on the 模型 page. Hidden models
+	// stay directly callable — a client that names one explicitly still gets
+	// it — but they stop consuming probe rounds and stop acting as
+	// failover / throttle-switch candidates (issue #103). SetHidden replaces
+	// the whole map and readers snapshot the reference under mu, so never
+	// edit the map in place.
+	hidden           map[string]bool
 	egress           Egress
 	defaultMaxTokens int
 	exposeRegion     bool
@@ -197,6 +204,17 @@ func (l *Lane) SetCatalog(cat []ModelInfo) {
 	if l.OnCatalogReload != nil {
 		l.OnCatalogReload()
 	}
+	l.notify()
+}
+
+// SetHidden replaces the set of user-hidden model ids. Hidden models remain
+// directly callable; they only drop out of the probe round and the failover
+// candidate scan (issue #103). The lane takes ownership of the map — callers
+// must hand over a fresh one, not a map they keep mutating.
+func (l *Lane) SetHidden(ids map[string]bool) {
+	l.mu.Lock()
+	l.hidden = ids
+	l.mu.Unlock()
 	l.notify()
 }
 
@@ -512,8 +530,12 @@ func (l *Lane) ProbeRound(ctx context.Context, manual bool) {
 		return
 	}
 	l.probing.Set(true)
-	cat := make([]ModelInfo, len(l.catalog))
-	copy(cat, l.catalog)
+	cat := make([]ModelInfo, 0, len(l.catalog))
+	for _, m := range l.catalog {
+		if !l.hidden[m.ID] {
+			cat = append(cat, m)
+		}
+	}
 	l.mu.Unlock()
 	defer l.probing.Set(false)
 
@@ -521,7 +543,10 @@ func (l *Lane) ProbeRound(ctx context.Context, manual bool) {
 	// 用户看到的是模型一个接一个亮起来，而不是全轮结束后一起翻转。
 	// Kilo 池不探测：它的名单每轮随 listing 重建，在列即可用，
 	// 探测只会白白烧一次调度。
+	// 用户取消勾选的模型同样不进轮次：探测是真实出网的上游调用，
+	// 烧的是账号配额，Hidden 是 UI 概念但探测预算不是 (#103)。
 	allThrottled := len(cat) > 0
+	probed := 0
 	for _, m := range cat {
 		if ctx.Err() != nil {
 			break
@@ -543,6 +568,7 @@ func (l *Lane) ProbeRound(ctx context.Context, manual bool) {
 		l.notify()
 
 		r := recheckNegative(ctx, m, l.probeModelFor(ctx, m), l.probeModelFor)
+		probed++
 
 		effective, _ := l.applyVerdict(m.ID, r)
 		if effective.State != StateThrottled {
@@ -567,15 +593,18 @@ func (l *Lane) ProbeRound(ctx context.Context, manual bool) {
 	eg := DetectEgress(ctx)
 
 	l.mu.Lock()
-	if l.OnProbeEdge != nil && allThrottled && !l.quotaWallActive {
+	// 配额墙只在真的探测过至少一个模型时才成立：全部被取消勾选的轮次
+	// 一无所知，不能当作全池 429 去触发通知与长退避。
+	quotaWall := allThrottled && probed > 0
+	if l.OnProbeEdge != nil && quotaWall && !l.quotaWallActive {
 		go l.OnProbeEdge("", "", StateThrottled)
 	}
-	l.quotaWallActive = allThrottled
+	l.quotaWallActive = quotaWall
 	if egressChanged(l.egress, eg) {
 		l.egress = eg
 	}
 	l.lastProbeAt = time.Now()
-	if allThrottled {
+	if quotaWall {
 		l.backoffRounds++
 		d := time.Duration(30*(1<<uint(min2(l.backoffRounds, 2)))) * time.Minute
 		if d > 120*time.Minute {
@@ -907,8 +936,16 @@ func (l *Lane) Candidates(needs Needs, exclude string, n int) []string {
 // off, or with the catalog strategy, ties keep catalog order.
 func (l *Lane) nextCandidate(needs Needs, tried map[string]bool) string {
 	l.mu.RLock()
-	cat := make([]ModelInfo, len(l.catalog))
-	copy(cat, l.catalog)
+	cat := make([]ModelInfo, 0, len(l.catalog))
+	for _, m := range l.catalog {
+		// 用户取消勾选的模型不做 failover 候选：换过去等于把它重新变成
+		// 限流切换的目标，正是取消勾选想避免的 (#103)。显式点名仍然可达，
+		// attemptModel 直接查目录，不经过这里。
+		if l.hidden[m.ID] {
+			continue
+		}
+		cat = append(cat, m)
+	}
 	av := make(map[string]ProbeResult, len(l.availability))
 	for k, v := range l.availability {
 		av[k] = v
@@ -1122,7 +1159,15 @@ func (l *Lane) attemptModel(ctx context.Context, req Request, model, effort stri
 			ReportExit(plan.NodeID, base, "region")
 		case CodeQuota:
 			ReportExit(plan.NodeID, base, "limited")
-		case CodeTransport, CodeServer, CodeTimeout, CodeEmpty, CodeReset:
+		case CodeTransport, CodeTimeout, CodeReset:
+			ReportExit(plan.NodeID, base, "other")
+			// The tunnel itself died: book the node, not just the pair, so a
+			// node that "connects but every turn dies" leaves rotation after
+			// two strikes instead of poisoning one request at a time.
+			ReportDeadExit(plan.NodeID)
+		case CodeServer, CodeEmpty:
+			// The upstream answered — the tunnel works. Node health is not
+			// implicated; the (exit, model) pair is enough.
 			ReportExit(plan.NodeID, base, "other")
 		}
 		// The caller decides what a 429 means: under rotation it re-asks the

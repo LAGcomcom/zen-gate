@@ -74,15 +74,41 @@ func (m ModelMeta) Declared() bool {
 }
 
 type Provider struct {
-	ID        string               `json:"id"`
-	Name      string               `json:"name"`
-	BaseURL   string               `json:"baseUrl"`
-	APIKey    string               `json:"apiKey,omitempty"`
+	ID      string `json:"id"`
+	Name    string `json:"name"`
+	BaseURL string `json:"baseUrl"`
+	APIKey  string `json:"apiKey,omitempty"`
+	// APIKeys holds additional keys for per-request load balancing (issue
+	// #104). Invariant: exactly one of the two fields carries the keys — one
+	// key lives in APIKey, two or more in APIKeys (with APIKey cleared) — so
+	// old builds reading a new config keep working and EffectiveKeys never
+	// sees a key twice.
+	APIKeys   []string             `json:"apiKeys,omitempty"`
 	Protocol  string               `json:"protocol"`
 	Enabled   bool                 `json:"enabled"`
 	Models    []string             `json:"models,omitempty"`
 	ModelMeta map[string]ModelMeta `json:"modelMeta,omitempty"` // by upstream model id
 	Note      string               `json:"note,omitempty"`      // preset provenance / key-application hint
+}
+
+// EffectiveKeys lists the keys this provider rotates over, deduplicated and
+// in stable order: the APIKeys list, falling back to the single legacy APIKey
+// when no list is configured. The returned slice is a fresh copy.
+func (p Provider) EffectiveKeys() []string {
+	out := make([]string, 0, len(p.APIKeys)+1)
+	seen := map[string]bool{}
+	for _, k := range p.APIKeys {
+		k = strings.TrimSpace(k)
+		if k == "" || seen[k] {
+			continue
+		}
+		seen[k] = true
+		out = append(out, k)
+	}
+	if len(out) == 0 && p.APIKey != "" {
+		out = append(out, p.APIKey)
+	}
+	return out
 }
 
 // Subscription is one user-added proxy subscription URL: the fetched body is
@@ -666,6 +692,9 @@ func (s *Store) Masked() *Config {
 		if cfg.Providers[i].APIKey != "" {
 			cfg.Providers[i].APIKey = MaskedValue
 		}
+		for j := range cfg.Providers[i].APIKeys {
+			cfg.Providers[i].APIKeys[j] = MaskedValue
+		}
 	}
 	for i := range cfg.Subscriptions {
 		if cfg.Subscriptions[i].URL != "" {
@@ -734,6 +763,9 @@ func (c *Config) clone() *Config {
 		for i, p := range c.Providers {
 			p.Models = cloneSlice(p.Models)
 			p.ModelMeta = cloneMeta(p.ModelMeta)
+			// Aliasing the key list across snapshots would let a later save
+			// mutate the slice a request in flight (or an export) points at.
+			p.APIKeys = cloneSlice(p.APIKeys)
 			next.Providers[i] = p
 		}
 	}

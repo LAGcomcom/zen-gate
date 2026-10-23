@@ -135,6 +135,13 @@ type Rotator interface {
 	// Report books one failure against an (exit, model) pair. The ledger is
 	// only ever used to skip a combination known to be bad.
 	Report(nodeID, model, class string)
+	// ReportDead books one tunnel-level failure against a node: a transport
+	// reset / timeout / dead tunnel says the node itself is dying, which is
+	// node state — the (exit, model) ledger cannot express it, and probes
+	// cannot see it because the tunnel still connects. Two strikes inside the
+	// fail-memory window retire the node from rotation; the periodic
+	// dead-node probe brings it back once it answers again.
+	ReportDead(nodeID string)
 	// Revive clears the (exit, model) pair and the exit's transport cooldown
 	// after a real request for that model succeeded through it — real traffic
 	// is harder evidence than any probe sample. It never lifts bans recorded
@@ -590,8 +597,9 @@ func (s *streamReader) readWithTimeout(p []byte, timeout time.Duration) (int, er
 }
 
 // readSSE parses `data:` frames, dropping comments and [DONE]. Usage-bearing
-// frames are merged into the returned total (each field appears on at most a
-// couple of terminal frames, so summation matches the reference behaviour).
+// frames are folded into the returned total with a per-field max: several
+// upstreams repeat the running usage snapshot on terminal (sometimes every)
+// frame, so summation would compound the same tokens many times over (#105).
 func readSSE(r io.Reader, onData func([]byte) error) (*Usage, error) {
 	br := bufio.NewReaderSize(r, 64*1024)
 	var usage *Usage
@@ -620,7 +628,7 @@ func readSSE(r io.Reader, onData func([]byte) error) (*Usage, error) {
 				if usage == nil {
 					usage = u
 				} else {
-					usage.Merge(u)
+					usage.MergeMax(u)
 				}
 			}
 			if _, has := frame["error"]; has {
@@ -652,6 +660,14 @@ func mapUsage(frame map[string]any) *Usage {
 		changed = num(&u.CacheRead, m, "cache_read_input_tokens", "cached_tokens", "cache_read_tokens") || changed
 		changed = num(&u.CacheWrite, m, "cache_creation_input_tokens", "cache_write_tokens") || changed
 		changed = num(&u.TotalTokens, m, "total_tokens") || changed
+		// OpenAI nests cached_tokens under prompt_tokens_details; read it
+		// only when no flat key already filled CacheRead, so one frame can
+		// never count its cache twice.
+		if u.CacheRead == 0 {
+			if pd, ok := m["prompt_tokens_details"].(map[string]any); ok {
+				changed = num(&u.CacheRead, pd, "cached_tokens") || changed
+			}
+		}
 		if rd, ok := m["reasoning_tokens"]; ok {
 			if f, ok := toNum(rd); ok && f >= 0 {
 				u.Reasoning = int(f)
@@ -703,6 +719,8 @@ func toNum(v any) (float64, bool) {
 }
 
 // Merge folds one partial usage into another (fields present on either side).
+// It is additive by design: the right tool when the two sides describe
+// different physical calls, e.g. a continuation that re-bills the prompt.
 func (u *Usage) Merge(o *Usage) {
 	if o == nil {
 		return
@@ -713,6 +731,37 @@ func (u *Usage) Merge(o *Usage) {
 	u.CacheRead += o.CacheRead
 	u.CacheWrite += o.CacheWrite
 	u.TotalTokens += o.TotalTokens
+}
+
+// MergeMax folds one usage snapshot into another keeping the larger value per
+// field. Streaming upstreams repeat the running total on terminal frames and
+// some repeat full usage blocks on every frame, so summation would compound
+// the same tokens many times over (issue #105); a per-field max collapses the
+// repeats and keeps the latest figure. CacheRead stays independent of Input:
+// OpenAI's prompt_tokens already includes cached tokens, while Anthropic
+// reports them separately, and either way max-per-field keeps both honest.
+func (u *Usage) MergeMax(o *Usage) {
+	if o == nil {
+		return
+	}
+	if o.Input > u.Input {
+		u.Input = o.Input
+	}
+	if o.Output > u.Output {
+		u.Output = o.Output
+	}
+	if o.Reasoning > u.Reasoning {
+		u.Reasoning = o.Reasoning
+	}
+	if o.CacheRead > u.CacheRead {
+		u.CacheRead = o.CacheRead
+	}
+	if o.CacheWrite > u.CacheWrite {
+		u.CacheWrite = o.CacheWrite
+	}
+	if o.TotalTokens > u.TotalTokens {
+		u.TotalTokens = o.TotalTokens
+	}
 }
 
 func jsonString(v any) string {

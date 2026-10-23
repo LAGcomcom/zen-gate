@@ -38,6 +38,11 @@ const (
 	// it the count restarts, so a node that misbehaves once an hour is never
 	// treated as persistently broken.
 	failMemory = 10 * time.Minute
+	// deadStrikes is how many tunnel-level failures inside failMemory retire
+	// a node from rotation. One strike is nothing (jitter happens); two in
+	// ten minutes is a tunnel that connects and then dies mid-turn — the one
+	// failure mode a tiny probe cannot reproduce and real users keep hitting.
+	deadStrikes = 2
 )
 
 // banKey names one (exit, model) pair in the ledger.
@@ -79,6 +84,38 @@ func (m *Manager) Report(nodeID, model, class string) {
 	m.bans[k] = now.Add(d)
 }
 
+// ReportDead books one tunnel-level failure against a node — a transport
+// reset / timeout / dead tunnel seen by real traffic. This is node state, not
+// (exit, model) state: the tunnel connects and then every turn dies, which a
+// probe cannot reproduce because a probe is one tiny round-trip. Two strikes
+// inside failMemory retire the node from rotation; the periodic dead-node
+// probe (or a raced success reaching Revive) brings it back.
+func (m *Manager) ReportDead(nodeID string) {
+	if nodeID == "" {
+		return
+	}
+	now := time.Now()
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	h := m.health[nodeID]
+	if h == nil || !h.Alive {
+		return // already retired; nothing to accumulate
+	}
+	if last, ok := m.nodeFailAt[nodeID]; ok && now.Sub(last) > failMemory {
+		m.nodeFails[nodeID] = 0
+	}
+	m.nodeFails[nodeID]++
+	m.nodeFailAt[nodeID] = now
+	if m.nodeFails[nodeID] < deadStrikes {
+		return
+	}
+	h.Alive = false
+	delete(m.nodeFails, nodeID)
+	delete(m.nodeFailAt, nodeID)
+	m.log("出口节点 %s（%s）连续 %d 次隧道级失败，暂停参与轮询，等待复探",
+		nodeID, h.Name, deadStrikes)
+}
+
 // Revive clears an exit's failure state after a real request for one model
 // succeeded through it. A served request is harder evidence than any probe
 // sample, so there is no reason to sit out the rest of a cooldown.
@@ -100,6 +137,12 @@ func (m *Manager) Revive(nodeID, model string) {
 		h.CoolUntil = 0
 		h.LastOKMs = now.UnixMilli()
 		delete(m.nodeStreak, nodeID)
+		// A request just crossed this tunnel: whatever strikes were on the
+		// node, this one is proof against them — even in the race where the
+		// node was retired while the request was in flight.
+		h.Alive = true
+		delete(m.nodeFails, nodeID)
+		delete(m.nodeFailAt, nodeID)
 	}
 	if model == "" {
 		return

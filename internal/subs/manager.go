@@ -61,6 +61,13 @@ type Manager struct {
 	// escalating cooldown in coolNode so a persistently dead node stops costing
 	// a full dialTimeout on every request. Keyed by node ID.
 	nodeStreak map[string]int
+	// nodeFails counts consecutive **tunnel-level** failures seen by real
+	// traffic (ReportDead): the tunnel connects, the request dies mid-turn.
+	// Probes cannot see this state — a probe is one tiny round-trip — so two
+	// strikes inside failMemory retire the node until the periodic probe
+	// answers again.
+	nodeFails  map[string]int
+	nodeFailAt map[string]time.Time
 	lastErr    string
 	version    string
 
@@ -98,6 +105,9 @@ func NewManager(st *store.Store, log func(string, ...any)) *Manager {
 		fails:    map[string]int{},
 		failAt:   map[string]time.Time{},
 		stickyAt: map[string]int64{},
+
+		nodeFails:  map[string]int{},
+		nodeFailAt: map[string]time.Time{},
 	}
 }
 

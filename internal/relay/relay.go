@@ -294,7 +294,7 @@ func Complete(ctx context.Context, t Turn, emit func(lane.Chunk)) (lane.Usage, s
 // 探测 button. Kept trivial: one listing fetch, latency of that round trip.
 func ProbeTiming(ctx context.Context, p *store.Provider) (int64, error) {
 	t0 := time.Now()
-	_, err := FetchModels(ctx, p.BaseURL, p.APIKey, p.Protocol)
+	_, err := FetchModels(ctx, p.BaseURL, FirstKey(p), p.Protocol)
 	return time.Since(t0).Milliseconds(), err
 }
 
@@ -312,7 +312,8 @@ func postStreamed(ctx context.Context, p *store.Provider, session string, body m
 	}
 	req.Header.Set("content-type", "application/json")
 	req.Header.Set("accept", "text/event-stream")
-	authHeaders(req.Header, p.APIKey, p.Protocol)
+	key := keyFor(p)
+	authHeaders(req.Header, key, p.Protocol)
 	identityHeaders(req.Header, p, session)
 
 	resp, err := relayHTTP().Do(req)
@@ -335,6 +336,9 @@ func postStreamed(ctx context.Context, p *store.Provider, session string, body m
 				retryAfter = n
 			}
 		}
+		// The request never reached the model, so the failure — credential
+		// rejection, rate limit, server wobble — is the key's to answer for.
+		penalizeKey(p, key, resp.StatusCode, time.Duration(retryAfter)*time.Second)
 		return nil, lane.ClassifyFailure(resp.StatusCode, string(data), retryAfter)
 	}
 
@@ -370,7 +374,7 @@ func postStreamed(ctx context.Context, p *store.Provider, session string, body m
 				if usage == nil {
 					usage = u
 				} else {
-					usage.Merge(u)
+					usage.MergeMax(u)
 				}
 			}
 			if _, has := frame["error"]; has {
@@ -424,7 +428,9 @@ func ProbeModel(ctx context.Context, p *store.Provider, model string) (res lane.
 	}
 	req.Header.Set("content-type", "application/json")
 	req.Header.Set("accept", "text/event-stream")
-	authHeaders(req.Header, p.APIKey, p.Protocol)
+	// A one-shot probe rides the provider's first key: churning the rotation
+	// with probe traffic would park keys on cooldowns for nothing.
+	authHeaders(req.Header, FirstKey(p), p.Protocol)
 
 	client := *lane.Client()
 	client.Timeout = probeHTTPTimeout

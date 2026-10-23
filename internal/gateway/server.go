@@ -307,6 +307,11 @@ func (s *Server) safeRoute(w http.ResponseWriter, r *http.Request) {
 // Start binds the listener and serves in the background: loopback, or every
 // interface when the user turned on 局域网访问.
 func (s *Server) Start() error {
+	// Seed the lane's hidden set once up front: the probe round and the
+	// failover scan read their own copy, not the store, so without this the
+	// user's unchecked models kept being probed (and billing quota) until the
+	// first visibility toggle (issue #103).
+	s.Lane.SetHidden(s.hiddenSet())
 	addr := fmt.Sprintf("%s:%d", s.bindHost(), s.Store.Config().Port)
 	s.srv = &http.Server{
 		Addr:    addr,

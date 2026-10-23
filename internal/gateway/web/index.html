@@ -1420,6 +1420,10 @@ let pvSelected = new Set();  // 勾选要入库的模型
 let pvEditSaved = [];        // 编辑前的已保存模型（用于预勾选）
 
 function pvProto(){ return $("#pv-proto").dataset.value || "openai"; }
+// pvKeyLines reads the multi-key textarea: one key per line, blanks dropped.
+function pvKeyLines(){
+  return ($("#pv-keys").value || "").split(/\n+/).map(s=>s.trim()).filter(Boolean);
+}
 
 async function renderQoderCard(){
   const st = await fetch("/admin/api/qoder/status").then(r=>r.json()).catch(()=>null);
@@ -1723,6 +1727,8 @@ function renderProviders(s){
         <div class="frow"><span class="flbl">Base URL</span><input class="tin" id="pv-url" style="width:340px" placeholder="https://integrate.api.nvidia.com/v1"></div>
         <div class="frow"><span class="flbl">API Key</span><input class="tin" id="pv-key" type="password" style="width:260px" placeholder="自己的 Key；本地服务可留空">
           <span class="muted" style="font-size:11.5px" id="pv-key-hint"></span></div>
+        <div class="frow"><span class="flbl">多 Key 负载</span><textarea class="tin" id="pv-keys" rows="3" style="width:260px;vertical-align:top" placeholder="可选：每行一个 Key，轮换使用"></textarea>
+          <span class="muted" style="font-size:11.5px">填多行即按请求轮换；留空保持原有 Key</span></div>
         <div class="frow">
           <button class="ghost" id="pv-fetch">拉取模型列表</button>
           <button class="act" id="pv-save">保存</button>
@@ -1761,8 +1767,11 @@ function renderProviders(s){
       btn.disabled = true; btn.textContent = "拉取中…";
       // 编辑时 Key 是写-only 的（留空=保持原值），用存储的 Key 以 save:false 拉取
       let body, usingStored = false;
-      if(pvEditing && !el.querySelector("#pv-key").value){
+      const keyLines = pvKeyLines();
+      if(pvEditing && !keyLines.length && !el.querySelector("#pv-key").value){
         body = { id: pvEditing, save:false }; usingStored = true;
+      } else if(keyLines.length){
+        body = { name: name||"provider", baseUrl: url, apiKeys: keyLines, protocol: pvProto() };
       } else {
         body = { name: name||"provider", baseUrl: url, apiKey: el.querySelector("#pv-key").value, protocol: pvProto() };
       }
@@ -1784,8 +1793,11 @@ function renderProviders(s){
       const name = el.querySelector("#pv-name").value.trim();
       const url = el.querySelector("#pv-url").value.trim();
       if(!name || !url){ toast("名称和 Base URL 必填"); return; }
-      const body = { name, baseUrl: url, apiKey: el.querySelector("#pv-key").value,
+      const keyLines = pvKeyLines();
+      const body = { name, baseUrl: url,
+        apiKey: keyLines.length ? "" : el.querySelector("#pv-key").value,
         protocol: pvProto(), enabled: true };
+      if(keyLines.length) body.apiKeys = keyLines;
       if(pvEditing){
         body.id = pvEditing;
         if(pvFetched.length){
@@ -1795,9 +1807,10 @@ function renderProviders(s){
       } else {
         // 新增时没拉过模型就先拉一次：顺带验证连通性
         if(!pvFetched.length){
+          const probeBody = {name, baseUrl: url, protocol: body.protocol};
+          if(keyLines.length) probeBody.apiKeys = keyLines; else probeBody.apiKey = body.apiKey;
           const fr = await fetch("/admin/api/providers/models", {method:"POST",
-            headers:{"content-type":"application/json"}, body: JSON.stringify({name, baseUrl: url,
-              apiKey: body.apiKey, protocol: body.protocol})});
+            headers:{"content-type":"application/json"}, body: JSON.stringify(probeBody)});
           const fj = await fr.json().catch(()=>({}));
           if(fj.ok){
             pvFetched = fj.models || [];
@@ -2139,7 +2152,7 @@ function renderProviderList(s){
         <span class="pvdot ${p.enabled?"on":""}" title="${p.enabled?"已启用":"已停用"}"></span>
         <div class="pvt">
           <div class="pvn"><span class="nm">${esc(p.name)}</span><span class="pvpill">${esc(p.protocol)}</span></div>
-          <div class="pvu"><span class="k">Key ${esc(p.apiKeyMasked||"未设置")}</span></div>
+          <div class="pvu"><span class="k">Key ${esc(p.apiKeyMasked||"未设置")}${p.keyCount>1?`（${p.keyCount} 个轮换）`:""}</span></div>
         </div>
         <button class="tgl${p.enabled?" on":""}" role="switch" aria-checked="${p.enabled?"true":"false"}"
           title="${p.enabled?"停用":"启用"}"></button>
@@ -2165,6 +2178,8 @@ function renderProviderList(s){
       el.querySelector("#pv-url").value = p.baseUrl;
       el.querySelector("#pv-key").value = "";
       el.querySelector("#pv-key").placeholder = "留空 = 保持原 Key" + (p.hasKey ? "" : "（未设置）");
+      el.querySelector("#pv-keys").value = "";
+      el.querySelector("#pv-keys").placeholder = p.keyCount>1 ? `已存 ${p.keyCount} 个 Key；留空保持，填入新行则整体替换` : "可选：每行一个 Key，轮换使用";
       makeDropdown(el.querySelector("#pv-proto"),
         [["openai","OpenAI 兼容"],["anthropic","Anthropic 兼容"]], p.protocol||"openai", null);
       el.querySelector("#pv-cancel").style.display = "";

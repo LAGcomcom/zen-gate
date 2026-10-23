@@ -416,9 +416,18 @@ func (s *Server) providerViews() []map[string]any {
 	for _, p := range s.Store.Config().Providers {
 		models := []string{}
 		models = append(models, p.Models...)
+		keys := p.EffectiveKeys()
+		// Mask the first effective key even when the single-key field is
+		// empty: after a multi-key save the legacy field is cleared on
+		// purpose, and "未设置 · N 个 Key" would read as broken.
+		masked := ""
+		if len(keys) > 0 {
+			masked = maskKey(keys[0])
+		}
 		out = append(out, map[string]any{
 			"id": p.ID, "name": p.Name, "baseUrl": p.BaseURL,
-			"apiKeyMasked": maskKey(p.APIKey), "hasKey": p.APIKey != "",
+			"apiKeyMasked": masked, "hasKey": len(keys) > 0,
+			"keyCount": len(keys),
 			"protocol": p.Protocol, "enabled": p.Enabled,
 			"models": models, "note": p.Note,
 		})
@@ -428,15 +437,40 @@ func (s *Server) providerViews() []map[string]any {
 
 // decodeProviderIn is the shared save/fetch request body.
 type providerIn struct {
-	ID       string             `json:"id"`
-	Name     string             `json:"name"`
-	BaseURL  string             `json:"baseUrl"`
-	APIKey   string             `json:"apiKey"`
-	Protocol string             `json:"protocol"`
-	Enabled  *bool              `json:"enabled"`
-	Models   []string           `json:"models"`
+	ID       string   `json:"id"`
+	Name     string   `json:"name"`
+	BaseURL  string   `json:"baseUrl"`
+	APIKey   string   `json:"apiKey"`
+	APIKeys  []string `json:"apiKeys"` // one per line; nil (field absent) = keep stored keys
+	Protocol string   `json:"protocol"`
+	Enabled  *bool    `json:"enabled"`
+	Models   []string `json:"models"`
 	Catalog  []lane.ListingMeta `json:"catalog"` // listing rows, numbers included
 	Save     *bool              `json:"save"`    // models fetch: false = probe only, don't persist
+}
+
+// effectiveKeysIn folds the request's key fields into the store invariant:
+// one key in APIKey, two or more in APIKeys. nil APIKeys means "unchanged" —
+// the form is write-only and never round-trips keys.
+func (in *providerIn) effectiveKeysIn() ([]string, bool) {
+	if in.APIKeys == nil {
+		return nil, false
+	}
+	seen := map[string]bool{}
+	out := make([]string, 0, len(in.APIKeys)+1)
+	add := func(k string) {
+		k = strings.TrimSpace(k)
+		if k == "" || seen[k] {
+			return
+		}
+		seen[k] = true
+		out = append(out, k)
+	}
+	for _, k := range in.APIKeys {
+		add(k)
+	}
+	add(in.APIKey)
+	return out, true
 }
 
 func catalogIDs(catalog []lane.ListingMeta) []string {
@@ -524,8 +558,10 @@ func cleanModels(in []string) []string {
 	return out
 }
 
-// adminProviderSave creates or updates one provider. APIKey is write-only: an
-// empty value on update keeps the stored key so the form never round-trips it.
+// adminProviderSave creates or updates one provider. Keys are write-only: an
+// empty value (or an absent apiKeys field) on update keeps the stored keys so
+// the form never round-trips them. One key lands in the legacy APIKey field,
+// two or more in APIKeys — the invariant EffectiveKeys reads.
 func (s *Server) adminProviderSave(w http.ResponseWriter, r *http.Request) {
 	var in providerIn
 	if err := decodeBody(r, &in); err != nil {
@@ -562,8 +598,12 @@ func (s *Server) adminProviderSave(w http.ResponseWriter, r *http.Request) {
 				}
 				p := &c.Providers[k]
 				p.Name, p.BaseURL, p.Protocol = in.Name, in.BaseURL, in.Protocol
-				if in.APIKey != "" {
-					p.APIKey = strings.TrimSpace(in.APIKey)
+				if keys, provided := in.effectiveKeysIn(); provided && len(keys) > 0 {
+					if len(keys) == 1 {
+						p.APIKey, p.APIKeys = keys[0], nil
+					} else {
+						p.APIKey, p.APIKeys = "", keys
+					}
 				}
 				p.Enabled = enabled
 				if in.Models != nil {
@@ -593,8 +633,13 @@ func (s *Server) adminProviderSave(w http.ResponseWriter, r *http.Request) {
 	}
 	p := store.Provider{
 		ID: s.mintProviderID(in.Name), Name: in.Name, BaseURL: in.BaseURL,
-		APIKey: strings.TrimSpace(in.APIKey), Protocol: in.Protocol,
-		Enabled: enabled, Models: cleanModels(in.Models),
+		Protocol: in.Protocol,
+		Enabled:  enabled, Models: cleanModels(in.Models),
+	}
+	if keys, _ := in.effectiveKeysIn(); len(keys) == 1 {
+		p.APIKey = keys[0]
+	} else if len(keys) > 1 {
+		p.APIKeys = keys
 	}
 	mergeCatalog(&p, in.Catalog)
 	s.Store.Mutate(func(c *store.Config) {
@@ -672,7 +717,7 @@ func (s *Server) adminProviderModels(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, 404, map[string]any{"ok": false, "error": "供应商不存在: " + in.ID})
 			return
 		}
-		catalog, err := relay.FetchModelCatalog(ctx, p.BaseURL, p.APIKey, p.Protocol)
+		catalog, err := relay.FetchModelCatalog(ctx, p.BaseURL, relay.FirstKey(&p), p.Protocol)
 		if err != nil {
 			writeJSON(w, 200, map[string]any{"ok": false, "error": err.Error()})
 			return

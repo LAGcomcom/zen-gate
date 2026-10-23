@@ -83,16 +83,29 @@ func (m *Manager) probeNodes(ctx context.Context, nodes []NodeHealth) {
 					cur.LatencyMs = 0
 					cur.IP, cur.Country = "", ""
 				} else {
-					cur.Alive = true
-					cur.IP, cur.Country = eg.IP, eg.Country
-					cur.LatencyMs = lat
-					cur.CoolUntil = 0 // a live egress is proof enough to rejoin rotation now
-					delete(m.nodeStreak, h.ID)
+					m.reviveNode(cur, eg, lat)
 				}
 			}
 		}(h)
 	}
 	wg.Wait()
+}
+
+// reviveNode marks a node alive after a successful probe and clears every
+// failure counter, so it rejoins rotation with a clean slate. Caller holds
+// m.mu.
+func (m *Manager) reviveNode(cur *NodeHealth, eg lane.Egress, lat int) {
+	cur.Alive = true
+	cur.IP, cur.Country = eg.IP, eg.Country
+	cur.LatencyMs = lat
+	cur.CoolUntil = 0 // a live egress is proof enough to rejoin rotation now
+	delete(m.nodeStreak, cur.ID)
+	// The tunnel answered again: the strike counter from ReportDead must
+	// restart, or the first post-revival failure would instantly retire the
+	// node a second time and the "two consecutive strikes" rule would
+	// silently become "one, forever".
+	delete(m.nodeFails, cur.ID)
+	delete(m.nodeFailAt, cur.ID)
 }
 
 // probeOnce dials out through one node's socks inbound, re-trying the whole

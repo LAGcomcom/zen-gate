@@ -160,6 +160,18 @@ func ReportExit(nodeID, model, class string) {
 		r.Report(nodeID, model, class)
 	}
 }
+
+// ReportDeadExit books one tunnel-level failure against a node. This is
+// node-granularity on purpose: a transport reset or timeout says nothing
+// about the model and everything about the tunnel it rode in on.
+func ReportDeadExit(nodeID string) {
+	if nodeID == "" {
+		return
+	}
+	if r := CurrentRotator(); r != nil {
+		r.ReportDead(nodeID)
+	}
+}
 // BaseModelId strips a trailing "(…)" effort suffix so lookups hit the base id.
 func BaseModelId(model string) string {
 	s := strings.TrimSpace(model)
