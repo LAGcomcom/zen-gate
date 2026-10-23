@@ -849,11 +849,6 @@ func (s *Server) adminModelVisibility(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, 500, map[string]any{"ok": false, "error": err.Error()})
 			return
 		}
-		// Keep the lane's probe + failover filters in sync: a newly hidden
-		// model must stop being probed and must not be auto-picked as a
-		// failover/rate-limit-switch target (issue #103). An explicit request
-		// naming it still reaches the model.
-		s.Lane.SetHidden(out)
 		if s.logger != nil {
 			action := "恢复显示"
 			if in.Hidden {

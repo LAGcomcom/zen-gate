@@ -263,11 +263,6 @@ func New(l *lane.Lane, st *store.Store) *Server {
 	// see the raw catalog.
 	l.OnCatalogReload = s.applyStoredTags
 	s.applyStoredTags()
-	// Seed the lane's hidden-model set from the persisted config so models the
-	// user unchecked on the 模型 page are skipped by probing and failover from
-	// the first boot (issue #103). adminModelVisibility keeps it in sync on
-	// every toggle.
-	s.Lane.SetHidden(st.Config().HiddenModels)
 	return s
 }
 
