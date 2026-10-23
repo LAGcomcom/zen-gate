@@ -96,6 +96,8 @@ func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request, rest string
 		s.adminTasks(w, r)
 	case strings.HasPrefix(rest, "probe/") && r.Method == http.MethodPost:
 		s.adminProbeOne(w, strings.TrimPrefix(rest, "probe/"))
+	case strings.HasPrefix(rest, "channel/") && r.Method == http.MethodPost:
+		s.adminChannelToggle(w, r, strings.TrimPrefix(rest, "channel/"))
 	case rest == "autostart" && r.Method == http.MethodPost:
 		var in struct {
 			Enabled bool `json:"enabled"`
@@ -252,6 +254,10 @@ func (s *Server) adminState(w http.ResponseWriter) {
 		// Custom marks a user-added provider's model (no lane probe, no quota).
 		Custom     bool   `json:"custom,omitempty"`
 		ProviderID string `json:"providerId,omitempty"`
+		// Channel names the free-lane source serving this id ("zen" for the
+		// empty-channel lane). Two channels may carry the same id; this is the
+		// attribution the merged list cannot show.
+		Channel string `json:"channel,omitempty"`
 		// Hidden marks a model the user unchecked: servable but not advertised
 		// to agent pickers.
 		Hidden bool `json:"hidden,omitempty"`
@@ -275,6 +281,10 @@ func (s *Server) adminState(w http.ResponseWriter) {
 			ContextWindow: m.ContextWindow, MaxOutput: m.MaxOutput,
 			Efforts: lane.EffortsFor(m, 0, cfg.DefaultMaxTokens, cfg.DefaultEffort),
 			Hidden:  hidden[m.ID],
+		}
+		row.Channel = m.Channel
+		if row.Channel == "" {
+			row.Channel = "zen"
 		}
 		if tag, ok := s.Store.ModelTagOf(m.ID); ok {
 			row.TagSource = tag.Source
@@ -399,6 +409,7 @@ func (s *Server) adminState(w http.ResponseWriter) {
 		"settings":            settings,
 		"probingModel":        s.currentProbingModel(),
 		"providers":           s.providerViews(),
+		"channels":            s.Store.ChannelViews(),
 		"providerPresets":     relay.Presets,
 		"subscriptions":       s.subsState(),
 		"announcements":       activeAnnouncements,
@@ -1456,6 +1467,44 @@ func (s *Server) adminTasks(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, 200, map[string]any{"model": model, "runs": s.probeTasks.history(model)})
+}
+
+// adminChannelToggle flips one free-lane channel's enable flag (the
+// channels/<id>.json file) and rebuilds the catalog so its models leave or
+// rejoin the pickers immediately. Body: {"enabled": true|false}.
+func (s *Server) adminChannelToggle(w http.ResponseWriter, r *http.Request, rest string) {
+	id := strings.TrimSuffix(rest, "/enabled")
+	known := false
+	for _, c := range store.ChannelIDs {
+		if c == id {
+			known = true
+			break
+		}
+	}
+	if !known {
+		writeJSON(w, 404, map[string]any{"ok": false, "error": "未知渠道: " + id})
+		return
+	}
+	var in struct {
+		Enabled *bool `json:"enabled"`
+	}
+	if err := decodeBody(r, &in); err != nil || in.Enabled == nil {
+		writeJSON(w, 400, map[string]any{"ok": false, "error": "需要 enabled 字段"})
+		return
+	}
+	if err := s.Store.SetChannelEnabled(id, *in.Enabled); err != nil {
+		writeJSON(w, 500, map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
+	if s.logger != nil {
+		action := "启用"
+		if !*in.Enabled {
+			action = "停用"
+		}
+		s.logger.Infof("渠道 %s 已%s", id, action)
+	}
+	go s.Lane.RefreshCatalog(context.Background())
+	writeJSON(w, 200, map[string]any{"ok": true, "channel": id, "enabled": *in.Enabled})
 }
 
 // adminProbeOne re-tests a single model on demand and returns its fresh

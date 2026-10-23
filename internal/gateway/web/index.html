@@ -1293,11 +1293,15 @@ function renderModels(s){
       <button class="ghost" id="hide-dead" title="把探测为不可用 / 地区受限的模型全部从 Agent 选择器隐藏（随时可单卡恢复）">隐藏全部不可用</button>
       <button class="ghost" id="show-all" title="恢复全部隐藏的模型${hiddenCount?`（当前 ${hiddenCount} 个）`:""}">恢复全部显示</button>
       <span class="muted" style="font-size:12px" id="eg-line"></span>
+      <span class="muted" style="font-size:12px;margin-left:12px" id="ch-line"></span>
        <span class="muted" style="font-size:12px">思考档位：默认档在「设置」里改；支持思考的模型在 Agent 里是一个模型 + 一个档位选择器。</span>
     </div></div>
     ${sharedNote}
     <div class="mgrid" id="mgrid"></div>`;
   el.querySelector("#eg-line").textContent = s.egress&&s.egress.ip ? `出口: ${s.egress.ip} (${s.egress.country||"?"})` : "出口未知";
+  const chans = s.channels || [];
+  const chEl = el.querySelector("#ch-line");
+  if(chEl) chEl.textContent = "渠道: " + (chans.length ? chans.map(c=>`${c.id}${c.enabled?"":"(已停用)"}·${c.models}`).join("  ") : "—");
   el.querySelector("#reprobe").onclick = async ()=>{ toast("探测中，稍后刷新…"); await api("/reprobe", {}); setTimeout(refresh, 4000); };
   el.querySelector("#hide-dead").onclick = async ()=>{
     const ids = s.models.filter(m=>!m.hidden && (m.state==="unavailable"||m.state==="region-blocked")).map(m=>m.id);
@@ -1341,7 +1345,10 @@ function renderModels(s){
       }
       if(parts.length) quotaRow = `<div class="mquota">${parts.join("")}</div>`;
     }
+    // 渠道归属：两个渠道可能带同一个模型 id，卡片必须写明它由谁服务。
+    const chanTag = m.custom ? "" : `<span class="tag chan" title="这个 id 由哪个免费渠道服务" style="opacity:.8">${esc(m.channel||"zen")}</span>`;
     const tags = (m.systemOne?'<span class="pill warn">判断模型</span>':"")
+      + chanTag
       + (m.vision?'<span class="tag">视觉</span>':"")
       + (m.audioInput?'<span class="tag">音频</span>':"")
       + (m.fileInput?'<span class="tag">文件</span>':"")

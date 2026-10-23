@@ -113,6 +113,18 @@ func main() {
 
 	ln := lane.NewLane()
 	ln.SetDefaultMaxTokens(cfg.DefaultMaxTokens)
+	// Per-channel files: the gate reads channels/<id>.json, and every catalog
+	// rebuild rewrites each channel's roster into its own file.
+	ln.SetChannelGate(st.ChannelEnabled)
+	ln.OnChannelRoster = func(channel string, models []lane.ModelInfo) {
+		rows := make([]store.ChannelModel, 0, len(models))
+		for _, m := range models {
+			rows = append(rows, store.ChannelModel{ID: m.ID, Name: m.Name,
+				ContextWindow: m.ContextWindow, MaxOutput: m.MaxOutput,
+				Vision: m.Vision, Reasoning: m.Reasoning})
+		}
+		st.WriteChannelRoster(channel, rows)
+	}
 	ln.SetExposeRegion(cfg.ExposeRegion)
 	ln.SetFailover(cfg.FailoverEnabled, cfg.FailoverMax)
 	// Smart routing: master switch + failover ordering strategy + the runtime

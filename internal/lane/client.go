@@ -98,6 +98,14 @@ type Lane struct {
 	// the whole map and readers snapshot the reference under mu, so never
 	// edit the map in place.
 	hidden           map[string]bool
+	// channelGate reports whether a free-lane channel is enabled (its
+	// channels/<id>.json file). nil means every channel is on. A disabled
+	// channel empties its catalog bucket — the same shape as a logged-out
+	// account — so its models leave every picker and nothing routes to it.
+	channelGate func(string) bool
+	// OnChannelRoster receives each channel's live roster after a catalog
+	// rebuild, for the per-channel files (store.WriteChannelRoster).
+	OnChannelRoster func(channel string, models []ModelInfo)
 	egress           Egress
 	defaultMaxTokens int
 	exposeRegion     bool
@@ -203,6 +211,19 @@ func (l *Lane) SetCatalog(cat []ModelInfo) {
 		l.OnCatalogReload()
 	}
 	l.notify()
+}
+
+// SetChannelGate installs the per-channel enable check read from the
+// channels/<id>.json files. nil keeps every channel on.
+func (l *Lane) SetChannelGate(fn func(string) bool) {
+	l.mu.Lock()
+	l.channelGate = fn
+	l.mu.Unlock()
+	l.notify()
+}
+
+func (l *Lane) channelOn(id string) bool {
+	return l.channelGate == nil || l.channelGate(id)
 }
 
 // SetHidden replaces the set of user-hidden model ids. Hidden models remain
@@ -413,18 +434,34 @@ func (l *Lane) RefreshCatalog(ctx context.Context) {
 			zen = append(zen, m)
 		}
 	}
-	if ids, err := fetchListingWithColdBootRetry(ctx, len(zen), FetchListing); err == nil && len(ids) > 0 {
-		zen = BuildCatalog(ids)
+	subtracted := false
+	// A channel disabled in its channels/<id>.json file empties exactly like a
+	// logged-out account: deliberate absence publishes, a fetch blip keeps.
+	if l.channelOn("zen") {
+		if ids, err := fetchListingWithColdBootRetry(ctx, len(zen), fetchZenListing); err == nil && len(ids) > 0 {
+			zen = BuildCatalog(ids)
+		}
+	} else {
+		if len(zen) > 0 {
+			subtracted = true
+		}
+		zen = nil
 	}
-	if rows, err := fetchListingWithColdBootRetry(ctx, len(kilo), FetchKiloListing); err == nil && len(rows) > 0 {
-		kilo = BuildKiloCatalog(rows)
+	if l.channelOn("kilo") {
+		if rows, err := fetchListingWithColdBootRetry(ctx, len(kilo), fetchKiloListing); err == nil && len(rows) > 0 {
+			kilo = BuildKiloCatalog(rows)
+		}
+	} else {
+		if len(kilo) > 0 {
+			subtracted = true
+		}
+		kilo = nil
 	}
 	// The WorkBuddy roster is static (three curated free models), so unlike
-	// the two fetched sources it cannot fail a fetch — the only gate is the
-	// account. Logging out empties the bucket on purpose: logged-out models
-	// must leave the pickers, a subtract that is the point here.
-	subtracted := false
-	if l.wbServeable() {
+	// the two fetched sources it cannot fail a fetch — the only gates are the
+	// channel file and the account. Logging out empties the bucket on purpose:
+	// logged-out models must leave the pickers, a subtract that is the point here.
+	if l.channelOn("workbuddy") && l.wbServeable() {
 		wb = buildWorkBuddyCatalog()
 	} else {
 		if len(wb) > 0 {
@@ -438,7 +475,12 @@ func (l *Lane) RefreshCatalog(ctx context.Context) {
 	// account subtracts. Logged in, discovery also seeds the per-account
 	// benefit flags the post path reads back, so this call is load-bearing,
 	// not just a name list.
-	if acct, ok := l.codeArtsReady(); ok {
+	if !l.channelOn("codearts") {
+		if len(ca) > 0 {
+			subtracted = true
+		}
+		ca = nil
+	} else if acct, ok := l.codeArtsReady(); ok {
 		if fresh, err := fetchListingWithColdBootRetry(ctx, len(ca), func(context.Context) ([]ModelInfo, error) {
 			return caFetchModels(acct)
 		}); err == nil && len(fresh) > 0 {
@@ -461,6 +503,27 @@ func (l *Lane) RefreshCatalog(ctx context.Context) {
 	l.mu.Lock()
 	l.catalog = cat
 	l.mu.Unlock()
+	// Publish each channel's live roster to its own file (one channel, one
+	// file): this is the attribution record — which source serves which id.
+	if l.OnChannelRoster != nil {
+		byChannel := map[string][]ModelInfo{}
+		for _, m := range cat {
+			id := m.Channel
+			if id == "" {
+				id = "zen"
+			}
+			byChannel[id] = append(byChannel[id], m)
+		}
+		for _, ch := range []string{"zen", "kilo", "workbuddy", "codearts"} {
+			// A disabled channel keeps its last recorded roster: the file then
+			// still says what the channel would serve, which is the point of
+			// keeping per-channel files at all.
+			if !l.channelOn(ch) {
+				continue
+			}
+			l.OnChannelRoster(ch, byChannel[ch])
+		}
+	}
 	// Replay persisted verdicts synchronously before the broadcast: every
 	// reader woken by notify() (dashboard, agent injection, the lane's own
 	// capability filter) must see the tags-bearing catalog, not the raw
@@ -476,6 +539,12 @@ func (l *Lane) RefreshCatalog(ctx context.Context) {
 // has usually lost a race with something that is about to be ready — sing-box's
 // first inbound comes up seconds after the gateway does — rather than hit an
 // outage a longer wait would outlast.
+// Listing-fetch indirection: vars so tests can stand in fake rosters.
+var (
+	fetchZenListing  = FetchListing
+	fetchKiloListing = FetchKiloListing
+)
+
 const coldBootRetryDelay = 3 * time.Second
 
 // fetchListingWithColdBootRetry runs a source listing and, when the catalog

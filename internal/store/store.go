@@ -295,7 +295,11 @@ type Store struct {
 	cfg       atomic.Pointer[Config]
 	perfDirty bool
 	tags      map[string]ModelTag
-	mu        sync.Mutex
+	// channels is the per-channel state behind <home>/channels/<id>.json —
+	// one file per free-lane channel carrying its enable flag and the model
+	// roster it currently serves (see channels.go).
+	channels map[string]*ChannelFile
+	mu       sync.Mutex
 }
 
 const perfMaxSamples = 30
@@ -377,6 +381,7 @@ func Open() (*Store, error) {
 		return nil, err
 	}
 	s := &Store{Home: home}
+	s.loadChannels()
 	cfg, err := loadJSON[Config](filepath.Join(home, "config.json"))
 	if err != nil || cfg.MainKey == "" {
 		def := defaultConfig()
