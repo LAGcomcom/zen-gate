@@ -135,13 +135,6 @@ type Rotator interface {
 	// Report books one failure against an (exit, model) pair. The ledger is
 	// only ever used to skip a combination known to be bad.
 	Report(nodeID, model, class string)
-	// ReportDead records that a real request through nodeID failed at the
-	// transport layer — the egress tunnel is broken though the node's local
-	// socks inbound still answers ("能连接但不能用"). Two consecutive hits
-	// downgrade the node to Alive=false so the rotation drops it and the
-	// dead-node recheck re-probes it, instead of letting every request hang
-	// for up to responseHeaderTimeout.
-	ReportDead(nodeID string)
 	// Revive clears the (exit, model) pair and the exit's transport cooldown
 	// after a real request for that model succeeded through it — real traffic
 	// is harder evidence than any probe sample. It never lifts bans recorded
