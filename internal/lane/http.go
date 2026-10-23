@@ -623,13 +623,13 @@ func readSSE(r io.Reader, onData func([]byte) error) (*Usage, error) {
 		}
 		var frame map[string]any
 		if json.Unmarshal([]byte(payload), &frame) == nil {
-		if u := mapUsage(frame); u != nil {
-			if usage == nil {
-				usage = u
-			} else {
-				usage.MergeMax(u)
+			if u := mapUsage(frame); u != nil {
+				if usage == nil {
+					usage = u
+				} else {
+					usage.Merge(u)
+				}
 			}
-		}
 			if _, has := frame["error"]; has {
 				return usage, ClassifyFailure(0, jsonString(frame["error"]), 0)
 			}
@@ -720,37 +720,6 @@ func (u *Usage) Merge(o *Usage) {
 	u.CacheRead += o.CacheRead
 	u.CacheWrite += o.CacheWrite
 	u.TotalTokens += o.TotalTokens
-}
-
-// MergeMax folds a streaming usage frame into another by taking the larger of
-// each field rather than adding. Streaming usage is a cumulative snapshot, not a
-// delta: a provider that repeats the same complete block across frames (OpenAI
-// include_usage) would be double-counted by a naive += — inflating input by
-// 30–1400x (issue #105) — while Anthropic legitimately splits input (in
-// message_start) from output (in message_delta) across two frames. Per-field max
-// handles both: repeats collapse to one value, splits and growth take the latest.
-func (u *Usage) MergeMax(o *Usage) {
-	if o == nil {
-		return
-	}
-	if o.Input > u.Input {
-		u.Input = o.Input
-	}
-	if o.Output > u.Output {
-		u.Output = o.Output
-	}
-	if o.Reasoning > u.Reasoning {
-		u.Reasoning = o.Reasoning
-	}
-	if o.CacheRead > u.CacheRead {
-		u.CacheRead = o.CacheRead
-	}
-	if o.CacheWrite > u.CacheWrite {
-		u.CacheWrite = o.CacheWrite
-	}
-	if o.TotalTokens > u.TotalTokens {
-		u.TotalTokens = o.TotalTokens
-	}
 }
 
 func jsonString(v any) string {
