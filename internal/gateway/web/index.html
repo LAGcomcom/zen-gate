@@ -404,10 +404,15 @@
   .mcard .mblurb { font-size:11.5px; line-height:1.55; color:var(--ink-dim); background:var(--panel-2);
     border-left:2px solid var(--accent); border-radius:0 5px 5px 0; padding:5px 8px; margin-top:7px;
     display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden;
-    cursor:pointer; user-select:none; }
+    cursor:pointer; user-select:none; position:relative; }
   /* 点击展开：去掉行数截断，超高改为内部滚动，长说明不再撑爆卡片 */
   .mcard .mblurb.open { -webkit-line-clamp:unset; display:block;
     max-height:170px; overflow-y:auto; user-select:text; }
+  /* 收起态右下角给一个明确的展开入口，别让人猜能点 */
+  .mcard .mblurb:not(.open)::after { content:"展开 ▾"; position:absolute; right:7px; bottom:4px;
+    font-size:10px; color:var(--accent); background:var(--panel-2); padding:0 5px; border-radius:4px; }
+  .mcard .mblurb.open::after { content:"收起 ▴"; position:absolute; right:7px; bottom:4px;
+    font-size:10px; color:var(--ink-mute); background:var(--panel); padding:0 5px; border-radius:4px; }
   /* 收进页首的那一条重复说明：一行细条，不抢卡片里的规格 */
   .mnote { display:flex; gap:10px; align-items:flex-start; padding:9px 13px; margin:0 0 12px;
     border:1px solid var(--hairline-soft); border-left:2px solid var(--accent); border-radius:8px;
@@ -1303,6 +1308,8 @@ document.addEventListener("keydown", e=>{ if(e.key === "Escape" && drawerFor) cl
 
 // 模型页筛选状态：渠道 × 状态 × 搜索词，纯前端过滤，跨刷新保留。
 let mf = { q: "", chan: "", state: "" };
+// 已展开的说明卡（key = 模型id+blurb前缀）：10s 轮询重渲染不塌回。
+const openBlurbs = new Set();
 
 const CHAN_META = {
   zen:       { name: "OpenCode Zen 车道", desc: "免登录免费池，按出口 IP 限额" },
@@ -1488,7 +1495,7 @@ function renderModels(s){
     card.innerHTML = `
       <div class="mhead"><span class="mname" title="${esc(m.name)}">${esc(m.name)}</span>${pill}</div>
       <div class="mid">${(m.channels&&m.channels.length?m.channels:[m.custom?"custom":(m.channel||"zen")]).map(chanBadge).join(" ")} <span style="opacity:.85">${esc(m.id)}</span></div>
-      ${m.blurb && !sharedBlurbSet.has(m.blurb)?`<div class="mblurb" title="${esc(m.blurb)} — 点击展开/收起">${esc(m.blurb)}</div>`:""}
+      ${m.blurb && !sharedBlurbSet.has(m.blurb)?`<div class="mblurb${openBlurbs.has(m.id+"|"+m.blurb.slice(0,20))?" open":""}" data-bk="${esc(m.id)}|${esc(m.blurb.slice(0,20))}" title="${esc(m.blurb)}">${esc(m.blurb)}</div>`:""}
       ${meta.length?`<div class="mmeta">${meta.join("")}</div>`:""}
       ${(tags||eff)?`<div class="mtags">${tags}${eff?`<span class="meff">${eff}</span>`:""}</div>`:""}
       ${quotaRow}
@@ -1578,7 +1585,11 @@ function renderModels(s){
     b.onclick = ()=>openTaskDrawer(b.dataset.m);
   });
   el.querySelectorAll(".mblurb").forEach(b=>{
-    b.onclick = ()=>b.classList.toggle("open");
+    b.onclick = ()=>{
+      b.classList.toggle("open");
+      const key = b.dataset.bk;
+      if(b.classList.contains("open")) openBlurbs.add(key); else openBlurbs.delete(key);
+    };
   });
   el.querySelectorAll(".m-eff").forEach(ch=>{
     ch.onclick = async ()=>{
