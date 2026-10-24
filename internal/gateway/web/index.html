@@ -387,6 +387,60 @@
   .mcard .mhead .mname { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
   .mcard .mfoot { display:flex; justify-content:space-between; align-items:center; gap:8px;
     border-top:1px dashed var(--hairline-soft); padding-top:8px; margin-top:auto; }
+
+  /* ---- v1.9.1 模型页：吸顶 / 最佳选择 / 选用开关 / 主用 / 列表视图 ---- */
+  .msticky { position:sticky; top:0; z-index:30; padding:10px 0 8px;
+    background:color-mix(in srgb, var(--bg) 86%, transparent);
+    backdrop-filter:blur(10px); -webkit-backdrop-filter:blur(10px);
+    border-bottom:1px solid var(--hairline-soft); margin-bottom:4px; }
+  .msticky .row { margin-bottom:8px; }
+  /* 最佳选择横幅 */
+  .hero { display:flex; align-items:center; gap:14px; padding:14px 18px; margin:0 0 14px;
+    border:1px solid color-mix(in srgb,var(--ok) 35%,var(--hairline));
+    background:linear-gradient(135deg, color-mix(in srgb,var(--ok) 9%,var(--panel)), var(--panel));
+    border-radius:14px; box-shadow:var(--card-shadow); }
+  .hero.degraded { border-color:color-mix(in srgb,var(--warn) 40%,var(--hairline));
+    background:linear-gradient(135deg, color-mix(in srgb,var(--warn) 9%,var(--panel)), var(--panel)); }
+  .hero .h-name { font-size:17px; font-weight:700; letter-spacing:-.01em; }
+  .hero .h-meta { display:flex; gap:14px; font-size:12px; color:var(--ink-mute); margin-top:3px; flex-wrap:wrap; }
+  .hero .h-meta b { color:var(--ink); font-variant-numeric:tabular-nums; }
+  .hero .h-act { margin-left:auto; display:flex; gap:8px; align-items:center; }
+  .btn-primary { font-size:13px; font-weight:600; padding:9px 18px; border-radius:10px; cursor:pointer;
+    border:1px solid transparent; background:var(--accent); color:#fff;
+    transition:filter .15s ease, transform .12s ease; }
+  .btn-primary:hover { filter:brightness(1.08); transform:translateY(-1px); }
+  .btn-primary:disabled { opacity:.55; cursor:default; transform:none; }
+  /* 选用：从复选框升级为明确的状态开关 */
+  .vpill { display:inline-flex; align-items:center; gap:5px; font-size:12px; font-weight:600;
+    padding:5px 12px; border-radius:8px; cursor:pointer; user-select:none;
+    border:1px solid var(--hairline); background:var(--panel-2); color:var(--ink-mute);
+    transition:all .15s ease; }
+  .vpill:hover { border-color:var(--accent); color:var(--ink); }
+  .vpill.on { background:var(--accent-soft); border-color:color-mix(in srgb,var(--accent) 55%,transparent); color:var(--accent); }
+  /* 主用星标 */
+  .starbtn { flex:none; width:26px; height:26px; display:inline-flex; align-items:center; justify-content:center;
+    border-radius:7px; border:1px solid transparent; background:transparent; color:var(--ink-mute);
+    cursor:pointer; font-size:14px; line-height:1; transition:all .15s ease; }
+  .starbtn:hover { border-color:var(--hairline); background:var(--panel-2); color:var(--ink); }
+  .starbtn.on { color:#f59e0b; }
+  /* 列表视图 */
+  .mlist { width:100%; border-collapse:collapse; font-size:12.5px; }
+  .mlist th { text-align:left; font-size:11px; font-weight:600; color:var(--ink-mute); text-transform:none;
+    padding:6px 10px; border-bottom:1px solid var(--hairline); position:sticky; top:0;
+    background:var(--bg); white-space:nowrap; }
+  .mlist td { padding:7px 10px; border-bottom:1px solid var(--hairline-soft); vertical-align:middle; }
+  .mlist tr:hover td { background:var(--panel-2); }
+  .mlist .mono { font-family:var(--mono); font-size:11.5px; opacity:.9; }
+  /* chips 计数 */
+  .mchip .cnt { opacity:.65; font-size:10.5px; margin-left:3px; }
+  .mchip.zero { opacity:.4; }
+  /* 视图切换 */
+  .vtoggle { display:inline-flex; border:1px solid var(--hairline); border-radius:8px; overflow:hidden; }
+  .vtoggle button { font-size:11.5px; padding:4px 12px; border:none; background:transparent;
+    color:var(--ink-mute); cursor:pointer; }
+  .vtoggle button.on { background:var(--accent-soft); color:var(--accent); font-weight:600; }
+  /* 空渠道节默认折叠 */
+  .msec .ghost.fold { padding:3px 10px; font-size:11.5px; }
   .mcard .mtest { font-size:11px; padding:2px 9px; flex:none; }
   .mcard .vispick { display:inline-flex; align-items:center; gap:5px; font-size:11.5px;
     color:var(--ink-dim); cursor:pointer; flex:none; user-select:none; }
@@ -1311,6 +1365,10 @@ document.addEventListener("keydown", e=>{ if(e.key === "Escape" && drawerFor) cl
 let mf = { q: "", chan: "", state: "" };
 // 已展开的说明卡（key = 模型id+blurb前缀）：10s 轮询重渲染不塌回。
 const openBlurbs = new Set();
+// 视图模式：grid | list，记忆在 localStorage。
+let mview = localStorage.getItem("zengate.mview") || "grid";
+// 折叠的渠道节：CN 出口下可用为 0 的整组默认收起，手动展开记住。
+const foldedChans = new Set(JSON.parse(localStorage.getItem("zengate.mfold") || "[]"));
 
 const CHAN_META = {
   zen:       { name: "OpenCode Zen 车道", desc: "免登录免费池，按出口 IP 限额" },
@@ -1344,12 +1402,29 @@ function rawDetailTitle(m){
 }
 const chanBadge = (ch) => `<span class="chan-badge chan-${esc(ch)}">${esc(ch)}</span>`;
 
+// 一键主用：设默认模型 + 确保选用，两步都成功才算成。
+async function setPrimary(id){
+  const cur = STATE.settings.defaultModel;
+  if(cur === id){
+    const j = await api("/settings", { defaultModel: "" });
+    if(j){ toast("已取消主用，恢复按列表第一个"); refresh(); }
+    return;
+  }
+  const m = STATE.models.find(x => x.id === id);
+  if(m && m.hidden){
+    const v = await api("/models/visibility", { id, hidden: false });
+    if(!v) return;
+  }
+  const j = await api("/settings", { defaultModel: id });
+  if(j){ toast("已设为主用模型：" + id + "，正在重新注入已开启的 Agent"); refresh(); }
+}
+
 function renderModels(s){
   const el = $("#page-models");
   // 任何输入没变就不重画：任务运行时的 1s 轮询只动数字的话，整页 innerHTML
   // 重建会闪、还会丢滚动位置。
-  const sig = JSON.stringify([mf, s.probingModel, s.channels,
-    s.models.map(m => [m.id, m.state, m.hidden, m.ttftMs, m.ttftMedMs,
+  const sig = JSON.stringify([mf, mview, [...foldedChans], s.probingModel, s.channels,
+    s.settings.defaultModel, s.models.map(m => [m.id, m.state, m.hidden, m.ttftMs, m.ttftMedMs,
       m.quotaUsed, m.quotaEstimate, m.throttledAt, m.task && m.task.status, m.detail])]);
   if(el.dataset.sig === sig) return;
   const scrollY = window.scrollY;
@@ -1365,8 +1440,6 @@ function renderModels(s){
   const customProbed = customModels.filter(m=>m.state!=="custom").length;
   const avail = laneModels.filter(m=>m.state==="available" && !m.hidden).length;
   const hiddenCount = s.models.filter(m=>m.hidden).length;
-  // 同一句免责文案在十几张卡里逐字重复，会把卡片中部整个占满、还比规格数字更重：
-  // 出现 3 次以上的收到页首说一次，卡片里只留这张卡自己的说明。
   const blurbCount = new Map();
   for(const m of sorted) if(m.blurb) blurbCount.set(m.blurb, (blurbCount.get(m.blurb)||0)+1);
   const sharedBlurbs = [...blurbCount].filter(([,n])=>n>=3).map(([b])=>b);
@@ -1374,32 +1447,92 @@ function renderModels(s){
   const sharedNote = sharedBlurbs.length
     ? `<div class="mnote"><span class="k">说明</span><div>${sharedBlurbs.map(b=>`<div>${esc(b)}</div>`).join("")}</div></div>` : "";
 
-  // ---- 筛选 chips ----
-  const chanChip = (id, label) =>
-    `<span class="mchip ${mf.chan===id?"on":""}" data-chan="${id}">${label}</span>`;
-  const stateChip = (id, label) =>
-    `<span class="mchip ${mf.state===id?"on":""}" data-state="${id}">${label}</span>`;
-  const toolbar = `<div class="card"><div class="row">
-      <button class="ghost" id="reprobe">重新探测可用性</button>
-      <button class="ghost" id="hide-dead" title="把探测为不可用 / 地区受限的模型从 Agent 选择器隐藏；这是对当前探测结果的意见，探到可用会自动解除">隐藏全部不可用</button>
-      <button class="ghost" id="show-all" title="恢复全部隐藏的模型${hiddenCount?`（当前 ${hiddenCount} 个）`:""}">恢复全部显示</button>
-      <span class="muted" style="font-size:12px" id="eg-line"></span>
-      <span class="muted" style="font-size:12px;margin-left:12px">思考档位：默认档在「设置」里改；支持思考的模型在 Agent 里是一个模型 + 一个档位选择器。</span>
-    </div>
-    <div class="mfilters">
+  // ---- hero：现在用哪个 ----
+  const defId = s.settings.defaultModel || "";
+  const defModel = defId ? s.models.find(m => m.id === defId) : null;
+  const candidates = s.models.filter(m => m.state === "available" && !m.hidden && !m.systemOne);
+  const best = (defModel && defModel.state === "available" && !defModel.hidden && !defModel.systemOne)
+    ? defModel
+    : (candidates.length ? candidates.reduce((a,b) => {
+        const ka = (a.ttftMedMs||a.ttftMs||99999) - (b.ttftMedMs||b.ttftMs||99999);
+        return ka !== 0 ? (ka < 0 ? a : b) : ((b.contextWindow||0) - (a.contextWindow||0) > 0 ? b : a);
+      }) : null);
+  let hero = "";
+  if(best){
+    const isPrimary = best.id === defId;
+    const chans = best.channels && best.channels.length ? best.channels : [best.custom?"custom":(best.channel||"zen")];
+    const caps = [best.vision?"视觉":"", best.audioInput?"音频":"", best.fileInput?"文件":"", best.reasoning?"思考":""].filter(Boolean).join(" · ");
+    hero = `<div class="hero${defModel && defModel.id !== best.id ? " degraded" : ""}">
+      <div>
+        <div class="h-name">${isPrimary ? "主用中：" : "现在用这个："}${esc(best.name)}</div>
+        <div class="h-meta">
+          ${chans.map(chanBadge).join(" ")}
+          <span>首字 <b>${best.ttftMs?(best.ttftMs/1000).toFixed(1)+"s":(best.ttftMedMs?(best.ttftMedMs/1000).toFixed(1)+"s":"—")}</b></span>
+          ${best.contextWindow?`<span>上下文 <b>${fmtCap(best.contextWindow)}</b></span>`:""}
+          ${caps?`<span>${esc(caps)}</span>`:""}
+        </div>
+        ${defModel && defModel.id !== best.id && defModel.state !== "available" ? `<div class="h-meta" style="margin-top:4px;color:var(--warn)">你的默认 ${esc(defModel.id)} 当前${defModel.state==="throttled"?"限流中":"不可用"}，建议切换</div>` : ""}
+      </div>
+      <div class="h-act">
+        <button class="btn-primary" data-primary="${esc(best.id)}" ${isPrimary?"disabled":""} title="设为默认模型并确保出现在 Agent 选择器里">${isPrimary?"✓ 当前主用":"设为主用"}</button>
+      </div>
+    </div>`;
+  } else if(laneModels.length){
+    const region = laneModels.filter(m=>m.state==="region-blocked").length;
+    hero = `<div class="hero degraded"><div>
+      <div class="h-name">当前出口没有实测可用的免费模型</div>
+      <div class="h-meta">${region?`<span>${region} 个被地区门拦下——换海外出口（订阅轮询）大概率直接可用</span>`:"<span>多半是限流窗口，等一会儿或换出口再试</span>"}</div>
+    </div></div>`;
+  }
+
+  // ---- 计数 ----
+  const cnt = (arr, fn) => arr.filter(fn).length;
+  const stateCounts = {
+    available: cnt(s.models, m=>m.state==="available"),
+    throttled: cnt(s.models, m=>m.state==="throttled"),
+    "region-blocked": cnt(s.models, m=>m.state==="region-blocked"),
+    unavailable: cnt(s.models, m=>m.state==="unavailable"),
+    unknown: cnt(s.models, m=>m.state==="unknown"||m.state==="custom"),
+  };
+
+  // ---- 双层吸顶工具栏 ----
+  const chip = (kind, id, label, n) =>
+    `<span class="mchip ${mf[kind]===id?"on":""}${n===0?" zero":""}" data-${kind}="${id}">${label}${n!=null?`<span class="cnt">${n}</span>`:""}</span>`;
+  const active = mf.q || mf.chan || mf.state;
+  const toolbar = `<div class="msticky">
+    <h2 class="pt">模型 <span class="sub">${avail}/${laneModels.length} 可用${customModels.length?` · 自定义 ${customProbed}/${customModels.length} 已实测`:""}${hiddenCount?` · 已隐藏 ${hiddenCount}`:""}</span></h2>
+    <div class="card"><div class="row">
       <input class="msearch" id="m-q" placeholder="搜索模型 id / 名称…" value="${esc(mf.q)}">
       <select class="msearch" id="m-def" title="注入到各 Agent 配置里的默认模型（留空 = 列表第一个）" style="width:auto;cursor:pointer">
         <option value="">默认模型：（列表第一个）</option>
         ${sorted.filter(m=>!m.hidden&&!m.systemOne).map(m=>`<option value="${esc(m.id)}" ${s.settings.defaultModel===m.id?"selected":""}>默认：${esc(m.id)}</option>`).join("")}
       </select>
-      <span class="mchip ${mf.chan===""?"on":""}" data-chan="">全部渠道</span>
-      ${["zen","kilo","workbuddy","codearts","custom"].map(c=>chanChip(c, c==="custom"?"自定义":c)).join("")}
+      <button class="ghost" id="reprobe">重新探测可用性</button>
+      <span class="muted" style="font-size:12px" id="eg-line"></span>
+      <span class="vtoggle" style="margin-left:auto" title="卡片看细节，列表快扫全量">
+        <button data-view="grid" class="${mview==="grid"?"on":""}">卡片</button>
+        <button data-view="list" class="${mview==="list"?"on":""}">列表</button>
+      </span>
+    </div>
+    <div class="mfilters">
+      ${chip("chan","","全部渠道",null)}
+      ${["zen","kilo","workbuddy","codearts"].map(c=>chip("chan",c,c,cnt(s.models,m=>!m.custom&&(m.channel||"zen")===c))).join("")}
+      ${chip("chan","custom","自定义",customModels.length)}
       <span style="width:8px"></span>
-      <span class="mchip ${mf.state===""?"on":""}" data-state="">全部状态</span>
-      ${stateChip("available","可用")}${stateChip("throttled","限流")}${stateChip("region-blocked","地区受限")}${stateChip("unavailable","不可用")}${stateChip("unknown","未测")}
-    </div></div>`;
+      ${chip("state","","全部状态",null)}
+      ${chip("state","available","可用",stateCounts.available)}
+      ${chip("state","throttled","限流",stateCounts.throttled)}
+      ${chip("state","region-blocked","地区受限",stateCounts["region-blocked"])}
+      ${chip("state","unavailable","不可用",stateCounts.unavailable)}
+      <span style="width:8px"></span>
+      <button class="ghost" id="hide-dead" title="把探测为不可用 / 地区受限的模型从 Agent 选择器隐藏；探到可用会自动解除">隐藏全部不可用</button>
+      <button class="ghost" id="show-all" title="恢复全部隐藏的模型${hiddenCount?`（当前 ${hiddenCount} 个）`:""}">恢复显示</button>
+      <span class="muted" id="m-count" style="font-size:11.5px;margin-left:auto"></span>
+      ${active?`<span class="mchip on" id="m-clear" style="cursor:pointer">✕ 清除筛选</span>`:""}
+    </div></div>
+  </div>`;
 
-  // ---- 按渠道分组（一组一节，节头带主开关；Magpie 的 profile 卡思路） ----
+  // ---- 过滤 ----
   const chans = s.channels || [];
   const chanState = Object.fromEntries(chans.map(c=>[c.id, c]));
   const match = (m) =>
@@ -1417,108 +1550,150 @@ function renderModels(s){
   groups.push({ ch: "custom", meta: CHAN_META.custom, enabled: true, roster: customModels.length,
     cards: sorted.filter(m => m.custom) });
 
+  const totalShown = s.models.filter(match).length;
+
+  // ---- 列表视图 ----
+  let listBody = "";
+  if(mview === "list"){
+    const rows = s.models.filter(m => !m.systemOne && match(m));
+    listBody = `<table class="mlist"><thead><tr>
+      <th>状态</th><th>模型</th><th>渠道</th><th>首字</th><th>典型</th><th>上下文</th><th>输出</th><th>能力</th><th style="text-align:right">操作</th>
+    </tr></thead><tbody>`;
+    for(const m of rows){
+      const chans2 = m.channels && m.channels.length ? m.channels : [m.custom?"custom":(m.channel||"zen")];
+      const caps = [m.vision?"视":"", m.audioInput?"音":"", m.fileInput?"文":"", m.reasoning?"思":""].filter(Boolean).join(" ");
+      const hd = humanDetail(m);
+      listBody += `<tr>
+        <td>${m.id === s.probingModel ? '<span class="pill warn">探测中</span>' : statePill(m.state)}${m.hidden?' <span class="pill hidsync">隐</span>':""}</td>
+        <td><b>${esc(m.name)}</b><div class="mono" style="opacity:.75">${esc(m.id)}</div>${hd?`<div style="font-size:11px;color:var(--ink-mute)">${esc(hd)}</div>`:""}</td>
+        <td>${chans2.map(chanBadge).join(" ")}</td>
+        <td>${m.ttftMs?(m.ttftMs/1000).toFixed(1)+"s":"—"}</td>
+        <td>${m.ttftMedMs?(m.ttftMedMs/1000).toFixed(1)+"s":"—"}</td>
+        <td>${m.contextWindow?fmtCap(m.contextWindow):"—"}</td>
+        <td>${m.maxOutput?fmtCap(m.maxOutput):"—"}</td>
+        <td>${caps||"—"}</td>
+        <td style="text-align:right;white-space:nowrap">
+          <button class="starbtn ${s.settings.defaultModel===m.id?"on":""}" data-primary="${esc(m.id)}" title="设为主用（默认模型）">★</button>
+          <button class="vpill ${m.hidden?"":"on"}" data-vis="${esc(m.id)}">${m.hidden?"＋选用":"✓ 已选用"}</button>
+          <button class="ghost mtest" data-m="${esc(m.id)}">测试</button>
+        </td>
+      </tr>`;
+    }
+    listBody += `</tbody></table>${rows.length?"":`<div class="mempty">没有匹配的模型</div>`}`;
+  }
+
+  // ---- 卡片分组视图 ----
   let body = "";
   let anyShown = false;
-  for(const g of groups){
-    const shown = g.cards.filter(match);
-    const disabled = !g.enabled;
-    if(!shown.length && (mf.q || mf.state || (mf.chan && mf.chan !== g.ch))) continue;
-    anyShown = anyShown || shown.length > 0;
-    body += `<div class="msec">
-      <span class="dot ${disabled?"off":"on"}"></span>
-      <span class="chname">${esc(g.meta.name)}</span>
-      ${g.ch!=="custom"?chanBadge(g.ch):`<span class="chan-badge chan-custom">custom</span>`}
-      <span class="chdesc">${esc(g.meta.desc)}</span>
-      ${disabled?`<span class="pill region">已停用</span><button class="ghost" data-en="${g.ch}">启用</button>`
-                :`<span class="chcount">${shown.length}/${g.cards.length} 个模型${g.ch!=="custom"&&g.roster?` · 渠道文件名单 ${g.roster}${g.refreshedAt?` · 更新于 ${new Date(g.refreshedAt*1000).toTimeString().slice(0,5)}`:""}`:""}</span>`}
-    </div>`;
-    if(disabled && !shown.length){
-      body += `<div class="mempty">渠道已停用 —— 它的 ${g.roster||0} 个模型已从所有 Agent 选择器撤下；点「启用」按渠道文件里的名单恢复。</div>`;
-      continue;
-    }
-    if(!shown.length){
-      body += `<div class="mempty">${mf.q?"没有匹配的模型":"这个渠道当前没有可展示的模型"}</div>`;
-      continue;
-    }
-    body += `<div class="mgrid">`;
-    for(const m of shown){
-    const card = document.createElement("div");
-    card.className = "mcard st-" + (m.hidden ? "hidden" : (m.state||"unknown")) + (m.hidden ? " dimmed" : "");
-    // 生效默认档：模型偏好 → 全局默认 → balanced；★ 跟随它，点击档位即设/清偏好。
-    const effLevel = (s.modelPrefs||{})[m.id] || s.settings.defaultEffort || "balanced";
-    const canonEff = (rid, i, n) => ({light:"light",minimal:"light",low:"light",
-      balanced:"balanced",medium:"balanced",deep:"deep",high:"deep",xhigh:"deep",max:"deep"}[String(rid).toLowerCase()]
-      || (n<=1 ? "balanced" : i < n/3 ? "light" : i < 2*n/3 ? "balanced" : "deep"));
-    const eff = (m.efforts||[]).map((e,i,arr)=>`<span class="eff m-eff" data-m="${esc(m.id)}" data-eff="${esc(e.id)}"
-      title="点一下 = 这个模型无明确档位的请求都走这一档（★ 为当前默认；再点一次清除）"
-      style="cursor:pointer">${esc(e.zh || e.name || e.id)} <b>${(e.tokens/1024|0)}K</b>${canonEff(e.id,i,arr.length)===effLevel?" ★":""}</span>`).join("");
-    const probeBusy = !!(m.task && m.task.kind === "probe" && m.task.status === "running");
-    const capsBusy = !!(m.task && m.task.kind === "caps" && m.task.status === "running");
-    const pill = m.id === s.probingModel
-      ? `<span class="pill warn">探测中…</span>`
-      : (m.hidden ? `<span class="pill hidsync">已隐藏</span>` : statePill(m.state));
-    // Observed-quota row: usage vs estimated daily ceiling + throttle ETA.
-    let quotaRow = "";
-    if(!m.systemOne && !m.custom){
-      const used = m.quotaUsed||0, est = m.quotaEstimate||0;
-      const parts = [];
-      if(est > 0){
-        const pct = Math.min(100, Math.round(used/est*100));
-        const cls = pct > 90 ? "bad" : (pct > 70 ? "warn" : "ok");
-        parts.push(`<div class="qbar" title="今日 ${fmtK(used)} / 预估额度 ${fmtK(est)} tok"><i class="${cls}" style="width:${pct}%"></i></div>`
-          + `<div class="qtext">今日 ${fmtK(used)} / 预估 ${fmtK(est)} · ${pct}%</div>`);
-      } else if(used > 0){
-        parts.push(`<div class="qtext">今日 ${fmtK(used)} tok · 额度统计中</div>`);
-      }
-      if(m.throttledAt){
-        const since = fmtUptime(Math.max(1,(Date.now()-m.throttledAt)/1000));
-        const eta = m.recoverEta ? ` · 预计 ${new Date(m.recoverEta).toTimeString().slice(0,5)} 恢复` : "";
-        parts.push(`<div class="qtext warn2">暂时限流 ${since}${eta}</div>`);
-      }
-      if(parts.length) quotaRow = `<div class="mquota">${parts.join("")}</div>`;
-    }
-    // 标签只留影响决策的：判断模型、模态；能力来源只标「实测」（规则/未标注是噪音）。
-    const tags = (m.systemOne?'<span class="pill warn">判断模型</span>':"")
-      + (m.vision?'<span class="tag">视觉</span>':"")
-      + (m.audioInput?'<span class="tag">音频</span>':"")
-      + (m.fileInput?'<span class="tag">文件</span>':"")
-      + (m.reasoning?'<span class="tag">思考</span>':"")
-      + (m.tagSource==="实测"?'<span class="tag" style="opacity:.65">实测</span>':"");
-    // 关键数字一行：没有实测样本就不占位，两个首字合并成一条。
-    const meta = [];
-    if(m.ttftMs || m.ttftMedMs){
-      meta.push(`<span title="最近一次探测的首字${m.ttftCount?`；近 ${m.ttftCount} 次样本中位数 ${m.ttftMedMs?(m.ttftMedMs/1000).toFixed(1)+"s":"—"}，路由按它排序`:""}">首字 <b>${m.ttftMs?(m.ttftMs/1000).toFixed(1)+"s":"—"}</b>${m.ttftMedMs?` <span style="opacity:.7">· 典型 ${(m.ttftMedMs/1000).toFixed(1)}s</span>`:""}</span>`);
-    }
-    if(m.contextWindow) meta.push(`<span title="${m.custom?"供应商 /v1/models 声明或 AI 标注给出":"本地能力表"}">上下文 <b>${fmtCap(m.contextWindow)}</b></span>`);
-    if(m.maxOutput) meta.push(`<span title="${m.custom?"供应商声明的完成上限（只写回显上下文窗口的供应商不显示）":"本地能力表"}">输出 <b>${fmtCap(m.maxOutput)}</b></span>`);
-    const hd = humanDetail(m);
-    const rawTitle = rawDetailTitle(m);
-    card.innerHTML = `
-      <div class="mhead"><span class="mname" title="${esc(m.name)}">${esc(m.name)}</span>${pill}</div>
-      <div class="mid">${(m.channels&&m.channels.length?m.channels:[m.custom?"custom":(m.channel||"zen")]).map(chanBadge).join(" ")} <span style="opacity:.85">${esc(m.id)}</span></div>
-      ${m.blurb && !sharedBlurbSet.has(m.blurb)?`<div class="mblurb${openBlurbs.has(m.id+"|"+m.blurb.slice(0,20))?" open":""}" data-bk="${esc(m.id)}|${esc(m.blurb.slice(0,20))}" title="${esc(m.blurb)}">${esc(m.blurb)}</div>`:""}
-      ${meta.length?`<div class="mmeta">${meta.join("")}</div>`:""}
-      ${(tags||eff)?`<div class="mtags">${tags}${eff?`<span class="meff">${eff}</span>`:""}</div>`:""}
-      ${quotaRow}
-      ${hd?`<div class="mdetail" ${rawTitle?`title="${esc(rawTitle)}"`:""}>${esc(hd)}</div>`:""}
-      ${taskBand(m)}
-      <div class="mfoot">
-        <label class="vispick" title="勾选 = 出现在 Agent 的模型选择器里；取消勾选只是不对外展示，直接点名调用仍可用">
-          <input type="checkbox" data-vis="${esc(m.id)}" ${m.hidden?"":"checked"}><span>选用</span></label>
-        <button class="ghost mtest" data-m="${esc(m.id)}" ${probeBusy?"disabled":""} title="${m.custom?"向该供应商发一个最小请求，实测可用性与首字延迟":"单独探测这个模型的可用性"}">${probeBusy?"测试中…":"测试"}</button>
-        ${m.custom?`<button class="ghost capstest" data-m="${esc(m.id)}" ${capsBusy?"disabled":""} title="用你的 Key 发最小图像 / 音频 / PDF 请求，实测该模型真正支持的输入模态（结果最优先）">${capsBusy?"实测中…":"能力实测"}</button>`:""}
+  if(mview === "grid"){
+    for(const g of groups){
+      const shown = g.cards.filter(match);
+      const disabled = !g.enabled;
+      const availInGroup = g.cards.filter(m => m.state === "available" && !m.hidden).length;
+      if(!shown.length && (mf.q || mf.state || (mf.chan && mf.chan !== g.ch))) continue;
+      anyShown = anyShown || shown.length > 0;
+      // 可用为 0 的渠道默认折叠（手动展开记住）；明确筛选时不折叠
+      const folded = !disabled && availInGroup === 0 && !mf.state && (!mf.chan || mf.chan === g.ch) && foldedChans.has(g.ch);
+      body += `<div class="msec">
+        <span class="dot ${disabled?"off":"on"}"></span>
+        <span class="chname">${esc(g.meta.name)}</span>
+        ${g.ch!=="custom"?chanBadge(g.ch):`<span class="chan-badge chan-custom">custom</span>`}
+        <span class="chdesc">${esc(g.meta.desc)}</span>
+        ${disabled?`<span class="pill region">已停用</span><button class="ghost" data-en="${g.ch}">启用</button>`
+          :`<span class="chcount">${shown.length}/${g.cards.length} 个${availInGroup?` · 可用 ${availInGroup}`:""}${g.ch!=="custom"&&g.roster?` · 名单 ${g.roster}${g.refreshedAt?` · 更新 ${new Date(g.refreshedAt*1000).toTimeString().slice(0,5)}`:""}`:""}</span>
+            ${!disabled && availInGroup === 0 && !mf.state && (!mf.chan || mf.chan === g.ch) ? `<button class="ghost fold" data-fold="${g.ch}">${folded?"展开":"收起"}</button>`:""}`}
       </div>`;
-    body += card.outerHTML;
+      if(disabled && !shown.length){
+        body += `<div class="mempty">渠道已停用 —— 它的 ${g.roster||0} 个模型已从所有 Agent 选择器撤下；点「启用」按渠道文件里的名单恢复。</div>`;
+        continue;
+      }
+      if(folded){
+        body += `<div class="mempty" style="padding:8px 0">当前出口这组全部不可用已折叠 · <button class="ghost fold" data-fold="${g.ch}" style="padding:2px 8px">展开看 ${shown.length} 个</button></div>`;
+        continue;
+      }
+      if(!shown.length){
+        body += `<div class="mempty">${mf.q?"没有匹配的模型":"这个渠道当前没有可展示的模型"}</div>`;
+        continue;
+      }
+      body += `<div class="mgrid">`;
+      for(const m of shown){
+        const card = document.createElement("div");
+        card.className = "mcard st-" + (m.hidden ? "hidden" : (m.state||"unknown")) + (m.hidden ? " dimmed" : "");
+        const effLevel = (s.modelPrefs||{})[m.id] || s.settings.defaultEffort || "balanced";
+        const canonEff = (rid, i, n) => ({light:"light",minimal:"light",low:"light",
+          balanced:"balanced",medium:"balanced",deep:"deep",high:"deep",xhigh:"deep",max:"deep"}[String(rid).toLowerCase()]
+          || (n<=1 ? "balanced" : i < n/3 ? "light" : i < 2*n/3 ? "balanced" : "deep"));
+        const eff = (m.efforts||[]).map((e,i,arr)=>`<span class="eff m-eff" data-m="${esc(m.id)}" data-eff="${esc(e.id)}"
+          title="点一下 = 这个模型无明确档位的请求都走这一档（★ 为当前默认；再点一次清除）"
+          style="cursor:pointer">${esc(e.zh || e.name || e.id)} <b>${(e.tokens/1024|0)}K</b>${canonEff(e.id,i,arr.length)===effLevel?" ★":""}</span>`).join("");
+        const probeBusy = !!(m.task && m.task.kind === "probe" && m.task.status === "running");
+        const capsBusy = !!(m.task && m.task.kind === "caps" && m.task.status === "running");
+        const pill = m.id === s.probingModel
+          ? `<span class="pill warn">探测中…</span>`
+          : (m.hidden ? `<span class="pill hidsync">已隐藏</span>` : statePill(m.state));
+        let quotaRow = "";
+        if(!m.systemOne && !m.custom){
+          const used = m.quotaUsed||0, est = m.quotaEstimate||0;
+          const parts = [];
+          if(est > 0){
+            const pct = Math.min(100, Math.round(used/est*100));
+            const cls = pct > 90 ? "bad" : (pct > 70 ? "warn" : "ok");
+            parts.push(`<div class="qbar" title="今日 ${fmtK(used)} / 预估额度 ${fmtK(est)} tok"><i class="${cls}" style="width:${pct}%"></i></div>`
+              + `<div class="qtext">今日 ${fmtK(used)} / 预估 ${fmtK(est)} · ${pct}%</div>`);
+          } else if(used > 0){
+            parts.push(`<div class="qtext">今日 ${fmtK(used)} tok · 额度统计中</div>`);
+          }
+          if(m.throttledAt){
+            const since = fmtUptime(Math.max(1,(Date.now()-m.throttledAt)/1000));
+            const eta = m.recoverEta ? ` · 预计 ${new Date(m.recoverEta).toTimeString().slice(0,5)} 恢复` : "";
+            parts.push(`<div class="qtext warn2">暂时限流 ${since}${eta}</div>`);
+          }
+          if(parts.length) quotaRow = `<div class="mquota">${parts.join("")}</div>`;
+        }
+        const tags = (m.systemOne?'<span class="pill warn">判断模型</span>':"")
+          + (m.vision?'<span class="tag">视觉</span>':"")
+          + (m.audioInput?'<span class="tag">音频</span>':"")
+          + (m.fileInput?'<span class="tag">文件</span>':"")
+          + (m.reasoning?'<span class="tag">思考</span>':"")
+          + (m.tagSource==="实测"?'<span class="tag" style="opacity:.65">实测</span>':"");
+        const meta = [];
+        if(m.ttftMs || m.ttftMedMs){
+          meta.push(`<span title="最近一次探测的首字${m.ttftCount?`；近 ${m.ttftCount} 次样本中位数 ${m.ttftMedMs?(m.ttftMedMs/1000).toFixed(1)+"s":"—"}，路由按它排序`:""}">首字 <b>${m.ttftMs?(m.ttftMs/1000).toFixed(1)+"s":"—"}</b>${m.ttftMedMs?` <span style="opacity:.7">· 典型 ${(m.ttftMedMs/1000).toFixed(1)}s</span>`:""}</span>`);
+        }
+        if(m.contextWindow) meta.push(`<span title="${m.custom?"供应商 /v1/models 声明或 AI 标注给出":"本地能力表"}">上下文 <b>${fmtCap(m.contextWindow)}</b></span>`);
+        if(m.maxOutput) meta.push(`<span title="${m.custom?"供应商声明的完成上限（只写回显上下文窗口的供应商不显示）":"本地能力表"}">输出 <b>${fmtCap(m.maxOutput)}</b></span>`);
+        const hd = humanDetail(m);
+        const rawTitle = rawDetailTitle(m);
+        const isPrimary = s.settings.defaultModel === m.id;
+        card.innerHTML = `
+          <div class="mhead">
+            <button class="starbtn ${isPrimary?"on":""}" data-primary="${esc(m.id)}" title="${isPrimary?"当前主用模型，点一下取消":"设为主用（默认模型 + 出现在选择器）"}">★</button>
+            <span class="mname" title="${esc(m.name)}">${esc(m.name)}</span>${pill}</div>
+          <div class="mid">${(m.channels&&m.channels.length?m.channels:[m.custom?"custom":(m.channel||"zen")]).map(chanBadge).join(" ")} <span style="opacity:.85">${esc(m.id)}</span></div>
+          ${m.blurb && !sharedBlurbSet.has(m.blurb)?`<div class="mblurb${openBlurbs.has(m.id+"|"+m.blurb.slice(0,20))?" open":""}" data-bk="${esc(m.id)}|${esc(m.blurb.slice(0,20))}" title="${esc(m.blurb)}">${esc(m.blurb)}</div>`:""}
+          ${meta.length?`<div class="mmeta">${meta.join("")}</div>`:""}
+          ${(tags||eff)?`<div class="mtags">${tags}${eff?`<span class="meff">${eff}</span>`:""}</div>`:""}
+          ${quotaRow}
+          ${hd?`<div class="mdetail" ${rawTitle?`title="${esc(rawTitle)}"`:""}>${esc(hd)}</div>`:""}
+          ${taskBand(m)}
+          <div class="mfoot">
+            <button class="vpill ${m.hidden?"":"on"}" data-vis="${esc(m.id)}" title="出现在 Agent 的模型选择器里；关掉只是不展示，点名调用仍可用">${m.hidden?"＋ 选用":"✓ 已选用"}</button>
+            <span>
+              <button class="ghost mtest" data-m="${esc(m.id)}" ${probeBusy?"disabled":""} title="${m.custom?"向该供应商发一个最小请求，实测可用性与首字延迟":"单独探测这个模型的可用性"}">${probeBusy?"测试中…":"测试"}</button>
+              ${m.custom?`<button class="ghost capstest" data-m="${esc(m.id)}" ${capsBusy?"disabled":""} title="用你的 Key 发最小图像 / 音频 / PDF 请求，实测该模型真正支持的输入模态（结果最优先）">${capsBusy?"实测中…":"能力实测"}</button>`:""}
+            </span>
+          </div>`;
+        body += card.outerHTML;
+      }
+      body += `</div>`;
     }
-    body += `</div>`;
+    if(!anyShown && (mf.q || mf.chan || mf.state)){
+      body += `<div class="mempty">没有匹配的模型 —— 换个筛选条件试试</div>`;
+    }
   }
-  if(!anyShown && (mf.q || mf.chan || mf.state)){
-    body += `<div class="mempty">没有匹配的模型 —— 换个筛选条件试试</div>`;
-  }
-  el.innerHTML = `<h2 class="pt">模型 <span class="sub">可用性由本机网络出口实测（每 ${s.settings.probeIntervalMinutes} 分钟）· ${avail}/${laneModels.length} 个免费车道可用${customModels.length?` · 自定义 ${customProbed}/${customModels.length} 已实测`:""} · 勾选「选用」才会出现在 Agent 的模型选择器里${hiddenCount?` · 已隐藏 ${hiddenCount} 个`:""}</span></h2>
-    ${toolbar}
-    ${sharedNote}
-    ${body}`;
+
+  el.innerHTML = `${toolbar}${hero}${sharedNote}${mview==="list"?listBody:body}`;
+  el.querySelector("#m-count").textContent = `${totalShown} 个结果`;
 
   el.querySelector("#eg-line").textContent = s.egress&&s.egress.ip ? `出口: ${s.egress.ip} (${s.egress.country||"?"})` : "出口未知";
   el.querySelector("#reprobe").onclick = async ()=>{ toast("探测中，稍后刷新…"); await api("/reprobe", {}); setTimeout(refresh, 4000); };
@@ -1534,12 +1709,27 @@ function renderModels(s){
     const j = await api("/models/visibility", { ids, hidden: false });
     if(j){ toast("已全部恢复显示"); refresh(); }
   };
-  // 筛选 chips 与搜索框
   el.querySelectorAll(".mchip[data-chan]").forEach(ch=>{
     ch.onclick = ()=>{ mf.chan = ch.dataset.chan; renderModels(s); };
   });
   el.querySelectorAll(".mchip[data-state]").forEach(ch=>{
     ch.onclick = ()=>{ mf.state = ch.dataset.state; renderModels(s); };
+  });
+  const clearEl = el.querySelector("#m-clear");
+  if(clearEl) clearEl.onclick = ()=>{ mf = { q:"", chan:"", state:"" }; renderModels(s); };
+  el.querySelectorAll(".vtoggle button").forEach(b=>{
+    b.onclick = ()=>{ mview = b.dataset.view; localStorage.setItem("zengate.mview", mview); renderModels(s); };
+  });
+  el.querySelectorAll("[data-fold]").forEach(b=>{
+    b.onclick = ()=>{
+      const ch = b.dataset.fold;
+      if(foldedChans.has(ch)) foldedChans.delete(ch); else foldedChans.add(ch);
+      localStorage.setItem("zengate.mfold", JSON.stringify([...foldedChans]));
+      renderModels(s);
+    };
+  });
+  el.querySelectorAll("[data-primary]").forEach(b=>{
+    b.onclick = ()=>setPrimary(b.dataset.primary);
   });
   const qEl = el.querySelector("#m-q");
   qEl.oninput = ()=>{ mf.q = qEl.value; renderModels(s); const n = el.querySelector("#m-q"); n.focus(); n.setSelectionRange(n.value.length, n.value.length); };
@@ -1548,14 +1738,35 @@ function renderModels(s){
     if(j) toast(ev.target.value ? "默认模型已更新，正在重新注入已开启的 Agent" : "已恢复按列表第一个作为默认");
     refresh();
   };
-  // 渠道主开关（节头）
   el.querySelectorAll("[data-en]").forEach(b=>{
     b.onclick = async ()=>{
       const j = await api("/channel/"+b.dataset.en+"/enabled", { enabled: true });
       if(j){ toast("渠道已启用，模型按渠道文件名单恢复"); refresh(); }
     };
   });
-  // 处理器必须在卡片入 DOM 之后再绑定：#mgrid 在渲染前是空的，绑早了等于没绑。
+  // 选用开关：vpill 即旧 checkbox 的语义（hidden 翻转），视觉升级为明确状态。
+  el.querySelectorAll(".vpill[data-vis]").forEach(b=>{
+    b.onclick = async ()=>{
+      const hidden = b.classList.contains("on"); // on=已选用 → 点击即隐藏
+      const j = await api("/models/visibility", { id: b.dataset.vis, hidden });
+      if(j) toast(hidden ? "已隐藏，正在重新注入已开启的 Agent" : "已选用，正在重新注入已开启的 Agent");
+      refresh();
+    };
+  });
+  el.querySelectorAll(".mblurb").forEach(b=>{
+    b.onclick = ()=>{
+      b.classList.toggle("open");
+      const key = b.dataset.bk;
+      if(b.classList.contains("open")) openBlurbs.add(key); else openBlurbs.delete(key);
+    };
+  });
+  el.querySelectorAll(".m-eff").forEach(ch=>{
+    ch.onclick = async ()=>{
+      const on = ch.textContent.includes("★");
+      const j = await api("/models/pref", { id: ch.dataset.m, effort: on ? "" : ch.dataset.eff });
+      if(j){ toast(on ? "已恢复按全局默认档" : "已设为该模型的默认思考档"); refresh(); }
+    };
+  });
   el.querySelectorAll(".mtest").forEach(b=>{
     b.onclick = async ()=>{
       b.disabled = true; b.textContent = "测试中…";
@@ -1585,33 +1796,13 @@ function renderModels(s){
   el.querySelectorAll(".tdet").forEach(b=>{
     b.onclick = ()=>openTaskDrawer(b.dataset.m);
   });
-  el.querySelectorAll(".mblurb").forEach(b=>{
-    b.onclick = ()=>{
-      b.classList.toggle("open");
-      const key = b.dataset.bk;
-      if(b.classList.contains("open")) openBlurbs.add(key); else openBlurbs.delete(key);
-    };
-  });
-  el.querySelectorAll(".m-eff").forEach(ch=>{
-    ch.onclick = async ()=>{
-      const on = ch.textContent.includes("★");
-      const j = await api("/models/pref", { id: ch.dataset.m, effort: on ? "" : ch.dataset.eff });
-      if(j){ toast(on ? "已恢复按全局默认档" : "已设为该模型的默认思考档"); refresh(); }
-    };
-  });
-  el.querySelectorAll("[data-vis]").forEach(cb=>{
-    cb.onchange = async ()=>{
-      const j = await api("/models/visibility", { id: cb.dataset.vis, hidden: !cb.checked });
-      if(j) toast(cb.checked ? "已选用，正在重新注入已开启的 Agent" : "已隐藏，正在重新注入已开启的 Agent");
-      refresh();
-    };
-  });
   // 有探测在跑：卡片自己按 250ms 走动计时，并用 1s 的节奏跟服务端要新阶段。
   startTaskTicker();
   clearTimeout(fastPollTimer);
   if(sorted.some(m=>m.task && m.task.status === "running")) fastPollTimer = setTimeout(refresh, 1000);
   window.scrollTo(0, scrollY);
 }
+
 
 /* ---- 自定义 API ---- */
 let pvEditing = "";          // 正在编辑的供应商 id（"" = 新增）
