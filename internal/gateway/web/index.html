@@ -407,12 +407,13 @@
     cursor:pointer; user-select:none; position:relative; }
   /* 点击展开：去掉行数截断，超高改为内部滚动，长说明不再撑爆卡片 */
   .mcard .mblurb.open { -webkit-line-clamp:unset; display:block;
-    max-height:170px; overflow-y:auto; user-select:text; }
+    max-height:170px; overflow-y:auto; user-select:text; padding-bottom:22px; }
   /* 收起态右下角给一个明确的展开入口，别让人猜能点 */
-  .mcard .mblurb:not(.open)::after { content:"展开 ▾"; position:absolute; right:7px; bottom:4px;
-    font-size:10px; color:var(--accent); background:var(--panel-2); padding:0 5px; border-radius:4px; }
-  .mcard .mblurb.open::after { content:"收起 ▴"; position:absolute; right:7px; bottom:4px;
-    font-size:10px; color:var(--ink-mute); background:var(--panel); padding:0 5px; border-radius:4px; }
+  .mcard .mblurb:not(.open)::after { content:"点击展开 ▾"; position:absolute; right:7px; bottom:4px;
+    font-size:10px; color:var(--accent); background:var(--accent-soft); border:1px solid color-mix(in srgb,var(--accent) 35%,transparent);
+    padding:0 6px; border-radius:6px; pointer-events:none; }
+  .mcard .mblurb.open::after { content:"点击收起 ▴"; position:absolute; right:7px; bottom:4px;
+    font-size:10px; color:var(--ink-mute); background:var(--panel-2); padding:0 6px; border-radius:6px; pointer-events:none; }
   /* 收进页首的那一条重复说明：一行细条，不抢卡片里的规格 */
   .mnote { display:flex; gap:10px; align-items:flex-start; padding:9px 13px; margin:0 0 12px;
     border:1px solid var(--hairline-soft); border-left:2px solid var(--accent); border-radius:8px;
