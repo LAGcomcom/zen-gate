@@ -19,7 +19,7 @@
     --bad:#ef4444; --bad-bg:rgba(239,68,68,.13);
     --primary-bg:#fafafa; --primary-fg:#171717;
     --hm0:rgba(255,255,255,.035); --hm1:rgba(56,189,248,.24); --hm2:rgba(56,189,248,.42); --hm3:rgba(56,189,248,.62); --hm4:#7dd3fc;
-    --card-shadow:0 10px 30px rgba(0,0,0,.18);
+    --card-shadow:0 1px 2px rgba(0,0,0,.28);
     --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,"Microsoft YaHei UI",monospace;
     --body:ui-sans-serif,system-ui,"Segoe UI","Microsoft YaHei UI","PingFang SC",sans-serif;
   }
@@ -33,7 +33,7 @@
     --bad:#dc2626; --bad-bg:rgba(220,38,38,.10);
     --primary-bg:#171717; --primary-fg:#fafafa;
     --hm0:rgba(0,0,0,.045); --hm1:rgba(14,165,233,.18); --hm2:rgba(14,165,233,.36); --hm3:rgba(2,132,199,.58); --hm4:#0369a1;
-    --card-shadow:0 8px 24px rgba(15,23,42,.08);
+    --card-shadow:0 1px 2px rgba(15,23,42,.07);
   }
   * { box-sizing:border-box; margin:0; padding:0;
     transition: background-color .18s ease, color .18s ease, border-color .18s ease,
@@ -126,7 +126,7 @@
   .ic { display:block; }
 
   /* ---- main ---- */
-  .main { flex:1; min-width:0; overflow-y:auto; padding:28px clamp(18px,3vw,42px) 52px; background:radial-gradient(circle at 80% -20%,var(--accent-soft),transparent 34%),var(--bg); }
+  .main { flex:1; min-width:0; overflow-y:auto; padding:28px clamp(18px,3vw,42px) 52px; background:var(--bg); }
   .main > .page { max-width:1240px; margin:0 auto; }
   .page { display:none; } .page.on { display:block; animation:pageIn .18s ease; }
   @keyframes pageIn { from { opacity:0; transform:translateY(6px); } to { opacity:1; transform:none; } }
@@ -345,7 +345,7 @@
     border-top:2px solid var(--hairline); border-radius:13px; padding:14px 15px 12px;
     display:flex; flex-direction:column; gap:6px;
     transition:border-color .16s ease, box-shadow .2s var(--ease), transform .18s var(--ease); }
-  .mcard:hover { border-color:var(--accent); transform:translateY(-1px); box-shadow:0 12px 28px rgba(0,0,0,.16); }
+  .mcard:hover { border-color:var(--accent); transform:translateY(-1px); box-shadow:0 4px 14px rgba(0,0,0,.14); }
   .mcard.st-available { border-top-color:var(--ok); }
   .mcard.st-custom { border-top-color:color-mix(in srgb,var(--accent) 45%,var(--hairline)); }
   /* 四种异常状态四种颜色：限流(琥珀) / 地区门(紫) / 不可用(红) / 未探测(虚线灰) */
@@ -395,6 +395,8 @@
     backdrop-filter:blur(10px); -webkit-backdrop-filter:blur(10px);
     border-bottom:1px solid var(--hairline-soft); margin-bottom:4px; }
   .msticky .row { margin-bottom:8px; }
+  /* 设置页分组锚点：吸顶导航跳转时让分组标题落在导航条下方，不被吃掉 */
+  #page-settings .card { scroll-margin-top:70px; }
   /* 最佳选择横幅 */
   .hero { display:flex; align-items:center; gap:14px; padding:14px 18px; margin:0 0 14px;
     border:1px solid color-mix(in srgb,var(--ok) 35%,var(--hairline));
@@ -571,10 +573,14 @@
     border-radius:var(--r-sm); padding:6px 9px; font-family:var(--mono); font-size:12.5px; }
   input.tin:focus { border-color:var(--accent); outline:none; }
   input.tin::placeholder { color:var(--ink-mute); }
-  .pchips { display:grid; grid-template-columns:repeat(auto-fill,minmax(198px,1fr)); gap:8px; }
-  .pchip { display:flex; flex-direction:column; align-items:flex-start; gap:1px; background:var(--panel-2);
-    border:1px solid var(--hairline); border-radius:var(--r-md); padding:7px 12px; cursor:pointer; min-width:0; }
-  .pchip:hover { border-color:var(--accent); }
+  .pchips { display:grid; grid-template-columns:repeat(auto-fill,minmax(216px,1fr)); gap:10px; }
+  .pchip { display:flex; flex-direction:column; align-items:flex-start; gap:2px; background:var(--panel);
+    border:1px solid var(--hairline); border-radius:10px; padding:10px 13px; cursor:pointer; min-width:0;
+    transition:border-color .15s ease, transform .15s var(--ease), box-shadow .15s ease; }
+  .pchip:hover { border-color:var(--accent); transform:translateY(-1px); box-shadow:0 4px 14px rgba(0,0,0,.12); }
+  .pchip:active { transform:scale(.98); }
+  .pchip .pnote { font-size:11.5px; color:var(--ink-mute); line-height:1.5; max-width:100%; overflow:hidden;
+    display:-webkit-box; -webkit-line-clamp:1; -webkit-box-orient:vertical; }
   .pchip .pn { font-size:13px; font-weight:600; color:var(--ink); max-width:100%; overflow:hidden;
     text-overflow:ellipsis; white-space:nowrap; }
   .pchip .pu { font-size:10.5px; color:var(--ink-mute); font-family:var(--mono); max-width:100%;
@@ -637,7 +643,7 @@
   /* ---- usage dashboard (ZCode style) ---- */
   .two { display:grid; grid-template-columns:repeat(auto-fit,minmax(360px,1fr)); gap:12px; }
   .sumstrip { display:flex; overflow:hidden; border-radius:12px;
-    background:linear-gradient(140deg,var(--panel),color-mix(in srgb,var(--panel) 92%,var(--bg))); border:1px solid var(--hairline); box-shadow:var(--card-shadow); margin-bottom:12px; }
+    background:var(--panel); border:1px solid var(--hairline); box-shadow:var(--card-shadow); margin-bottom:12px; }
   .sumstrip .cell { flex:1; min-width:0; padding:15px 18px; text-align:left; border-right:1px solid var(--hairline-soft); transition:background-color .18s ease; }
   .sumstrip .cell:hover { background:var(--accent-soft); }
   .sumstrip .cell:last-child { border-right:0; }
@@ -1869,6 +1875,13 @@ let pvFetched = [];          // 本次表单里拉到的模型全集
 let pvCatalog = [];          // 拉到的行（含供应商声明的上下文/输出）
 let pvSelected = new Set();  // 勾选要入库的模型
 let pvEditSaved = [];        // 编辑前的已保存模型（用于预勾选）
+/* 预设区状态：常用/全部 + 搜索。16 个预设不再同时全铺，
+   10 秒轮询重绘 chips 时靠这两个变量保持用户眼前的视图。 */
+let pvTab = "fav";
+let pvQ = "";
+let pvPresetsAll = [];
+let pvPresetsSig = "";
+const PV_FAVS = ["nvidia-nim", "gemini", "github-models", "groq", "siliconflow", "modelscope"];
 
 function pvProto(){ return $("#pv-proto").dataset.value || "openai"; }
 // pvKeyLines reads the multi-key textarea: one key per line, blanks dropped.
@@ -2131,7 +2144,12 @@ function renderProviders(s){
   const el = $("#page-providers");
   if(!el.dataset.rendered){
     el.innerHTML = `
-      <h2 class="pt">自定义 API <span class="sub">接入你自己的上游（OpenAI / Anthropic 兼容），模型以 供应商ID/模型名 出现在所有 Agent 选择器里</span></h2>
+      <h2 class="pt">自定义 API <span class="sub">接入你自己的上游，模型以 供应商ID/模型名 出现在所有 Agent 选择器里</span></h2>
+      <div class="msec" style="margin-top:0">
+        <span class="dot on"></span>
+        <span class="chname">账号渠道</span>
+        <span class="chdesc">用 Qoder / CodeArts / WorkBuddy 账号授权，免费模型直接进「模型」页和 Agent 选择器</span>
+      </div>
       <div class="card" id="qoder-card">
         <h3>Qoder 账号渠道 <span class="muted" style="font-size:11px" id="qoder-state"></span></h3>
         <div class="prose" id="qoder-body"></div>
@@ -2166,11 +2184,12 @@ function renderProviders(s){
           <button class="act off" id="tg-workbuddy">关闭</button>
         </div>
       </div>
-      <div class="card">
-        <h3>免费模型商预设 <span class="muted" style="font-size:11px">点击填充，Key 需要你自己去对应平台申请</span></h3>
-        <div class="pchips" id="pv-presets"></div>
-        <div class="muted" style="font-size:11.5px;margin-top:8px" id="pv-preset-hint"></div>
+      <div class="msec">
+        <span class="chname">自定义供应商</span>
+        <span class="chdesc">OpenAI / Anthropic 兼容上游，Key 是你自己的</span>
+        <span class="chcount" id="pv-count"></span>
       </div>
+      <div class="pgrid" id="pv-list"></div>
       <div class="card pform">
         <h3 id="pv-form-title">添加供应商</h3>
         <div class="frow"><span class="flbl">名称</span><input class="tin" id="pv-name" style="width:220px" placeholder="NVIDIA NIM">
@@ -2199,7 +2218,22 @@ function renderProviders(s){
           <div class="muted" style="font-size:11px; margin-top:5px">勾选的模型才会计入保存；保存后仍可随时回来调整。</div>
         </div>
       </div>
-      <div class="pgrid" id="pv-list"></div>`;
+      <div class="msec">
+        <span class="chname">供应商预设</span>
+        <span class="chdesc">点击填充上方表单，Key 需要你自己去对应平台申请</span>
+      </div>
+      <div class="card">
+        <div class="row" style="row-gap:8px">
+          <input class="msearch" id="pv-psearch" placeholder="搜索预设名称 / 域名…">
+          <div class="seg" id="pv-ptab">
+            <button data-v="fav" class="on">常用</button>
+            <button data-v="all">全部</button>
+          </div>
+          <span class="muted" style="font-size:12px" id="pv-pcount"></span>
+        </div>
+        <div class="pchips" id="pv-presets" style="margin-top:10px"></div>
+        <div class="muted" style="font-size:11.5px;margin-top:8px" id="pv-preset-hint"></div>
+      </div>`;
     makeDropdown(el.querySelector("#pv-proto"),
       [["openai","OpenAI 兼容"],["anthropic","Anthropic 兼容"]], "openai", null);
     el.querySelector("#pv-cancel").onclick = ()=>{ pvResetForm(); };
@@ -2210,6 +2244,16 @@ function renderProviders(s){
       pvRenderPicker();
     };
     el.querySelector("#pv-pick-none").onclick = ()=>{ pvSelected.clear(); pvRenderPicker(); };
+    // 预设区：搜索跨全部预设；点常用/全部时清掉搜索词，让点击立刻看得见效果
+    const psEl = el.querySelector("#pv-psearch");
+    psEl.oninput = ()=>{ pvQ = psEl.value; pvRenderPresets(); };
+    el.querySelectorAll("#pv-ptab button").forEach(b=>{
+      b.onclick = ()=>{
+        pvTab = b.dataset.v; pvQ = ""; psEl.value = "";
+        el.querySelectorAll("#pv-ptab button").forEach(x=>x.classList.toggle("on", x===b));
+        pvRenderPresets();
+      };
+    });
     el.querySelector("#pv-fetch").onclick = async ()=>{
       const name = el.querySelector("#pv-name").value.trim();
       const url = el.querySelector("#pv-url").value.trim();
@@ -2282,15 +2326,37 @@ function renderProviders(s){
     };
     el.dataset.rendered = "1";
   }
-  // 预设（后端下发，前端不写死）
-  const presets = s.providerPresets || [];
-  const pbox = el.querySelector("#pv-presets");
-  if(pbox){
-    pbox.innerHTML = presets.map(p=>`
-      <div class="pchip" data-pid="${esc(p.id)}" title="${esc(p.note||"")}">
+  // 预设（后端下发，前端不写死）：归「供应商预设」节，搜索 / 常用切换见 pvRenderPresets
+  pvPresetsAll = s.providerPresets || [];
+  pvRenderPresets();
+  renderProviderList(s);
+  renderWorkBuddyCard();
+  bindWorkBuddyCard();
+  bindCodeartsCard();
+  renderQoderCard();
+  bindQoderCard();
+}
+
+/* 预设区：常用 = 六家高频免费商，其余归「全部」；搜索跨全部预设。
+   chips 只在（tab, 搜索词, 名单）变化时重建——10 秒轮询不闪、不丢 hover。 */
+function pvRenderPresets(){
+  const el = $("#page-providers"); if(!el) return;
+  const box = el.querySelector("#pv-presets"); if(!box) return;
+  const presets = pvPresetsAll;
+  const q = pvQ.trim().toLowerCase();
+  const list = q
+    ? presets.filter(p => (p.name + " " + p.id + " " + hostOf(p.baseUrl)).toLowerCase().includes(q))
+    : (pvTab === "fav" ? presets.filter(p => PV_FAVS.includes(p.id)) : presets);
+  const sig = pvTab + "|" + q + "|" + presets.map(p=>p.id).join(",");
+  if(sig !== pvPresetsSig){
+    pvPresetsSig = sig;
+    box.innerHTML = list.map(p=>`
+      <div class="pchip" data-pid="${esc(p.id)}" title="点击填充表单 · ${esc(p.note||"")}">
         <span class="pn">${esc(p.name)}</span><span class="pu">${esc(hostOf(p.baseUrl))}</span>
-      </div>`).join("");
-    pbox.querySelectorAll(".pchip").forEach(c=>{
+        ${p.note?`<span class="pnote">${esc(p.note)}</span>`:""}
+      </div>`).join("")
+      || `<div class="muted" style="font-size:12.5px">${q ? "没有匹配的预设——换个词试试，或直接在上方表单填 Base URL" : "这一组暂时没有预设"}</div>`;
+    box.querySelectorAll(".pchip").forEach(c=>{
       c.onclick = ()=>{
         const p = presets.find(x=>x.id===c.dataset.pid); if(!p) return;
         pvEditing = ""; pvFetched = []; pvCatalog = []; pvSelected = new Set(); pvEditSaved = [];
@@ -2309,12 +2375,9 @@ function renderProviders(s){
       };
     });
   }
-  renderProviderList(s);
-  renderWorkBuddyCard();
-  bindWorkBuddyCard();
-  bindCodeartsCard();
-  renderQoderCard();
-  bindQoderCard();
+  el.querySelectorAll("#pv-ptab button").forEach(b=>b.classList.toggle("on", b.dataset.v===pvTab));
+  const cnt = el.querySelector("#pv-pcount");
+  if(cnt) cnt.textContent = q ? `${list.length}/${presets.length} 个匹配` : `${list.length} 个预设`;
 }
 
 /* WorkBuddy 账号渠道卡：状态读 /admin/api/workbuddy/status，登录走 state 轮询
@@ -2585,9 +2648,11 @@ function renderProviderList(s){
   const el = $("#page-providers");
   const box = el.querySelector("#pv-list"); if(!box) return;
   const providers = s.providers || [];
+  const cntEl = el.querySelector("#pv-count");
+  if(cntEl) cntEl.textContent = providers.length ? `${providers.length} 个已接入` : "尚未接入";
   if(!providers.length){
     box.innerHTML = `<div class="card"><div class="muted" style="font-size:12.5px">
-      还没有自定义供应商。点上面的预设卡片一键填充，或直接填 Base URL + Key → 拉取模型列表 → 勾选想要的模型 → 保存。
+      还没有自定义供应商。在下方表单填 Base URL + Key，或到「供应商预设」挑一张卡片一键填充：拉取模型列表 → 勾选想要的模型 → 保存。
       接入后模型会以 <code class="k">供应商ID/模型名</code> 出现在所有已开启 Agent 的模型选择器里。</div></div>`;
     return;
   }
@@ -3122,8 +3187,18 @@ function logQuery(){
 function renderSettings(s){
   const el = $("#page-settings");
   if(!el.dataset.rendered){
-    el.innerHTML = `<h2 class="pt">设置</h2>
-      <div class="card"><div class="row" style="row-gap:14px">
+    el.innerHTML = `<div class="msticky">
+      <h2 class="pt">设置</h2>
+      <div class="mfilters" id="set-nav">
+        <span class="mchip on" data-g="set-base">基础参数</span>
+        <span class="mchip" data-g="set-switch">模型切换</span>
+        <span class="mchip" data-g="set-route">智能路由</span>
+        <span class="mchip" data-g="set-desktop">桌面</span>
+        <span class="mchip" data-g="set-net">网络</span>
+        <span class="mchip" data-g="set-data">数据</span>
+        <span class="mchip" data-g="set-update">更新</span>
+      </div></div>
+      <div class="card" id="set-base"><div class="row" style="row-gap:14px">
         <div class="dim" style="display:inline-flex; align-items:center; gap:8px">默认思考档位 <span id="set-effort"></span></div>
         <label class="dim">默认输出上限 <input type="number" id="set-max" min="512" step="512"></label>
         <label class="dim">探测间隔（分钟） <input type="number" id="set-probe" min="1"></label>
@@ -3133,13 +3208,13 @@ function renderSettings(s){
        <div class="muted" style="font-size:12px;margin-top:10px">默认思考档位对所有已接入的 Agent 生效（请求没指定档位时使用）。
        想按次选择：用该模型自带的档位选择器，或在请求里带 <code class="k">reasoning_effort</code>。</div></div>
 
-      <div class="card">
+      <div class="card" id="set-switch">
         <h3>模型切换</h3>
         <div class="switch"><div><span class="nm">限流自动切换</span><div class="ds">请求的模型被限流或拒绝时，自动换下一个可用模型接住本次请求（最多再试 <span id="fo-max-label">2</span> 次）；实际服务的模型通过响应头 x-zen-gate-served-by 和最终 usage chunk 标注</div></div>
           <button class="act off" id="tg-failover">关闭</button></div>
       </div>
 
-      <div class="card">
+      <div class="card" id="set-route">
         <h3>智能路由 <span class="muted" style="font-size:11px">多模态感知 + 候选排序</span></h3>
         <div class="switch"><div><span class="nm">智能路由总开关</span><div class="ds">开启后：限流切换只挑支持本次请求模态（图像 / 音频 / 文件）的模型，并按下方策略排序候选；关闭则完全回到旧行为（目录顺序，不带能力过滤）。你指定的模型永远是第一选择，策略只影响切换</div></div>
           <button class="act off" id="tg-smart">关闭</button></div>
@@ -3159,7 +3234,7 @@ function renderSettings(s){
           <button class="act off" id="tg-openref">关闭</button></div>
       </div>
 
-      <div class="card">
+      <div class="card" id="set-desktop">
         <h3>桌面行为</h3>
         <div class="switch"><div><span class="nm">关闭时最小化到托盘</span><div class="ds">关窗口只是隐藏到托盘，托盘"打开管理页"恢复；托盘"退出"才真正退出</div></div>
           <button class="act off" id="tg-tray">关闭</button></div>
@@ -3174,7 +3249,7 @@ function renderSettings(s){
           <button class="act off" id="tg-autostart">关闭</button></div>
       </div>
 
-      <div class="card">
+      <div class="card" id="set-net">
         <h3>网络</h3>
         <div class="row">
           <div class="dim" style="display:inline-flex; align-items:center; gap:8px">上游代理 <span id="set-proxy"></span></div>
@@ -3191,7 +3266,7 @@ function renderSettings(s){
         ${s.lanBaseURL ? `<div class="muted" style="font-size:11.5px">局域网连不上时，先在 Windows 防火墙放行 ${s.port} 端口入站。</div>` : ""}
       </div>
 
-      <div class="card">
+      <div class="card" id="set-subs">
         <h3>订阅轮询 <span class="muted" style="font-size:11px">sing-box 侧车 · 每请求换出口 IP</span></h3>
         <div class="row" style="align-items:center; gap:10px; flex-wrap:wrap">
           <span id="subs-status"></span>
@@ -3217,7 +3292,7 @@ function renderSettings(s){
         <div class="muted" style="font-size:11.5px;margin-top:6px">轮询=每个请求从健康节点中换一个出口（额度按出口 IP 计，每个节点都是独立额度）；单节点拨号失败自动换下一个重试。启用后上游代理模式切到「订阅轮询」，停用恢复「跟随环境变量」。</div>
       </div>
 
-      <div class="card">
+      <div class="card" id="set-data">
         <h3>数据</h3>
         <div class="row">
           <button class="ghost" id="btn-export" title="密钥、供应商 Key 与订阅链接一律写成占位符，适合贴给他人排查">导出配置 (隐去密钥)</button>
@@ -3228,7 +3303,7 @@ function renderSettings(s){
         </div>
       </div>
 
-      <div class="card">
+      <div class="card" id="set-update">
         <h3>更新</h3>
         <div class="row">
           <button class="ghost" id="btn-check-update">检测更新</button>
@@ -3343,6 +3418,39 @@ function renderSettings(s){
       if(j){ toast("开始下载 sing-box（走当前代理），几分钟后刷新查看"); setTimeout(refresh, 8000); }
       b.disabled = false; b.textContent = "下载 sing-box";
     };
+    // 分组导航：点击滑到分组，可视分组高亮跟随（滚动节流）。
+    // 滚动容器是 main.main（#app 整体 overflow:hidden），显式滚它。
+    const scroller = el.closest(".main") || document.querySelector(".main");
+    el.querySelectorAll("#set-nav .mchip").forEach(ch=>{
+      ch.onclick = ()=>{
+        el.querySelectorAll("#set-nav .mchip").forEach(c=>c.classList.remove("on"));
+        ch.classList.add("on");
+        const card = el.querySelector("#"+ch.dataset.g);
+        if(card && scroller){
+          const top = card.getBoundingClientRect().top - scroller.getBoundingClientRect().top + scroller.scrollTop - 70;
+          scroller.scrollTop = top;
+        }
+      };
+    });
+    let navTick = 0;
+    const syncNav = ()=>{
+      const now = Date.now();
+      if(now - navTick < 200) return;
+      navTick = now;
+      const chips = [...el.querySelectorAll("#set-nav .mchip")];
+      let best = null, bestTop = Infinity;
+      for(const c of chips){
+        const card = el.querySelector("#"+c.dataset.g);
+        if(!card) continue;
+        const top = Math.abs(card.getBoundingClientRect().top - 80);
+        if(top < bestTop){ bestTop = top; best = c; }
+      }
+      if(best && !best.classList.contains("on")){
+        chips.forEach(c=>c.classList.remove("on"));
+        best.classList.add("on");
+      }
+    };
+    scroller?.addEventListener("scroll", syncNav, { passive:true });
     el.dataset.rendered = "1";
   }
   fill(el.querySelector("#set-max"), s.settings.defaultMaxTokens);
