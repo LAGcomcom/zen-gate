@@ -412,7 +412,9 @@
     backdrop-filter:blur(10px); -webkit-backdrop-filter:blur(10px);
     border-bottom:1px solid var(--hairline-soft); }
   @media (min-width:1100px) {
-    #page-settings { display:grid; grid-template-columns:150px minmax(0,1fr); column-gap:28px; align-items:start; }
+    /* 必须 .on 限定：#page-settings 裸 ID 的 display:grid 会压过 .page{display:none}，
+       让设置页常驻在其它每个页面底下 */
+    #page-settings.on { display:grid; grid-template-columns:150px minmax(0,1fr); column-gap:28px; align-items:start; }
     #page-settings > h2.pt { grid-column:1/-1; }
     #set-nav { grid-column:1; grid-row:2 / span 999; position:sticky; top:4px;
       flex-direction:column; align-items:stretch; flex-wrap:nowrap; gap:3px;
