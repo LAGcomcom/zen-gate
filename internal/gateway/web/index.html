@@ -10,30 +10,34 @@
   /* ===== ZCode 设计语言：中性灰 + 天蓝，Tailwind v4 对齐 ===== */
   :root { --card-shadow:none; --r-lg:12px; --r-md:8px; --r-sm:6px; --ease:cubic-bezier(.2,.8,.2,1); }
   :root[data-theme="dark"] {
-    --bg:#171717; --bg-2:#141414; --side:#0a0a0a; --panel:#262626; --panel-2:#2e2e2e;
-    --hairline:rgba(250,250,250,.10); --hairline-soft:rgba(250,250,250,.06);
-    --ink:#e5e5e5; --ink-dim:#a3a3a3; --ink-mute:rgba(229,229,229,.64);
-    --accent:#0ea5e9; --accent-strong:#38bdf8; --accent-ink:#062c38; --accent-soft:rgba(14,165,233,.14);
-    --ok:#22c55e; --ok-bg:rgba(34,197,94,.14);
-    --warn:#eab308; --warn-bg:rgba(234,179,8,.13);
-    --bad:#ef4444; --bad-bg:rgba(239,68,68,.13);
-    --primary-bg:#fafafa; --primary-fg:#171717;
-    --hm0:rgba(255,255,255,.035); --hm1:rgba(56,189,248,.24); --hm2:rgba(56,189,248,.42); --hm3:rgba(56,189,248,.62); --hm4:#7dd3fc;
-    --card-shadow:0 1px 2px rgba(0,0,0,.28);
+    /* 明度阶梯：页面底 / 卡片 / 嵌套各差一整档，卡片边界一眼可辨（修"死灰一锅"） */
+    --bg:#0a0b0e; --bg-2:#08090b; --side:#07080a; --panel:#111318; --panel-2:#181b21;
+    --hairline:rgba(225,235,255,.09); --hairline-soft:rgba(225,235,255,.055);
+    --ink:#eef0f4; --ink-dim:#a8afb8; --ink-mute:rgba(238,240,244,.58); --ink-faint:rgba(238,240,244,.34);
+    /* 全局唯一强调色：靛蓝。绿黄红只留给状态语义 */
+    --accent:#6e7bff; --accent-strong:#8b96ff; --accent-ink:#ffffff; --accent-soft:rgba(110,123,255,.16);
+    --ok:#3fdd8b; --ok-bg:rgba(63,221,139,.13);
+    --warn:#f5b544; --warn-bg:rgba(245,181,68,.13);
+    --bad:#f87a7a; --bad-bg:rgba(248,122,122,.12);
+    --primary-bg:var(--accent); --primary-fg:#ffffff;
+    --hm0:rgba(255,255,255,.04); --hm1:rgba(110,123,255,.25); --hm2:rgba(110,123,255,.45); --hm3:rgba(110,123,255,.66); --hm4:#8b96ff;
+    --card-shadow:0 1px 2px rgba(0,0,0,.35);
+    --gap-card:12px; --gap-sec:26px;
     --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,"Microsoft YaHei UI",monospace;
     --body:ui-sans-serif,system-ui,"Segoe UI","Microsoft YaHei UI","PingFang SC",sans-serif;
   }
   :root[data-theme="light"] {
-    --bg:#fafafa; --bg-2:#f4f4f5; --side:#f5f5f5; --panel:#ffffff; --panel-2:#f4f4f5;
-    --hairline:rgba(10,10,10,.10); --hairline-soft:rgba(10,10,10,.06);
-    --ink:#404040; --ink-dim:#525252; --ink-mute:rgba(64,64,64,.88);
-    --accent:#0284c7; --accent-strong:#0ea5e9; --accent-ink:#ffffff; --accent-soft:rgba(2,132,199,.10);
-    --ok:#16a34a; --ok-bg:rgba(22,163,74,.12);
-    --warn:#ca8a04; --warn-bg:rgba(202,138,4,.12);
-    --bad:#dc2626; --bad-bg:rgba(220,38,38,.10);
-    --primary-bg:#171717; --primary-fg:#fafafa;
-    --hm0:rgba(0,0,0,.045); --hm1:rgba(14,165,233,.18); --hm2:rgba(14,165,233,.36); --hm3:rgba(2,132,199,.58); --hm4:#0369a1;
-    --card-shadow:0 1px 2px rgba(15,23,42,.07);
+    --bg:#f6f7f9; --bg-2:#eef0f3; --side:#f1f2f5; --panel:#ffffff; --panel-2:#f2f4f7;
+    --hairline:rgba(15,23,42,.11); --hairline-soft:rgba(15,23,42,.07);
+    --ink:#1c2127; --ink-dim:#454c55; --ink-mute:rgba(28,33,39,.68); --ink-faint:rgba(28,33,39,.4);
+    --accent:#5b62f0; --accent-strong:#4249e0; --accent-ink:#ffffff; --accent-soft:rgba(91,98,240,.11);
+    --ok:#189a5b; --ok-bg:rgba(24,154,91,.11);
+    --warn:#b57d0e; --warn-bg:rgba(181,125,14,.11);
+    --bad:#d63c3c; --bad-bg:rgba(214,60,60,.09);
+    --primary-bg:var(--accent); --primary-fg:#ffffff;
+    --hm0:rgba(15,23,42,.05); --hm1:rgba(91,98,240,.18); --hm2:rgba(91,98,240,.38); --hm3:rgba(74,81,232,.6); --hm4:#3d43d6;
+    --card-shadow:0 1px 2px rgba(15,23,42,.06);
+    --gap-card:12px; --gap-sec:26px;
   }
   * { box-sizing:border-box; margin:0; padding:0;
     transition: background-color .18s ease, color .18s ease, border-color .18s ease,
@@ -87,7 +91,7 @@
     white-space:nowrap; overflow:hidden;
     transition:background-color .16s ease, color .16s ease, border-color .16s ease; }
   .nav button:hover { background:var(--panel-2); color:var(--ink); }
-  .nav button.on { background:linear-gradient(90deg,var(--accent-soft),transparent); color:var(--accent-strong); border-color:rgba(56,189,248,.18); font-weight:650; box-shadow:inset 0 0 18px rgba(14,165,233,.04); }
+  .nav button.on { background:linear-gradient(90deg,var(--accent-soft),transparent); color:var(--accent-strong); border-color:color-mix(in srgb,var(--accent) 22%,transparent); font-weight:650; box-shadow:inset 0 0 18px var(--accent-soft); }
   .nav button::before { content:""; position:absolute; left:-1px; top:16%; bottom:16%; width:3px;
     border-radius:3px; background:var(--accent-strong); box-shadow:0 0 12px var(--accent);
     opacity:0; transform:scaleY(.25); transform-origin:center;
@@ -160,12 +164,13 @@
   .skel .sk-cols .sk-panel i:nth-child(3) { width:60%; }
   .skel .sk-cards { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:10px; }
   .skel .sk-cards .sk-panel { height:104px; }
-  h2.pt { font-size:20px; margin:0 0 16px; font-weight:700; letter-spacing:-.02em; }
+  h2.pt { font-size:22px; margin:0 0 18px; font-weight:650; letter-spacing:-.02em; }
   h2.pt .sub { font-size:12.5px; color:var(--ink-mute); font-weight:400; margin-left:10px; }
-  .card { background:linear-gradient(145deg,var(--panel),color-mix(in srgb,var(--panel) 94%,var(--bg))); border:1px solid var(--hairline); border-radius:12px;
-    padding:16px 18px; margin-bottom:12px; box-shadow:var(--card-shadow);
+  .card { background:var(--panel); border:1px solid var(--hairline); border-radius:var(--r-lg);
+    padding:16px 18px; margin-bottom:var(--gap-card);
+    box-shadow:var(--card-shadow), inset 0 1px 0 rgba(255,255,255,.035);
     transition: background-color .16s ease, color .16s ease, border-color .16s ease; }
-  .card h3 { font-size:13.5px; color:var(--ink); font-weight:700; margin-bottom:11px; letter-spacing:.01em; }
+  .card h3 { font-size:15px; color:var(--ink); font-weight:600; margin-bottom:11px; letter-spacing:.005em; }
   .row { display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
   .muted { color:var(--ink-mute); } .dim { color:var(--ink-dim); }
   .mono { font-family:var(--mono); font-size:12px; font-variant-numeric:tabular-nums; }
@@ -183,9 +188,13 @@
   .pill.unknown { background:var(--panel-2); color:var(--ink-mute); }
   .pill.warn { background:var(--warn-bg); color:var(--warn); }
   .pill.bad { background:var(--bad-bg); color:var(--bad); }
-  button.act { background:linear-gradient(135deg,var(--primary-bg),color-mix(in srgb,var(--primary-bg) 82%,var(--accent))); color:var(--primary-fg); border:0; border-radius:8px;
-    padding:8px 17px; cursor:pointer; font-size:13px; font-weight:650; box-shadow:0 4px 12px rgba(0,0,0,.12); }
-  button.act.off { background:var(--panel-2); color:var(--ink); border:1px solid var(--hairline); font-weight:400; }
+  /* 按钮体系只留三种：实底强调色主按钮（页面唯一最重）/ 灰描边次级 / 文字危险操作 */
+  button.act { background:var(--accent); color:var(--primary-fg); border:0; border-radius:var(--r-md);
+    padding:8px 17px; cursor:pointer; font-size:13px; font-weight:600; letter-spacing:.01em;
+    box-shadow:0 1px 2px rgba(0,0,0,.18);
+    transition:filter .15s ease, transform .12s ease, background-color .15s ease; }
+  button.act:hover:not(:disabled) { filter:brightness(1.1); }
+  button.act.off { background:var(--panel-2); color:var(--ink); border:1px solid var(--hairline); font-weight:400; box-shadow:none; }
   /* 开关型的 act 按钮：「开」只是一个状态，不该是全页最亮的东西——
      淡染强调色 + 一个小圆点，把纯白主按钮留给真正的主动作（保存/授权/一键更新）。 */
   button.act[data-on="1"] { display:inline-flex; align-items:center; gap:7px; padding:7px 14px;
@@ -340,16 +349,16 @@
   :focus-visible { outline:2px solid var(--accent); outline-offset:1px; border-radius:4px; }
 
   /* ---- model cards ---- */
-  .mgrid { display:grid; grid-template-columns:repeat(auto-fill,minmax(265px,1fr)); gap:10px; }
-  .mcard { background:linear-gradient(145deg,var(--panel),var(--panel-2)); box-shadow:var(--card-shadow); border:1px solid var(--hairline);
-    border-top:2px solid var(--hairline); border-radius:13px; padding:14px 15px 12px;
+  .mgrid { display:grid; grid-template-columns:repeat(auto-fill,minmax(265px,1fr)); gap:var(--gap-card); margin-bottom:var(--gap-card); }
+  .mcard { background:var(--panel); box-shadow:var(--card-shadow); border:1px solid var(--hairline);
+    border-top:2px solid var(--hairline); border-radius:var(--r-lg); padding:14px 15px 12px;
     display:flex; flex-direction:column; gap:6px;
     transition:border-color .16s ease, box-shadow .2s var(--ease), transform .18s var(--ease); }
-  .mcard:hover { border-color:var(--accent); transform:translateY(-1px); box-shadow:0 4px 14px rgba(0,0,0,.14); }
+  .mcard:hover { border-color:color-mix(in srgb,var(--accent) 45%,var(--hairline)); transform:translateY(-1px); box-shadow:0 4px 14px rgba(0,0,0,.22); }
   .mcard.st-available { border-top-color:var(--ok); }
   .mcard.st-custom { border-top-color:color-mix(in srgb,var(--accent) 45%,var(--hairline)); }
   /* 四种异常状态四种颜色：限流(琥珀) / 地区门(紫) / 不可用(红) / 未探测(虚线灰) */
-  .mcard.st-throttled { border-top-color:#f59e0b; }
+  .mcard.st-throttled { border-top-color:var(--warn); }
   .mcard.st-region-blocked { border-top-color:#a78bfa; }
   .mcard.st-unavailable { border-top-color:var(--bad); }
   .mcard.st-unknown { border-top-style:dashed; border-top-color:var(--hairline); }
@@ -358,18 +367,16 @@
   .pill.custom { background:var(--accent-soft); color:var(--accent); }
   .pill.region { background:rgba(167,139,250,.16); color:#c4b5fd; }
   .pill.hidsync { background:var(--panel-2); color:var(--ink-mute); }
-  /* 渠道徽章：每个渠道一个固定色相，跟分组节头一致 */
-  .chan-badge { flex:none; font-size:10.5px; font-weight:600; letter-spacing:.4px; padding:2px 7px; border-radius:6px; }
-  .chan-zen { background:rgba(56,189,248,.14); color:#7dd3fc; }
-  .chan-kilo { background:rgba(45,212,191,.13); color:#5eead4; }
-  .chan-workbuddy { background:rgba(244,114,182,.13); color:#f9a8d4; }
-  .chan-codearts { background:rgba(251,146,60,.14); color:#fdba74; }
-  .chan-custom { background:var(--accent-soft); color:var(--accent); }
-  /* 按渠道分组的节头（Magpie 的 profile 卡思路：一组一个主开关） */
-  .msec { display:flex; align-items:center; gap:10px; margin:16px 2px 8px; }
-  .msec .chname { font-size:13px; font-weight:600; color:var(--ink); }
-  .msec .chdesc { font-size:12px; color:var(--ink-mute); }
-  .msec .chcount { font-size:12px; color:var(--ink-mute); margin-left:auto; }
+  /* 渠道徽章：中性皮一套语法，渠道身份靠文字本身，不再各占一种色相与强调色打架 */
+  .chan-badge { flex:none; font-size:10px; font-weight:600; letter-spacing:.5px; padding:2px 7px; border-radius:6px;
+    font-family:var(--mono); background:var(--panel-2); color:var(--ink-dim); border:1px solid var(--hairline-soft); }
+  .chan-custom { background:var(--accent-soft); color:var(--accent); border-color:transparent; }
+  /* 按渠道/主题分组的节头：真分段——名称 + 计数 + 段操作右对齐，段间距一整个节奏 */
+  .msec { display:flex; align-items:center; gap:10px; margin:var(--gap-sec) 2px 10px; }
+  .msec:first-of-type { margin-top:0; }
+  .msec .chname { font-size:13.5px; font-weight:650; color:var(--ink); letter-spacing:.01em; }
+  .msec .chdesc { font-size:12px; color:var(--ink-mute); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .msec .chcount { font-size:12px; color:var(--ink-mute); margin-left:auto; font-variant-numeric:tabular-nums; }
   .msec .dot { width:8px; height:8px; border-radius:50%; flex:none; }
   .msec .dot.on { background:var(--ok); } .msec .dot.off { background:var(--bad); }
   .msec .ghost { padding:3px 10px; font-size:11.5px; }
@@ -390,28 +397,44 @@
     border-top:1px dashed var(--hairline-soft); padding-top:8px; margin-top:auto; }
 
   /* ---- v1.9.1 模型页：吸顶 / 最佳选择 / 选用开关 / 主用 / 列表视图 ---- */
-  .msticky { position:sticky; top:0; z-index:30; padding:10px 0 8px;
-    background:color-mix(in srgb, var(--bg) 86%, transparent);
+  .msticky { position:sticky; top:0; z-index:30; padding:8px 0 8px;
+    background:color-mix(in srgb, var(--bg) 88%, transparent);
     backdrop-filter:blur(10px); -webkit-backdrop-filter:blur(10px);
-    border-bottom:1px solid var(--hairline-soft); margin-bottom:4px; }
-  .msticky .row { margin-bottom:8px; }
+    border-bottom:1px solid var(--hairline-soft); margin-bottom:10px; }
+  /* 单行控制条：搜索/默认/筛选 chips/批量操作/视图全在一行，宽了平铺、窄了自然折行 */
+  .msticky .mbar { display:flex; align-items:center; gap:6px 8px; flex-wrap:wrap; margin-top:8px; }
+  .msticky .mbar .spacer { flex:1; min-width:8px; }
   /* 设置页分组锚点：吸顶导航跳转时让分组标题落在导航条下方，不被吃掉 */
   #page-settings .card { scroll-margin-top:70px; }
-  /* 最佳选择横幅 */
-  .hero { display:flex; align-items:center; gap:14px; padding:14px 18px; margin:0 0 14px;
-    border:1px solid color-mix(in srgb,var(--ok) 35%,var(--hairline));
-    background:linear-gradient(135deg, color-mix(in srgb,var(--ok) 9%,var(--panel)), var(--panel));
-    border-radius:14px; box-shadow:var(--card-shadow); }
-  .hero.degraded { border-color:color-mix(in srgb,var(--warn) 40%,var(--hairline));
-    background:linear-gradient(135deg, color-mix(in srgb,var(--warn) 9%,var(--panel)), var(--panel)); }
-  .hero .h-name { font-size:17px; font-weight:700; letter-spacing:-.01em; }
-  .hero .h-meta { display:flex; gap:14px; font-size:12px; color:var(--ink-mute); margin-top:3px; flex-wrap:wrap; }
+  /* 窄窗：锚点横条吸顶（原样）；宽窗：左垂直导航 sticky + 右内容双栏 */
+  #set-nav { position:sticky; top:0; z-index:30; padding:8px 0;
+    background:color-mix(in srgb, var(--bg) 88%, transparent);
+    backdrop-filter:blur(10px); -webkit-backdrop-filter:blur(10px);
+    border-bottom:1px solid var(--hairline-soft); }
+  @media (min-width:1100px) {
+    #page-settings { display:grid; grid-template-columns:150px minmax(0,1fr); column-gap:28px; align-items:start; }
+    #page-settings > h2.pt { grid-column:1/-1; }
+    #set-nav { grid-column:1; grid-row:2 / span 999; position:sticky; top:4px;
+      flex-direction:column; align-items:stretch; flex-wrap:nowrap; gap:3px;
+      background:var(--bg); backdrop-filter:none; -webkit-backdrop-filter:none;
+      border-bottom:0; padding:0 0 8px; margin-top:0; }
+    #set-nav .mchip { border-radius:var(--r-md); padding:6px 12px; font-size:12.5px; background:transparent; }
+    #page-settings > .card { grid-column:2; }
+  }
+  /* 最佳选择：紧凑条——panel 底 + 左侧 3px 强调色竖条，一行放下名称/指标/动作 */
+  .hero { display:flex; align-items:center; gap:14px; flex-wrap:wrap; padding:11px 16px; margin:0 0 var(--gap-card);
+    border:1px solid var(--hairline); border-left:3px solid var(--accent);
+    background:var(--panel); border-radius:var(--r-lg); box-shadow:var(--card-shadow); }
+  .hero .h-name { font-size:15px; font-weight:650; letter-spacing:-.01em; }
+  .hero .h-meta { display:flex; gap:12px; font-size:12px; color:var(--ink-mute); flex-wrap:wrap; }
   .hero .h-meta b { color:var(--ink); font-variant-numeric:tabular-nums; }
   .hero .h-act { margin-left:auto; display:flex; gap:8px; align-items:center; }
-  .btn-primary { font-size:13px; font-weight:600; padding:9px 18px; border-radius:10px; cursor:pointer;
-    border:1px solid transparent; background:var(--accent); color:#fff;
+  .hero.degraded { border-left-color:var(--warn); }
+  .btn-primary { font-size:13px; font-weight:600; padding:8px 17px; border-radius:var(--r-md); cursor:pointer;
+    border:0; background:var(--accent); color:var(--primary-fg);
+    box-shadow:0 1px 2px rgba(0,0,0,.18);
     transition:filter .15s ease, transform .12s ease; }
-  .btn-primary:hover { filter:brightness(1.08); transform:translateY(-1px); }
+  .btn-primary:hover:not(:disabled) { filter:brightness(1.1); transform:translateY(-1px); }
   .btn-primary:active { transform:translateY(0) scale(.98); }
   .btn-primary:disabled { opacity:.55; cursor:default; transform:none; }
   /* 选用：从复选框升级为明确的状态开关 */
@@ -427,7 +450,7 @@
     border-radius:7px; border:1px solid transparent; background:transparent; color:var(--ink-mute);
     cursor:pointer; font-size:14px; line-height:1; transition:all .15s ease; }
   .starbtn:hover { border-color:var(--hairline); background:var(--panel-2); color:var(--ink); }
-  .starbtn.on { color:#f59e0b; }
+  .starbtn.on { color:var(--accent-strong); }
   /* 列表视图 */
   .mlist { width:100%; border-collapse:collapse; font-size:13px; }
   .mlist th { text-align:left; font-size:11.5px; font-weight:600; color:var(--ink-mute); text-transform:none;
@@ -533,12 +556,12 @@
   #tdrawer .empty { color:var(--ink-mute); font-size:12px; }
 
   /* ---- agent cards ---- */
-  .agrid { display:grid; grid-template-columns:repeat(auto-fill,minmax(240px,1fr)); gap:10px; }
-  .acard { background:linear-gradient(145deg,var(--panel),var(--panel-2)); box-shadow:var(--card-shadow); border:1px solid var(--hairline);
-    border-top:2px solid var(--hairline); border-radius:13px; padding:14px 15px;
+  .agrid { display:grid; grid-template-columns:repeat(auto-fill,minmax(240px,1fr)); gap:10px; margin-bottom:var(--gap-card); }
+  .acard { background:var(--panel); box-shadow:var(--card-shadow); border:1px solid var(--hairline);
+    border-top:2px solid var(--hairline); border-radius:var(--r-lg); padding:14px 15px;
     display:flex; flex-direction:column; gap:8px;
     transition:border-color .16s ease, box-shadow .2s var(--ease), transform .18s var(--ease); }
-  .acard:hover { border-color:var(--accent); transform:translateY(-1px); box-shadow:0 12px 28px rgba(0,0,0,.16); }
+  .acard:hover { border-color:color-mix(in srgb,var(--accent) 45%,var(--hairline)); transform:translateY(-1px); box-shadow:0 8px 22px rgba(0,0,0,.24); }
   .acard.st-on { border-top-color:var(--ok); }
   .acard.st-noinst { opacity:.55; }
   .acard .ahead { display:flex; align-items:center; gap:10px; }
@@ -574,7 +597,7 @@
   input.tin:focus { border-color:var(--accent); outline:none; }
   input.tin::placeholder { color:var(--ink-mute); }
   .pchips { display:grid; grid-template-columns:repeat(auto-fill,minmax(216px,1fr)); gap:10px; }
-  .pchip { display:flex; flex-direction:column; align-items:flex-start; gap:2px; background:var(--panel);
+  .pchip { display:flex; flex-direction:column; align-items:flex-start; gap:2px; min-height:70px; background:var(--panel);
     border:1px solid var(--hairline); border-radius:10px; padding:10px 13px; cursor:pointer; min-width:0;
     transition:border-color .15s ease, transform .15s var(--ease), box-shadow .15s ease; }
   .pchip:hover { border-color:var(--accent); transform:translateY(-1px); box-shadow:0 4px 14px rgba(0,0,0,.12); }
@@ -590,6 +613,12 @@
     background:var(--panel-2); border-radius:5px; padding:1px 7px; user-select:all; }
   .pform .frow { display:flex; align-items:center; gap:10px; flex-wrap:wrap; margin-bottom:9px; }
   .pform .frow .flbl { width:76px; flex:none; font-size:12.5px; color:var(--ink-dim); }
+  /* 渠道/供应商卡统一头：左名称+一行元信息，右主操作——修"内容挤左 60%、主操作沉卡底" */
+  .chead { display:flex; align-items:flex-start; gap:12px; margin-bottom:10px; }
+  .chead .ct { min-width:0; flex:1; }
+  .chead .cnm { display:block; font-size:15px; font-weight:600; color:var(--ink); letter-spacing:.005em; }
+  .chead .cmeta { display:block; font-size:12px; color:var(--ink-mute); margin-top:3px; min-height:15px; }
+  .chead .cact { flex:none; display:flex; gap:8px; align-items:center; flex-wrap:wrap; justify-content:flex-end; }
 
   /* 模型挑选列表（拉取后勾选哪些入库） */
   .pv-pickhead { display:flex; align-items:center; justify-content:space-between; gap:10px;
@@ -605,12 +634,13 @@
   .pv-picklist .pv-empty { grid-column:1/-1; font-size:12px; color:var(--ink-mute); padding:6px 4px; }
 
   /* 供应商卡片 */
-  .pgrid { display:grid; grid-template-columns:repeat(auto-fill,minmax(310px,1fr)); gap:10px; }
-  .pvcard { background:linear-gradient(145deg,var(--panel),var(--panel-2)); box-shadow:var(--card-shadow); border:1px solid var(--hairline);
-    border-radius:13px; padding:14px 16px 12px; display:flex; flex-direction:column; gap:9px;
+  /* 网格容器自己带底距：后跟的卡片（如「添加供应商」表单）不再与网格贴死 */
+  .pgrid { display:grid; grid-template-columns:repeat(auto-fill,minmax(310px,1fr)); gap:10px; margin-bottom:var(--gap-card); }
+  .pvcard { background:var(--panel); box-shadow:var(--card-shadow); border:1px solid var(--hairline);
+    border-radius:var(--r-lg); padding:14px 16px 12px; display:flex; flex-direction:column; gap:9px;
     position:relative; overflow:hidden;
     transition:border-color .16s ease, box-shadow .2s var(--ease), transform .18s var(--ease); }
-  .pvcard:hover { border-color:var(--accent); transform:translateY(-1px); box-shadow:0 12px 28px rgba(0,0,0,.16); }
+  .pvcard:hover { border-color:color-mix(in srgb,var(--accent) 45%,var(--hairline)); transform:translateY(-1px); box-shadow:0 8px 22px rgba(0,0,0,.24); }
   .pvcard::before { content:""; position:absolute; left:0; right:0; top:0; height:2px;
     background:linear-gradient(90deg, var(--accent), transparent 72%); }
   .pvcard.off::before { background:var(--hairline); }
@@ -641,17 +671,19 @@
   .pvops button.danger:hover { background:var(--bad-bg); color:var(--bad); }
 
   /* ---- usage dashboard (ZCode style) ---- */
-  .two { display:grid; grid-template-columns:repeat(auto-fit,minmax(360px,1fr)); gap:12px; }
+  /* 固定双栏比例：左主内容 1.35 / 右上下文栏 1；列尾卡片不再拉伸填充（空卡比参差更难看） */
+  .two { display:grid; grid-template-columns:1.35fr 1fr; gap:12px; align-items:start; }
+  .two > div { display:flex; flex-direction:column; min-width:0; }
+  .two > div > .card:last-child { margin-bottom:0; }
   .sumstrip { display:flex; overflow:hidden; border-radius:12px;
     background:var(--panel); border:1px solid var(--hairline); box-shadow:var(--card-shadow); margin-bottom:12px; }
   .sumstrip .cell { flex:1; min-width:0; padding:15px 18px; text-align:left; border-right:1px solid var(--hairline-soft); transition:background-color .18s ease; }
   .sumstrip .cell:hover { background:var(--accent-soft); }
   .sumstrip .cell:last-child { border-right:0; }
-  .sumstrip .v { font-family:var(--mono); font-size:25px; line-height:1.15; font-weight:650; font-variant-numeric:tabular-nums; letter-spacing:-.02em; color:var(--ink); }
-  /* 层级：第一个指标是主角，其余退后半步（oil-ui：不让几种强调同时抢注意力） */
-  .sumstrip .cell:first-child .v { font-size:31px; color:var(--ok); }
-  .sumstrip .cell:nth-child(n+3) .v { font-size:21px; opacity:.86; }
-  .sumstrip .cell:nth-child(n+3) .l { opacity:.85; }
+  .sumstrip .v { font-family:var(--mono); font-size:24px; line-height:1.15; font-weight:600; font-variant-numeric:tabular-nums; letter-spacing:-.02em; color:var(--ink); }
+  /* 主角格：核心健康指标（模型可用）左条 + 强调色数字，其余四格同权重退后半步 */
+  .sumstrip .cell:first-child { border-left:3px solid var(--accent); }
+  .sumstrip .cell:first-child .v { font-size:27px; color:var(--accent-strong); }
   /* 工作台任务行 */
   .task { display:flex; align-items:center; gap:12px; padding:10px 4px; border-bottom:1px dashed var(--hairline-soft); }
   .task:last-child { border-bottom:0; }
@@ -738,6 +770,7 @@
   @media (max-width:900px) {
     .side { width:176px; }
     .main { padding:18px 16px 36px; }
+    .two { grid-template-columns:1fr; }
     .sumstrip { display:grid; grid-template-columns:repeat(3,1fr); }
     .sumstrip .cell:nth-child(3n) { border-right:0; }
     .sumstrip .cell:nth-child(n+4) { border-top:1px solid var(--hairline-soft); }
@@ -886,8 +919,9 @@ async function withButtonBusy(button, busyLabel, task){
   }
 }
 function statePill(st){ const c={available:"ok",unknown:"unknown","region-blocked":"region",throttled:"warn",unavailable:"bad",custom:"custom"}[st]||"unknown";
-  const t={available:"可用",unknown:"未探测","region-blocked":"地区受限",throttled:"暂时限流·可重试",unavailable:"不可用",custom:"自定义"}[st]||st;
-  return `<span class="pill ${c}">${t}</span>`; }
+  const t={available:"可用",unknown:"未探测","region-blocked":"地区受限",throttled:"限流中",unavailable:"不可用",custom:"自定义"}[st]||st;
+  const tip=st==="throttled"?" title=\"暂时限流，过一会儿可重试\"":"";
+  return `<span class="pill ${c}"${tip}>${t}</span>`; }
 const cssVar = (n,f) => (getComputedStyle(document.documentElement).getPropertyValue(n)||f).trim();
 
 /* lucide 风格内联图标（stroke=currentColor） */
@@ -1061,18 +1095,17 @@ function renderDash(s){
       ${a.body?`<div class="ann-body">${esc(a.body)}</div>`:""}
     </div>`;
   };
-  const annHtml = `
+  const annHtml = anns.length ? `
     <div class="card">
       <div class="ann-hd">
-        <h3 style="margin:0">公告 <span class="muted" style="font-size:11px; font-weight:400">${anns.length?anns.length+" 条生效中":"暂无生效中的公告"}</span></h3>
+        <h3 style="margin:0">公告 <span class="muted" style="font-size:11px; font-weight:400">${anns.length} 条生效中</span></h3>
         <span class="row" style="gap:10px; flex-wrap:nowrap">
           <button class="ghost" id="ann-refresh" style="padding:2px 10px; font-size:11.5px">刷新</button>
-          <span class="muted" style="font-size:11px">每 6 小时同步</span>
         </span>
       </div>
-      ${anns.length ? anns.slice(0,2).map(a=>annItem(a,false)).join("") : `<div class="muted" style="font-size:12px">暂无公告——作者发布后这里会自动出现（每 6 小时同步，或点「刷新」立即拉取）。</div>`}
-      ${(anns.length>2||annArch.length) ? `<div style="margin-top:10px"><button class="ghost" id="ann-history" style="padding:2px 10px; font-size:11.5px">过往公告（共 ${anns.length+annArch.length} 条）</button></div>` : ""}
-    </div>`;
+      ${annItem(anns[0],false)}
+      <div style="margin-top:8px"><button class="ghost" id="ann-history" style="padding:2px 10px; font-size:11.5px">全部公告（${anns.length+annArch.length} 条）</button></div>
+    </div>` : "";
   const fail = day ? day.failed : 0;
   const failPill = fail > 0 ? ` <span class="pill bad">${fail} 失败</span>` : "";
 
@@ -1105,7 +1138,6 @@ function renderDash(s){
           ${s.lanBaseURL ? `<div class="row" style="margin-top:8px"><span class="dim">局域网 Base URL</span><code class="k">${s.lanBaseURL}</code>
             <button class="ghost" data-copy="${s.lanBaseURL}">复制</button></div>` : ""}
           <div class="row" style="margin-top:10px">
-            <button class="ghost" id="dash-copy-full">复制完整接入配置</button>
             <button class="ghost" id="dash-reprobe">重新探测</button>
             <button class="ghost" id="dash-gologs">查看日志</button>
           </div>
@@ -1124,18 +1156,17 @@ function renderDash(s){
           <h3>今日模型用量</h3>
           <div id="dash-today"></div>
         </div>
-      </div>
-    </div>
-
-    <div class="card">
-      <h3>系统信息</h3>
-      <div class="sysinfo">
-        <div class="kv"><span class="k">版本</span><span class="v mono">${esc(s.version)}</span></div>
-        <div class="kv"><span class="k">已运行</span><span class="v" id="uptime-val">${s.uptimeSec!=null ? fmtUptime(s.uptimeSec) : esc(s.uptime)}</span></div>
-        <div class="kv"><span class="k">数据目录</span><span class="v mono" style="font-size:11px">${esc(s.dataDir)}</span></div>
-        <div class="kv"><span class="k">出口</span><span class="v mono">${esc(s.egress&&s.egress.ip ? s.egress.ip+" ("+(s.egress.country||"?")+")" : "未知")}</span></div>
-        <div class="kv"><span class="k">代理</span><span class="v">${esc(proxyLabel(s.settings.proxyMode, s.settings.proxyURL))}</span></div>
-        <div class="kv"><span class="k">托盘 / 通知</span><span class="v">${s.settings.closeToTray?"开":"关"} / ${s.settings.notifications?"开":"关"}</span></div>
+        <div class="card">
+          <h3>系统信息</h3>
+          <div class="sysinfo" style="grid-template-columns:1fr">
+            <div class="kv"><span class="k">版本</span><span class="v mono">${esc(s.version)}</span></div>
+            <div class="kv"><span class="k">已运行</span><span class="v" id="uptime-val">${s.uptimeSec!=null ? fmtUptime(s.uptimeSec) : esc(s.uptime)}</span></div>
+            <div class="kv"><span class="k">数据目录</span><span class="v mono" style="font-size:11px">${esc(s.dataDir)}</span></div>
+            <div class="kv"><span class="k">出口</span><span class="v mono">${esc(s.egress&&s.egress.ip ? s.egress.ip+" ("+(s.egress.country||"?")+")" : "未知")}</span></div>
+            <div class="kv"><span class="k">代理</span><span class="v">${esc(proxyLabel(s.settings.proxyMode, s.settings.proxyURL))}</span></div>
+            <div class="kv"><span class="k">托盘 / 通知</span><span class="v">${s.settings.closeToTray?"开":"关"} / ${s.settings.notifications?"开":"关"}</span></div>
+          </div>
+        </div>
       </div>
     </div>`;
 
@@ -1175,13 +1206,15 @@ function renderDash(s){
     });
   }
   // 快捷按钮
-  document.getElementById("dash-copy-full").onclick = () => {
+  const copyFull = () => {
     const text = JSON.stringify({baseURL: s.baseURL, apiKey: s.mainKey, models: s.models.map(m=>m.id)}, null, 2);
     navigator.clipboard.writeText(text).then(()=>{
       localStorage.setItem("zengate.onboard-copy","1");
       toast("已复制完整接入配置");
     }).catch(()=>toast("复制失败"));
   };
+  const cfBtn = document.getElementById("dash-copy-full");
+  if(cfBtn) cfBtn.onclick = copyFull;
   document.getElementById("dash-reprobe").onclick = async ()=>{
     const b = document.getElementById("dash-reprobe");
     await withButtonBusy(b, "探测中…", async()=>{ toast("探测中，稍后刷新…"); await api("/reprobe", {}); setTimeout(refresh, 1200); });
@@ -1528,26 +1561,24 @@ function renderModels(s){
     const chans = best.channels && best.channels.length ? best.channels : [best.custom?"custom":(best.channel||"zen")];
     const caps = [best.vision?"视觉":"", best.audioInput?"音频":"", best.fileInput?"文件":"", best.reasoning?"思考":""].filter(Boolean).join(" · ");
     hero = `<div class="hero${defModel && defModel.id !== best.id ? " degraded" : ""}">
-      <div>
-        <div class="h-name">${isPrimary ? "主用中：" : "现在用这个："}${esc(best.name)}</div>
-        <div class="h-meta">
-          ${chans.map(chanBadge).join(" ")}
-          <span>首字 <b>${best.ttftMs?(best.ttftMs/1000).toFixed(1)+"s":(best.ttftMedMs?(best.ttftMedMs/1000).toFixed(1)+"s":"—")}</b></span>
-          ${best.contextWindow?`<span>上下文 <b>${fmtCap(best.contextWindow)}</b></span>`:""}
-          ${caps?`<span>${esc(caps)}</span>`:""}
-        </div>
-        ${defModel && defModel.id !== best.id && defModel.state !== "available" ? `<div class="h-meta" style="margin-top:4px;color:var(--warn)">你的默认 ${esc(defModel.id)} 当前${defModel.state==="throttled"?"限流中":"不可用"}，建议切换</div>` : ""}
-      </div>
+      <span class="h-name">${isPrimary ? "主用中：" : "现在用这个："}${esc(best.name)}</span>
+      <span class="h-meta">
+        ${chans.map(chanBadge).join(" ")}
+        <span>首字 <b>${best.ttftMs?(best.ttftMs/1000).toFixed(1)+"s":(best.ttftMedMs?(best.ttftMedMs/1000).toFixed(1)+"s":"—")}</b></span>
+        ${best.contextWindow?`<span>上下文 <b>${fmtCap(best.contextWindow)}</b></span>`:""}
+        ${caps?`<span>${esc(caps)}</span>`:""}
+      </span>
+      ${defModel && defModel.id !== best.id && defModel.state !== "available" ? `<span class="h-meta" style="color:var(--warn)">默认 ${esc(defModel.id)} 当前${defModel.state==="throttled"?"限流中":"不可用"}，建议切换</span>` : ""}
       <div class="h-act">
         <button class="btn-primary" data-primary="${esc(best.id)}" ${isPrimary?"disabled":""} title="设为默认模型并确保出现在 Agent 选择器里">${isPrimary?"✓ 当前主用":"设为主用"}</button>
       </div>
     </div>`;
   } else if(laneModels.length){
     const region = laneModels.filter(m=>m.state==="region-blocked").length;
-    hero = `<div class="hero degraded"><div>
-      <div class="h-name">当前出口没有实测可用的免费模型</div>
-      <div class="h-meta">${region?`<span>${region} 个被地区门拦下——换海外出口（订阅轮询）大概率直接可用</span>`:"<span>多半是限流窗口，等一会儿或换出口再试</span>"}</div>
-    </div></div>`;
+    hero = `<div class="hero degraded">
+      <span class="h-name">当前出口没有实测可用的免费模型</span>
+      <span class="h-meta">${region?`<span>${region} 个被地区门拦下——换海外出口（订阅轮换）大概率直接可用</span>`:"<span>多半是限流窗口，等一会儿或换出口再试</span>"}</span>
+    </div>`;
   }
 
   // ---- 计数 ----
@@ -1560,41 +1591,37 @@ function renderModels(s){
     unknown: cnt(s.models, m=>m.state==="unknown"||m.state==="custom"),
   };
 
-  // ---- 双层吸顶工具栏 ----
+  // ---- 单行吸顶控制条：搜索/默认/筛选/批量/视图一行收完（窄窗自然折行） ----
   const chip = (kind, id, label, n) =>
     `<span class="mchip ${mf[kind]===id?"on":""}${n===0?" zero":""}" data-${kind}="${id}">${label}${n!=null?`<span class="cnt">${n}</span>`:""}</span>`;
   const active = mf.q || mf.chan || mf.state;
   const toolbar = `<div class="msticky">
     <h2 class="pt">模型 <span class="sub">${avail}/${laneModels.length} 可用${customModels.length?` · 自定义 ${customProbed}/${customModels.length} 已实测`:""}${hiddenCount?` · 已隐藏 ${hiddenCount}`:""}</span></h2>
-    <div class="card"><div class="row">
+    <div class="mbar">
       <input class="msearch" id="m-q" placeholder="搜索模型 id / 名称…" value="${esc(mf.q)}">
       <select class="msearch" id="m-def" title="注入到各 Agent 配置里的默认模型（留空 = 列表第一个）" style="width:auto;cursor:pointer">
         <option value="">默认模型：（列表第一个）</option>
         ${sorted.filter(m=>!m.hidden&&!m.systemOne).map(m=>`<option value="${esc(m.id)}" ${s.settings.defaultModel===m.id?"selected":""}>默认：${esc(m.id)}</option>`).join("")}
       </select>
-      <button class="ghost" id="reprobe">重新探测可用性</button>
-      <span class="muted" style="font-size:12px" id="eg-line"></span>
-      <span class="vtoggle" style="margin-left:auto" title="卡片看细节，列表快扫全量">
-        <button data-view="grid" class="${mview==="grid"?"on":""}">卡片</button>
-        <button data-view="list" class="${mview==="list"?"on":""}">列表</button>
-      </span>
-    </div>
-    <div class="mfilters">
-      ${chip("chan","","全部渠道",null)}
+      <span class="mchip ${!mf.chan?"on":""}" data-chan="">渠道</span>
       ${["zen","kilo","workbuddy","codearts"].map(c=>chip("chan",c,c,cnt(s.models,m=>!m.custom&&(m.channel||"zen")===c))).join("")}
       ${chip("chan","custom","自定义",customModels.length)}
-      <span style="width:8px"></span>
-      ${chip("state","","全部状态",null)}
+      <span class="mchip ${!mf.state?"on":""}" data-state="">状态</span>
       ${chip("state","available","可用",stateCounts.available)}
       ${chip("state","throttled","限流",stateCounts.throttled)}
       ${chip("state","region-blocked","地区受限",stateCounts["region-blocked"])}
       ${chip("state","unavailable","不可用",stateCounts.unavailable)}
-      <span style="width:8px"></span>
+      <span class="spacer"></span>
       <button class="ghost" id="hide-dead" title="把探测为不可用 / 地区受限的模型从 Agent 选择器隐藏；探到可用会自动解除">隐藏全部不可用</button>
       <button class="ghost" id="show-all" title="恢复全部隐藏的模型${hiddenCount?`（当前 ${hiddenCount} 个）`:""}">恢复显示</button>
-      <span class="muted" id="m-count" style="font-size:11.5px;margin-left:auto"></span>
-      ${active?`<span class="mchip on" id="m-clear" style="cursor:pointer">✕ 清除筛选</span>`:""}
-    </div></div>
+      <button class="ghost" id="reprobe">重新探测</button>
+      <span class="muted" id="m-count" style="font-size:11.5px"></span>
+      ${active?`<span class="mchip on" id="m-clear" style="cursor:pointer">✕ 清除</span>`:""}
+      <span class="vtoggle" title="卡片看细节，列表快扫全量">
+        <button data-view="grid" class="${mview==="grid"?"on":""}">卡片</button>
+        <button data-view="list" class="${mview==="list"?"on":""}">列表</button>
+      </span>
+    </div>
   </div>`;
 
   // ---- 过滤 ----
@@ -1758,9 +1785,8 @@ function renderModels(s){
   }
 
   el.innerHTML = `${toolbar}${hero}${sharedNote}${mview==="list"?listBody:body}`;
-  el.querySelector("#m-count").textContent = `${totalShown} 个结果`;
+  el.querySelector("#m-count").textContent = `${totalShown} 个结果 · ${s.egress&&s.egress.ip ? `出口 ${s.egress.ip}` : "出口未知"}`;
 
-  el.querySelector("#eg-line").textContent = s.egress&&s.egress.ip ? `出口: ${s.egress.ip} (${s.egress.country||"?"})` : "出口未知";
   el.querySelector("#reprobe").onclick = async ()=>{ toast("探测中，稍后刷新…"); await api("/reprobe", {}); setTimeout(refresh, 4000); };
   el.querySelector("#hide-dead").onclick = async ()=>{
     const ids = s.models.filter(m=>!m.hidden && (m.state==="unavailable"||m.state==="region-blocked")).map(m=>m.id);
@@ -2151,25 +2177,35 @@ function renderProviders(s){
         <span class="chdesc">用 Qoder / CodeArts / WorkBuddy 账号授权，免费模型直接进「模型」页和 Agent 选择器</span>
       </div>
       <div class="card" id="qoder-card">
-        <h3>Qoder 账号渠道 <span class="muted" style="font-size:11px" id="qoder-state"></span></h3>
+        <div class="chead">
+          <div class="ct"><span class="cnm">Qoder 账号渠道</span><span class="cmeta" id="qoder-state">检查中…</span></div>
+          <div class="cact">
+            <button class="act" id="qoder-login" title="在浏览器里登录一个 Qoder 账号，登录凭据直接进账号池——不需要先打开 IDE，可以重复多次加多个号">授权登录</button>
+            <button class="ghost" id="qoder-import" title="把 Qoder IDE 当前的登录快照存进账号池，之后即使 IDE 掉线也还能用这个账号">收录当前 IDE 登录</button>
+          </div>
+        </div>
         <div class="prose" id="qoder-body"></div>
         <div id="qoder-pool" class="acc-list"></div>
-        <div class="oprow">
-          <button class="act" id="qoder-login" title="在浏览器里登录一个 Qoder 账号，登录凭据直接进账号池——不需要先打开 IDE，可以重复多次加多个号">授权登录</button>
-          <button class="ghost" id="qoder-import" title="把 Qoder IDE 当前的登录快照存进账号池，之后即使 IDE 掉线也还能用这个账号">收录当前 IDE 登录</button>
-        </div>
       </div>
       <div class="card" id="ca-card">
-        <h3>CodeArts 账号渠道（华为云） <span class="muted" style="font-size:11px" id="ca-state"></span></h3>
-        <div class="prose" id="ca-body">加载中…</div>
-        <div class="oprow">
-          <button class="act" id="ca-login">授权登录</button>
-          <button class="ghost" id="ca-logout">退出登录</button>
-          <button class="act off" id="tg-codearts">关闭</button>
+        <div class="chead">
+          <div class="ct"><span class="cnm">CodeArts 账号渠道（华为云）</span><span class="cmeta" id="ca-state">检查中…</span></div>
+          <div class="cact">
+            <button class="act" id="ca-login">授权登录</button>
+            <button class="ghost" id="ca-logout">退出登录</button>
+            <button class="act off" id="tg-codearts">关闭</button>
+          </div>
         </div>
+        <div class="prose" id="ca-body">加载中…</div>
       </div>
       <div class="card" id="wb-card">
-        <h3>WorkBuddy 账号渠道 <span class="muted" style="font-size:11px" id="wb-state"></span></h3>
+        <div class="chead">
+          <div class="ct"><span class="cnm">WorkBuddy 账号渠道</span><span class="cmeta" id="wb-state">检查中…</span></div>
+          <div class="cact">
+            <button class="act" id="wb-login" title="在浏览器里登录一个 WorkBuddy 账号，凭据直接进账号池，可重复多次加号">授权登录</button>
+            <button class="act off" id="tg-workbuddy">关闭</button>
+          </div>
+        </div>
         <div class="prose" id="wb-body">加载中…</div>
         <div id="wb-accounts" class="acc-list"></div>
         <div class="oprow">
@@ -2178,10 +2214,8 @@ function renderProviders(s){
             <button data-v="intl" class="on">国际版 workbuddy.ai</button>
             <button data-v="cn">国内版 codebuddy.cn</button>
           </div>
-          <button class="act" id="wb-login">授权登录（新增账号）</button>
           <button class="ghost" id="wb-checkin" style="display:none">立即签到（全部 CN）</button>
           <button class="ghost" id="wb-logout">全部退出</button>
-          <button class="act off" id="tg-workbuddy">关闭</button>
         </div>
       </div>
       <div class="msec">
@@ -2191,7 +2225,12 @@ function renderProviders(s){
       </div>
       <div class="pgrid" id="pv-list"></div>
       <div class="card pform">
-        <h3 id="pv-form-title">添加供应商</h3>
+        <div class="chead">
+          <div class="ct"><span class="cnm" id="pv-form-title">添加供应商</span>
+            <span class="cmeta" id="pv-form-sub">OpenAI / Anthropic 兼容上游，或点下方预设卡一键填充</span></div>
+          <div class="cact"><button class="ghost" id="pv-form-toggle">＋ 展开</button></div>
+        </div>
+        <div id="pv-form-body" style="display:none">
         <div class="frow"><span class="flbl">名称</span><input class="tin" id="pv-name" style="width:220px" placeholder="NVIDIA NIM">
           <span class="flbl" style="width:52px">协议</span><span id="pv-proto"></span></div>
         <div class="frow"><span class="flbl">Base URL</span><input class="tin" id="pv-url" style="width:340px" placeholder="https://integrate.api.nvidia.com/v1"></div>
@@ -2217,6 +2256,7 @@ function renderProviders(s){
           <div class="pv-picklist" id="pv-picklist"></div>
           <div class="muted" style="font-size:11px; margin-top:5px">勾选的模型才会计入保存；保存后仍可随时回来调整。</div>
         </div>
+        </div>
       </div>
       <div class="msec">
         <span class="chname">供应商预设</span>
@@ -2237,6 +2277,7 @@ function renderProviders(s){
     makeDropdown(el.querySelector("#pv-proto"),
       [["openai","OpenAI 兼容"],["anthropic","Anthropic 兼容"]], "openai", null);
     el.querySelector("#pv-cancel").onclick = ()=>{ pvResetForm(); };
+    el.querySelector("#pv-form-toggle").onclick = ()=>{ pvSetFormOpen(!pvFormOpen); };
     el.querySelector("#pv-pick-filter").oninput = ()=> pvRenderPicker();
     el.querySelector("#pv-pick-all").onclick = ()=>{
       const f = el.querySelector("#pv-pick-filter").value.trim().toLowerCase();
@@ -2371,7 +2412,11 @@ function pvRenderPresets(){
           esc(p.name) + "：" + esc(p.note||"") +
           (p.keyUrl ? ` · <a href="${esc(safeHref(p.keyUrl))}" target="_blank" style="color:var(--accent)">申请 Key →</a>` : "");
         pvRenderPicker();
-        el.querySelector("#pv-name").scrollIntoView({behavior:"smooth", block:"center"});
+        pvSetFormOpen(true);
+        // WebView 里 scrollIntoView/smooth 不可靠，直接算 scrollTop 瞬时跳转
+        const scroller = document.querySelector("main.main");
+        const tgt = el.querySelector("#pv-form-body");
+        if(scroller && tgt) scroller.scrollTop = tgt.getBoundingClientRect().top - scroller.getBoundingClientRect().top + scroller.scrollTop - 90;
       };
     });
   }
@@ -2632,6 +2677,19 @@ function pvPickCount(){
   el.innerHTML = `拉到 <b>${pvFetched.length}</b> 个 · 已勾选 <b style="color:var(--accent)">${pvSelected.size}</b> 个`;
 }
 
+// 表单默认收起：点「展开」/点预设卡/点编辑时才展开，空闲时整卡只剩一行标题
+let pvFormOpen = false;
+function pvSetFormOpen(on){
+  pvFormOpen = !!on;
+  const el = $("#page-providers"); if(!el) return;
+  const body = el.querySelector("#pv-form-body");
+  const btn = el.querySelector("#pv-form-toggle");
+  const sub = el.querySelector("#pv-form-sub");
+  if(body) body.style.display = pvFormOpen ? "" : "none";
+  if(btn) btn.textContent = pvFormOpen ? "收起 ▴" : "＋ 展开";
+  if(sub) sub.style.display = pvFormOpen ? "none" : "";
+}
+
 function pvResetForm(){
   pvEditing = ""; pvFetched = []; pvCatalog = []; pvSelected = new Set(); pvEditSaved = [];
   const el = $("#page-providers"); if(!el) return;
@@ -2642,6 +2700,7 @@ function pvResetForm(){
   el.querySelector("#pv-cancel").style.display = "none";
   const hint = el.querySelector("#pv-fetch-hint"); if(hint) hint.textContent = "";
   pvRenderPicker();
+  pvSetFormOpen(false);
 }
 
 function renderProviderList(s){
@@ -2700,7 +2759,10 @@ function renderProviderList(s){
         [["openai","OpenAI 兼容"],["anthropic","Anthropic 兼容"]], p.protocol||"openai", null);
       el.querySelector("#pv-cancel").style.display = "";
       pvRenderPicker();
-      el.querySelector("#pv-name").scrollIntoView({behavior:"smooth", block:"center"});
+      pvSetFormOpen(true);
+      const scroller = document.querySelector("main.main");
+      const tgt = el.querySelector("#pv-form-body");
+      if(scroller && tgt) scroller.scrollTop = tgt.getBoundingClientRect().top - scroller.getBoundingClientRect().top + scroller.scrollTop - 90;
     };
     d.querySelector('[data-op="edit"]').onclick = openEditor;
     d.querySelector('[data-op="pick"]').onclick = ()=>{ openEditor(); el.querySelector("#pv-fetch").click(); };
@@ -3187,7 +3249,7 @@ function logQuery(){
 function renderSettings(s){
   const el = $("#page-settings");
   if(!el.dataset.rendered){
-    el.innerHTML = `<div class="msticky">
+    el.innerHTML = `
       <h2 class="pt">设置</h2>
       <div class="mfilters" id="set-nav">
         <span class="mchip on" data-g="set-base">基础参数</span>
@@ -3197,7 +3259,7 @@ function renderSettings(s){
         <span class="mchip" data-g="set-net">网络</span>
         <span class="mchip" data-g="set-data">数据</span>
         <span class="mchip" data-g="set-update">更新</span>
-      </div></div>
+      </div>
       <div class="card" id="set-base"><div class="row" style="row-gap:14px">
         <div class="dim" style="display:inline-flex; align-items:center; gap:8px">默认思考档位 <span id="set-effort"></span></div>
         <label class="dim">默认输出上限 <input type="number" id="set-max" min="512" step="512"></label>
