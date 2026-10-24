@@ -403,7 +403,11 @@
   .mcard .meff .eff b { color:var(--accent); font-family:var(--mono); }
   .mcard .mblurb { font-size:11.5px; line-height:1.55; color:var(--ink-dim); background:var(--panel-2);
     border-left:2px solid var(--accent); border-radius:0 5px 5px 0; padding:5px 8px; margin-top:7px;
-    display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden; }
+    display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden;
+    cursor:pointer; user-select:none; }
+  /* 点击展开：去掉行数截断，超高改为内部滚动，长说明不再撑爆卡片 */
+  .mcard .mblurb.open { -webkit-line-clamp:unset; display:block;
+    max-height:170px; overflow-y:auto; user-select:text; }
   /* 收进页首的那一条重复说明：一行细条，不抢卡片里的规格 */
   .mnote { display:flex; gap:10px; align-items:flex-start; padding:9px 13px; margin:0 0 12px;
     border:1px solid var(--hairline-soft); border-left:2px solid var(--accent); border-radius:8px;
@@ -1376,6 +1380,10 @@ function renderModels(s){
     </div>
     <div class="mfilters">
       <input class="msearch" id="m-q" placeholder="搜索模型 id / 名称…" value="${esc(mf.q)}">
+      <select class="msearch" id="m-def" title="注入到各 Agent 配置里的默认模型（留空 = 列表第一个）" style="width:auto;cursor:pointer">
+        <option value="">默认模型：（列表第一个）</option>
+        ${sorted.filter(m=>!m.hidden&&!m.systemOne).map(m=>`<option value="${esc(m.id)}" ${s.settings.defaultModel===m.id?"selected":""}>默认：${esc(m.id)}</option>`).join("")}
+      </select>
       <span class="mchip ${mf.chan===""?"on":""}" data-chan="">全部渠道</span>
       ${["zen","kilo","workbuddy","codearts","custom"].map(c=>chanChip(c, c==="custom"?"自定义":c)).join("")}
       <span style="width:8px"></span>
@@ -1395,7 +1403,7 @@ function renderModels(s){
   for(const ch of ["zen","kilo","workbuddy","codearts"]){
     const meta = CHAN_META[ch];
     const st = chanState[ch] || { enabled: true, models: 0 };
-    groups.push({ ch, meta, enabled: st.enabled, roster: st.models,
+    groups.push({ ch, meta, enabled: st.enabled, roster: st.models, refreshedAt: st.refreshedAt||0,
       cards: sorted.filter(m => !m.custom && (m.channel||"zen") === ch) });
   }
   groups.push({ ch: "custom", meta: CHAN_META.custom, enabled: true, roster: customModels.length,
@@ -1414,7 +1422,7 @@ function renderModels(s){
       ${g.ch!=="custom"?chanBadge(g.ch):`<span class="chan-badge chan-custom">custom</span>`}
       <span class="chdesc">${esc(g.meta.desc)}</span>
       ${disabled?`<span class="pill region">已停用</span><button class="ghost" data-en="${g.ch}">启用</button>`
-                :`<span class="chcount">${shown.length}/${g.cards.length} 个模型${g.ch!=="custom"&&g.roster?` · 渠道文件名单 ${g.roster}`:""}</span>`}
+                :`<span class="chcount">${shown.length}/${g.cards.length} 个模型${g.ch!=="custom"&&g.roster?` · 渠道文件名单 ${g.roster}${g.refreshedAt?` · 更新于 ${new Date(g.refreshedAt*1000).toTimeString().slice(0,5)}`:""}`:""}</span>`}
     </div>`;
     if(disabled && !shown.length){
       body += `<div class="mempty">渠道已停用 —— 它的 ${g.roster||0} 个模型已从所有 Agent 选择器撤下；点「启用」按渠道文件里的名单恢复。</div>`;
@@ -1428,7 +1436,14 @@ function renderModels(s){
     for(const m of shown){
     const card = document.createElement("div");
     card.className = "mcard st-" + (m.hidden ? "hidden" : (m.state||"unknown")) + (m.hidden ? " dimmed" : "");
-    const eff = (m.efforts||[]).map(e=>`<span class="eff">${esc(e.zh || e.name || e.id)} <b>${(e.tokens/1024|0)}K</b>${e.isDefault?" ★":""}</span>`).join("");
+    // 生效默认档：模型偏好 → 全局默认 → balanced；★ 跟随它，点击档位即设/清偏好。
+    const effLevel = (s.modelPrefs||{})[m.id] || s.settings.defaultEffort || "balanced";
+    const canonEff = (rid, i, n) => ({light:"light",minimal:"light",low:"light",
+      balanced:"balanced",medium:"balanced",deep:"deep",high:"deep",xhigh:"deep",max:"deep"}[String(rid).toLowerCase()]
+      || (n<=1 ? "balanced" : i < n/3 ? "light" : i < 2*n/3 ? "balanced" : "deep"));
+    const eff = (m.efforts||[]).map((e,i,arr)=>`<span class="eff m-eff" data-m="${esc(m.id)}" data-eff="${esc(e.id)}"
+      title="点一下 = 这个模型无明确档位的请求都走这一档（★ 为当前默认；再点一次清除）"
+      style="cursor:pointer">${esc(e.zh || e.name || e.id)} <b>${(e.tokens/1024|0)}K</b>${canonEff(e.id,i,arr.length)===effLevel?" ★":""}</span>`).join("");
     const probeBusy = !!(m.task && m.task.kind === "probe" && m.task.status === "running");
     const capsBusy = !!(m.task && m.task.kind === "caps" && m.task.status === "running");
     const pill = m.id === s.probingModel
@@ -1472,8 +1487,8 @@ function renderModels(s){
     const rawTitle = rawDetailTitle(m);
     card.innerHTML = `
       <div class="mhead"><span class="mname" title="${esc(m.name)}">${esc(m.name)}</span>${pill}</div>
-      <div class="mid">${chanBadge(m.custom?"custom":(m.channel||"zen"))} <span style="opacity:.85">${esc(m.id)}</span></div>
-      ${m.blurb && !sharedBlurbSet.has(m.blurb)?`<div class="mblurb" title="${esc(m.blurb)}">${esc(m.blurb)}</div>`:""}
+      <div class="mid">${(m.channels&&m.channels.length?m.channels:[m.custom?"custom":(m.channel||"zen")]).map(chanBadge).join(" ")} <span style="opacity:.85">${esc(m.id)}</span></div>
+      ${m.blurb && !sharedBlurbSet.has(m.blurb)?`<div class="mblurb" title="${esc(m.blurb)} — 点击展开/收起">${esc(m.blurb)}</div>`:""}
       ${meta.length?`<div class="mmeta">${meta.join("")}</div>`:""}
       ${(tags||eff)?`<div class="mtags">${tags}${eff?`<span class="meff">${eff}</span>`:""}</div>`:""}
       ${quotaRow}
@@ -1520,6 +1535,11 @@ function renderModels(s){
   });
   const qEl = el.querySelector("#m-q");
   qEl.oninput = ()=>{ mf.q = qEl.value; renderModels(s); const n = el.querySelector("#m-q"); n.focus(); n.setSelectionRange(n.value.length, n.value.length); };
+  el.querySelector("#m-def").onchange = async (ev)=>{
+    const j = await api("/settings", { defaultModel: ev.target.value });
+    if(j) toast(ev.target.value ? "默认模型已更新，正在重新注入已开启的 Agent" : "已恢复按列表第一个作为默认");
+    refresh();
+  };
   // 渠道主开关（节头）
   el.querySelectorAll("[data-en]").forEach(b=>{
     b.onclick = async ()=>{
@@ -1556,6 +1576,16 @@ function renderModels(s){
   });
   el.querySelectorAll(".tdet").forEach(b=>{
     b.onclick = ()=>openTaskDrawer(b.dataset.m);
+  });
+  el.querySelectorAll(".mblurb").forEach(b=>{
+    b.onclick = ()=>b.classList.toggle("open");
+  });
+  el.querySelectorAll(".m-eff").forEach(ch=>{
+    ch.onclick = async ()=>{
+      const on = ch.textContent.includes("★");
+      const j = await api("/models/pref", { id: ch.dataset.m, effort: on ? "" : ch.dataset.eff });
+      if(j){ toast(on ? "已恢复按全局默认档" : "已设为该模型的默认思考档"); refresh(); }
+    };
   });
   el.querySelectorAll("[data-vis]").forEach(cb=>{
     cb.onchange = async ()=>{

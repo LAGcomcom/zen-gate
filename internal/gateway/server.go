@@ -448,7 +448,10 @@ func (s *Server) route(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	switch {
-	case path == "/health":
+	case path == "/health" || path == "/healthz":
+		// /healthz is the supervisor spelling (docker healthchecks, systemd
+		// probes, load balancers): same unauthenticated liveness answer, no
+		// key and no state — a readiness probe must not depend on config.
 		writeJSON(w, 200, map[string]any{"ok": true, "service": "zen-gate"})
 	case path == "/v1/models" && r.Method == http.MethodGet:
 		if !s.authorized(w, r) {
@@ -948,6 +951,11 @@ func (s *Server) resolveEffort(model string, declared ...string) string {
 		if e := normalizeEffortParam(d); e != "" {
 			return e
 		}
+	}
+	// A per-model preference (the rung clicked on the model's card) outranks
+	// the global default; the card's star follows the same order.
+	if e := normalizeEffortParam(s.Store.Config().ModelPrefs[lane.BaseModelId(model)]); e != "" {
+		return e
 	}
 	if e := s.Store.Config().DefaultEffort; e == "light" || e == "deep" {
 		return e

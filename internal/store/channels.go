@@ -2,6 +2,7 @@ package store
 
 import (
 	"os"
+	"time"
 	"path/filepath"
 	"sort"
 )
@@ -36,8 +37,13 @@ type ChannelModel struct {
 
 // ChannelFile is one channel's on-disk state.
 type ChannelFile struct {
-	Enabled bool           `json:"enabled"`
+	Enabled bool `json:"enabled"`
 	Models  []ChannelModel `json:"models,omitempty"`
+	// RefreshedAt is when the lane last rewrote this roster (unix seconds).
+	// A disabled channel deliberately keeps its last roster and timestamp:
+	// the pair reads as "this is what it served, as of then" — stale, not
+	// wrong. Enable toggles do not touch it.
+	RefreshedAt int64 `json:"refreshedAt,omitempty"`
 }
 
 // channelsDir is <home>/channels.
@@ -102,6 +108,7 @@ func (s *Store) WriteChannelRoster(id string, models []ChannelModel) {
 	}
 	sort.Slice(models, func(i, j int) bool { return models[i].ID < models[j].ID })
 	cf.Models = models
+	cf.RefreshedAt = time.Now().Unix()
 	_ = writeJSON(s.channelPath(id), cf)
 }
 
@@ -117,6 +124,7 @@ func (s *Store) ChannelViews() []map[string]any {
 		}
 		out = append(out, map[string]any{
 			"id": id, "enabled": cf.Enabled, "models": len(cf.Models),
+			"refreshedAt": cf.RefreshedAt,
 		})
 	}
 	return out

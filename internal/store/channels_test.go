@@ -60,6 +60,39 @@ func TestChannelFilesRoundTrip(t *testing.T) {
 		t.Fatal("a roster write turned a disabled channel back on")
 	}
 
+	// A roster write stamps RefreshedAt; an enable toggle must not.
+	st2.WriteChannelRoster("zen", []ChannelModel{{ID: "a"}, {ID: "b"}})
+	var zenAt int64
+	for _, v := range st2.ChannelViews() {
+		if v["id"] == "zen" {
+			zenAt, _ = v["refreshedAt"].(int64)
+		}
+	}
+	if zenAt <= 0 {
+		t.Fatal("a roster write must stamp refreshedAt")
+	}
+	before := zenAt
+	if err := st2.SetChannelEnabled("zen", false); err != nil {
+		t.Fatal(err)
+	}
+	for _, v := range st2.ChannelViews() {
+		if v["id"] == "zen" {
+			if at, _ := v["refreshedAt"].(int64); at != before {
+				t.Fatal("an enable toggle must not restamp the roster")
+			}
+		}
+	}
+	// The stamp survives a reload.
+	if st3, err := Open(); err == nil {
+		for _, v := range st3.ChannelViews() {
+			if v["id"] == "zen" {
+				if at, _ := v["refreshedAt"].(int64); at != before {
+					t.Fatal("refreshedAt did not round-trip through a reload")
+				}
+			}
+		}
+	}
+
 	// A hand-broken channel file must not keep the gateway from starting.
 	if err := os.WriteFile(filepath.Join(home, "channels", "zen.json"), []byte("{not json"), 0o600); err != nil {
 		t.Fatal(err)

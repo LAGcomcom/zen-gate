@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"syscall"
 	"path/filepath"
 	"runtime/debug"
 	"strings"
@@ -61,6 +62,14 @@ func main() {
 	port := flag.Int("port", 0, "override listen port")
 	showVersion := flag.Bool("version", false, "print version and exit")
 	flag.Parse()
+	// ZEN_GATE_HEADLESS: env-var form of -no-tray for supervisors that pass
+	// environment, not argv (docker, systemd, launchd). Any non-empty value
+	// except "0"/"false" (case-insensitive) enables it. The -no-tray path
+	// below is the complete headless mode already — it never calls window.Run,
+	// so no tray and no window are created — one flag is the whole switch.
+	if v := os.Getenv("ZEN_GATE_HEADLESS"); v != "" && !strings.EqualFold(v, "0") && !strings.EqualFold(v, "false") {
+		*noTray = true
+	}
 	if *showVersion {
 		fmt.Println("zen-gate", gateway.Version)
 		return
@@ -502,7 +511,12 @@ func main() {
 	if *noTray {
 		logger.Infof("serving %s (dashboard %s)", gw.BaseURL(), dashURL)
 		c := make(chan os.Signal, 1)
-		signal.Notify(c, os.Interrupt)
+		// SIGTERM alongside os.Interrupt: container stop and systemd send
+		// SIGTERM, and without a notifier for it the default action kills the
+		// process before the flush below runs. On Windows SIGTERM is defined
+		// by syscall (compiles; never delivered at runtime), so the tray
+		// build's exit paths are untouched.
+		signal.Notify(c, os.Interrupt, syscall.SIGTERM)
 		<-c
 		cancel()
 		gw.Stop()

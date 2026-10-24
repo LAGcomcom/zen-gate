@@ -191,6 +191,15 @@ type Config struct {
 	// they stay servable if requested explicitly but disappear from agent
 	// pickers and /v1/models.
 	HiddenModels []string `json:"hiddenModels,omitempty"`
+	// DefaultModel names the model injected as every enabled agent's default
+	// pick. Empty (or naming a model that is not currently visible) falls
+	// back to the first visible model — the pre-config behaviour.
+	DefaultModel string `json:"defaultModel,omitempty"`
+	// ModelPrefs stores a per-model preferred thinking level (light /
+	// balanced / deep): the rung a request uses when the client declared no
+	// effort of its own. Keys are base model ids; an invalid value falls back
+	// to the global default at resolve time, so stale prefs never 404.
+	ModelPrefs map[string]string `json:"modelPrefs,omitempty"`
 	// HiddenAuto lists ids hidden by the 隐藏全部不可用 batch button. Unlike a
 	// manual uncheck, an auto-hide is an opinion about a moment: the moment a
 	// probe verdict says available again, the entry self-clears (see
@@ -766,6 +775,7 @@ func (c *Config) clone() *Config {
 	next.LogCategories = cloneBoolMap(c.LogCategories)
 	next.SeenAnnouncements = cloneSlice(c.SeenAnnouncements)
 	next.HiddenModels = cloneSlice(c.HiddenModels)
+	next.ModelPrefs = cloneMap(c.ModelPrefs)
 	next.HiddenAuto = cloneSlice(c.HiddenAuto)
 	next.Subscriptions = cloneSlice(c.Subscriptions)
 	next.WorkBuddyAccounts = cloneSlice(c.WorkBuddyAccounts)

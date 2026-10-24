@@ -154,6 +154,8 @@ func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request, rest string
 		s.adminProviderModels(w, r)
 	case rest == "models/visibility" && r.Method == http.MethodPost:
 		s.adminModelVisibility(w, r)
+	case rest == "models/pref" && r.Method == http.MethodPost:
+		s.adminModelPref(w, r)
 	case rest == "tags/retag" && r.Method == http.MethodPost:
 		s.adminRetag(w)
 	case rest == "tags/probe" && r.Method == http.MethodPost:
@@ -264,14 +266,59 @@ func (s *Server) adminState(w http.ResponseWriter) {
 		// Task is the run the card shows progress for: the in-flight 测试 /
 		// 能力实测, or the most recent one.
 		Task *ProbeTask `json:"task,omitempty"`
+		// Channels lists every free-lane bucket publishing this id — a
+		// rotation can mirror ids between the Zen lane and the Kilo pool, and
+		// the card must say so instead of showing two cards that fight over
+		// one hidden checkbox.
+		Channels []string `json:"channels,omitempty"`
+	}
+	// copyRank mirrors lane.channelCopyRank closely enough to pick a merged
+	// card's primary channel: the copy a request would actually ride —
+	// probe-usable first, then unprobed, then throttled/region-gated.
+	copyRank := func(state string) int {
+		switch state {
+		case lane.StateAvailable:
+			return 0
+		case lane.StateUnknown, "":
+			return 1
+		case lane.StateThrottled:
+			return 2
+		case lane.StateRegionBlock:
+			return 3
+		}
+		return 4
 	}
 	days, recent := s.Store.SnapshotStats()
 	notes := s.Lane.ThrottleNotes()
 	hidden := s.hiddenSet()
 	models := []modelRow{}
+	byID := map[string]int{}
 	for _, m := range cat {
+		ch := m.Channel
+		if ch == "" {
+			ch = "zen"
+		}
 		p := av[m.ID]
 		note := notes[m.ID]
+		// Same-id mirror from another bucket: merge into the existing card,
+		// and let a healthier copy take over the primary channel.
+		if idx, ok := byID[m.ID]; ok {
+			row := &models[idx]
+			seen := false
+			for _, c := range row.Channels {
+				if c == ch {
+					seen = true
+					break
+				}
+			}
+			if !seen {
+				row.Channels = append(row.Channels, ch)
+			}
+			if copyRank(stateOrDefault(p)) < copyRank(row.State) {
+				row.Channel = ch
+			}
+			continue
+		}
 		row := modelRow{
 			ID: m.ID, Name: m.Name, Blurb: m.Blurb, State: stateOrDefault(p), Detail: p.Detail,
 			TTFTMs: p.TTFTMs, LatencyMs: p.LatencyMs,
@@ -287,10 +334,8 @@ func (s *Server) adminState(w http.ResponseWriter) {
 				return lv
 			}(),
 			Hidden:  hidden[m.ID],
-		}
-		row.Channel = m.Channel
-		if row.Channel == "" {
-			row.Channel = "zen"
+			Channel: ch,
+			Channels: []string{ch},
 		}
 		if tag, ok := s.Store.ModelTagOf(m.ID); ok {
 			row.TagSource = tag.Source
@@ -314,6 +359,7 @@ func (s *Server) adminState(w http.ResponseWriter) {
 			}
 		}
 		row.Task = s.probeTasks.latest(m.ID)
+		byID[m.ID] = len(models)
 		models = append(models, row)
 	}
 	// Custom-provider models follow the free-lane ones so the 模型 page shows
@@ -372,6 +418,7 @@ func (s *Server) adminState(w http.ResponseWriter) {
 	settings := map[string]any{
 		"defaultMaxTokens":     cfg.DefaultMaxTokens,
 		"defaultEffort":        cfg.DefaultEffort,
+		"defaultModel":         cfg.DefaultModel,
 		"probeIntervalMinutes": cfg.ProbeIntervalMinutes,
 		"exposeRegion":         cfg.ExposeRegion,
 		"closeToTray":          cfg.CloseToTray,
@@ -416,6 +463,7 @@ func (s *Server) adminState(w http.ResponseWriter) {
 		"probingModel":        s.currentProbingModel(),
 		"providers":           s.providerViews(),
 		"channels":            s.Store.ChannelViews(),
+		"modelPrefs":          s.Store.Config().ModelPrefs,
 		"providerPresets":     relay.Presets,
 		"subscriptions":       s.subsState(),
 		"announcements":       activeAnnouncements,
@@ -472,6 +520,7 @@ func (s *Server) adminSettings(w http.ResponseWriter, r *http.Request) {
 		Port                    *int             `json:"port"`
 		DefaultMaxTokens        *int             `json:"defaultMaxTokens"`
 		DefaultEffort           *string          `json:"defaultEffort"`
+		DefaultModel            *string          `json:"defaultModel"`
 		ProbeIntervalMinutes    *int             `json:"probeIntervalMinutes"`
 		ExposeRegion            *bool            `json:"exposeRegion"`
 		CloseToTray             *bool            `json:"closeToTray"`
@@ -530,6 +579,14 @@ func (s *Server) adminSettings(w http.ResponseWriter, r *http.Request) {
 			changed = true
 			dirty["defaultEffort"] = true
 		}
+	}
+	// The default model is validated loosely here (non-empty string): the
+	// registry only honors it when the roster actually carries the id, so a
+	// stale pick cannot inject a dead default.
+	if in.DefaultModel != nil && strings.TrimSpace(*in.DefaultModel) != cfg.DefaultModel {
+		cfg.DefaultModel = strings.TrimSpace(*in.DefaultModel)
+		changed = true
+		dirty["defaultModel"] = true
 	}
 	if in.ProbeIntervalMinutes != nil && *in.ProbeIntervalMinutes > 0 {
 		cfg.ProbeIntervalMinutes = *in.ProbeIntervalMinutes
@@ -746,6 +803,9 @@ func (s *Server) commitSettings(next *store.Config, dirty map[string]bool) {
 		}
 		if dirty["defaultEffort"] {
 			c.DefaultEffort = next.DefaultEffort
+		}
+		if dirty["defaultModel"] {
+			c.DefaultModel = next.DefaultModel
 		}
 		if dirty["probeIntervalMinutes"] {
 			c.ProbeIntervalMinutes = next.ProbeIntervalMinutes
@@ -1533,6 +1593,55 @@ func (s *Server) adminTasks(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, 200, map[string]any{"model": model, "runs": s.probeTasks.history(model)})
+}
+
+// adminModelPref records (or, with an empty effort, clears) one model's
+// preferred thinking level — the rung the model page card stars. The value
+// is normalized here: the store only ever holds light/balanced/deep, and an
+// unknown spelling answers 400 instead of silently never applying.
+func (s *Server) adminModelPref(w http.ResponseWriter, r *http.Request) {
+	var in struct {
+		ID     string `json:"id"`
+		Effort string `json:"effort"`
+	}
+	if err := decodeBody(r, &in); err != nil {
+		writeJSON(w, 400, map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
+	in.ID = strings.TrimSpace(lane.BaseModelId(in.ID))
+	if in.ID == "" {
+		writeJSON(w, 400, map[string]any{"ok": false, "error": "missing id"})
+		return
+	}
+	level := ""
+	if strings.TrimSpace(in.Effort) != "" {
+		level = normalizeEffortParam(in.Effort)
+		if level == "" {
+			writeJSON(w, 400, map[string]any{"ok": false, "error": "未知档位: " + in.Effort + "（light / balanced / deep）"})
+			return
+		}
+	}
+	s.Store.Mutate(func(cfg *store.Config) {
+		if level == "" {
+			delete(cfg.ModelPrefs, in.ID)
+			if len(cfg.ModelPrefs) == 0 {
+				cfg.ModelPrefs = nil
+			}
+			return
+		}
+		if cfg.ModelPrefs == nil {
+			cfg.ModelPrefs = map[string]string{}
+		}
+		cfg.ModelPrefs[in.ID] = level
+	})
+	if err := s.Store.Save(); err != nil {
+		writeJSON(w, 500, map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
+	if s.logger != nil && level != "" {
+		s.logger.Infof("模型 %s 默认思考档 → %s", in.ID, level)
+	}
+	writeJSON(w, 200, map[string]any{"ok": true, "id": in.ID, "effort": level})
 }
 
 // adminChannelToggle flips one free-lane channel's enable flag (the
