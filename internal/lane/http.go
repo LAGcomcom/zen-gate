@@ -50,7 +50,7 @@ const htmlPageHint = "the gateway's front proxy answered with an HTML error page
 // verdict, and an HTML page is the front proxy speaking, never the credential
 // store.
 func ClassifyFailure(status int, payload string, retryAfterSec int) *UpstreamError {
-	e := &UpstreamError{Message: truncate(payload, 300), RetryAfter: retryAfterSec}
+	e := &UpstreamError{Message: truncate(payload, 300), RetryAfter: retryAfterSec, HTTPStatus: status}
 	switch {
 	case freeTierRe.MatchString(payload):
 		// The lane-wide free-tier gate, not this caller's credential: it is
