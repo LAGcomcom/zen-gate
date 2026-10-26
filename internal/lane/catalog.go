@@ -29,9 +29,20 @@ type ModelInfo struct {
 // ChannelWorkBuddy is the WorkBuddy 账号渠道 (intl); ChannelCodeArts is the
 // Huawei Cloud CodeArts 账号渠道, the credential-bearing fourth source.
 const (
+	// ChannelZen names the OpenCode Zen lane in the per-channel files and in
+	// the dashboard. The catalog leaves a zen row's Channel empty (the empty
+	// channel *is* zen), so this constant exists for the places that need the
+	// id as a string: channels/<id>.json, the admin state, the wall.
+	ChannelZen       = "zen"
 	ChannelKilo      = "kilo"
 	ChannelWorkBuddy = "workbuddy"
 	ChannelCodeArts  = "codearts"
+	ChannelZCode     = "zcode"
+	ChannelTrae      = "trae"
+	// ChannelQoder names the sidecar-hosted Qoder pool. It has no catalog rows
+	// of its own: its models arrive as a custom provider entry the gateway
+	// syncs, which is why the wall reads its state straight from the sidecar.
+	ChannelQoder = "qoder"
 )
 
 var alwaysFree = map[string]bool{"union-alpha": true, "space-bunny-free": true}

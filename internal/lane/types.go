@@ -98,6 +98,22 @@ type ToolDef struct {
 }
 
 // Usage is one call's token accounting.
+//
+// Input and CacheRead are both raw upstream numbers, kept apart on purpose:
+// the two protocol families disagree about what "input" means, and collapsing
+// them at parse time throws away the only evidence of which family answered.
+//
+//   - OpenAI's prompt_tokens ALREADY includes cached tokens, so Input contains
+//     CacheRead (CacheInclusive).
+//   - Anthropic's input_tokens EXCLUDE cached tokens, so Input is the fresh
+//     part only.
+//
+// CacheInclusive records which one this figure came from. Every outbound
+// protocol needs the same underlying number, so nothing outside this file may
+// add the two fields up by hand: call InputTotal (all prompt tokens, cached or
+// not) or InputFresh (the uncached part). Adding them naively double-counted
+// every OpenAI-family turn — a 166k-token prompt with a 165k cache hit was
+// reported to clients as 332k input.
 type Usage struct {
 	Input       int `json:"input"`
 	Output      int `json:"output"`
@@ -105,6 +121,31 @@ type Usage struct {
 	CacheRead   int `json:"cacheRead,omitempty"`
 	CacheWrite  int `json:"cacheWrite,omitempty"`
 	TotalTokens int `json:"totalTokens,omitempty"`
+	// CacheInclusive says Input already contains CacheRead. Never serialized:
+	// it describes where the number came from, not how much was spent.
+	CacheInclusive bool `json:"-"`
+}
+
+// InputTotal is every prompt token the model saw, cached and uncached alike.
+// This is what an OpenAI-shaped client calls prompt_tokens.
+func (u Usage) InputTotal() int {
+	if u.CacheInclusive {
+		return u.Input
+	}
+	return u.Input + u.CacheRead
+}
+
+// InputFresh is the part of the prompt that missed the cache. This is what an
+// Anthropic-shaped client calls input_tokens; the hit portion travels in its
+// own cache_read_input_tokens field.
+func (u Usage) InputFresh() int {
+	fresh := u.InputTotal() - u.CacheRead
+	if fresh < 0 {
+		// An upstream that reports more cache hits than prompt tokens is
+		// stating something we cannot reconcile; never emit a negative count.
+		return 0
+	}
+	return fresh
 }
 
 // Finish reasons.

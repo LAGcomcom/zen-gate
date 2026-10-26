@@ -54,6 +54,12 @@
     background:linear-gradient(90deg,transparent,var(--accent),transparent); opacity:.45; }
   #titlebar .wm { font-family:var(--mono); font-size:14px; letter-spacing:.18em; font-weight:600; white-space:nowrap; }
   #titlebar .wm .tick { color:var(--accent-strong); }
+  /* 品牌方块：一个小圆角方块 + 135° 渐变 + 外发光，不用图标文件就有标识感。
+     颜色沿用全局唯一强调色（靛蓝），不另开一套色相去和状态色打架。 */
+  #titlebar .wm .mark { display:inline-block; width:8px; height:8px; border-radius:3px; margin-right:9px;
+    vertical-align:1px;
+    background:linear-gradient(135deg, var(--accent-strong), var(--accent));
+    box-shadow:0 0 8px var(--accent-soft), 0 0 2px var(--accent); }
   #titlebar .wbtns { display:flex; height:100%; }
   #titlebar .wbtns button { width:46px; height:100%; border:0; background:none; color:var(--ink-dim);
     font-size:13px; font-family:var(--mono); cursor:pointer; border-radius:0; }
@@ -379,6 +385,94 @@
   .msec .chcount { font-size:12px; color:var(--ink-mute); margin-left:auto; font-variant-numeric:tabular-nums; }
   .msec .dot { width:8px; height:8px; border-radius:50%; flex:none; }
   .msec .dot.on { background:var(--ok); } .msec .dot.off { background:var(--bad); }
+
+  /* ---- 渠道墙：一眼看完「谁开着、谁关了、谁还没登录」 ----
+     它不持有任何状态：分组只看 s.channels[].enabled，状态行只看各自的
+     status 接口，点击全部委托给下方已有的管理卡片。墙是总览，卡片是管理面。 */
+  .cwall { display:flex; flex-direction:column; gap:10px; margin-bottom:var(--gap-card); }
+  .cwall-tools { display:flex; align-items:center; gap:10px; }  .cwall-filter { background:var(--panel-2); border:1px solid var(--hairline); color:var(--ink);
+    border-radius:var(--r-md); padding:7px 11px; font-size:12.5px; width:220px;
+    font-family:var(--body); transition:border-color .18s var(--ease); }
+  .cwall-filter::placeholder { color:var(--ink-faint); }
+  .cwall-filter:hover { border-color:var(--hairline-soft); }
+  .cwall-filter:focus { outline:none; border-color:var(--accent); box-shadow:0 0 0 3px var(--accent-soft); }
+  .cwall-group + .cwall-group { margin-top:16px; }
+  .cwall-group-title { font-size:12px; font-weight:650; color:var(--ink-dim); letter-spacing:.02em;
+    margin:0 2px 8px; display:flex; align-items:center; gap:8px; }
+  .cwall-group-title::after { content:""; flex:1; height:1px; background:var(--hairline-soft); }
+  /* 组头的补充说明：跟在标题后面、分割线之前 */
+  .cwall-group-note { font-size:11px; font-weight:500; color:var(--ink-mute); letter-spacing:0; }
+  .cwall-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(196px,1fr)); gap:9px; }
+  .wcard { display:flex; flex-direction:column; gap:7px; align-items:flex-start; text-align:left;
+    background:var(--panel); border:1px solid var(--hairline); border-radius:var(--r-lg);
+    padding:12px 13px; cursor:pointer; position:relative; overflow:hidden;
+    transition:transform .16s var(--ease), border-color .18s var(--ease), background-color .18s var(--ease); }
+  .wcard:hover { transform:translateY(-2px); border-color:var(--accent); background:var(--panel-2); }
+  .wcard:active { transform:scale(.985); }
+  .wcard:focus-visible { outline:none; box-shadow:0 0 0 3px var(--accent-soft); border-color:var(--accent); }
+  /* 选中/高亮：左侧 3px 竖条，与摘要条第一格同一套语言 */
+  .wcard::before { content:""; position:absolute; left:0; top:0; bottom:0; width:3px;
+    background:var(--accent); opacity:0; transition:opacity .18s var(--ease); }
+  .wcard.flash::before { opacity:1; }
+  .wcard[data-off="true"] { opacity:.62; }
+  .wcard[data-off="true"]:hover { opacity:.85; }
+  .wcard-head { display:flex; align-items:center; gap:9px; width:100%; }
+  /* 渠道图标座：白底方框 + 20px 图形，和 jet-hub 卡片墙同一套观感。
+     图标是内联 data URI，白底是必须的 —— 那几个 PNG 自带浅色留白。 */
+  .wcard-ic { flex:none; width:28px; height:28px; border-radius:8px; display:grid; place-items:center;
+    overflow:hidden; background:#fff; }
+  .wcard-ic img { display:block; width:20px; height:20px; object-fit:contain; }
+  .wcard-ic[data-bare="true"] { background:transparent; }
+  .wcard[data-off="true"] .wcard-ic { opacity:.55; filter:grayscale(.6); }
+  .wcard-mark { flex:none; width:28px; height:28px; border-radius:8px; display:flex;
+    align-items:center; justify-content:center; font-family:var(--mono); font-size:13px; font-weight:700;
+    color:#fff; letter-spacing:0; background:linear-gradient(135deg,var(--accent-strong),var(--accent)); }
+  .wcard[data-off="true"] .wcard-mark { background:var(--panel-2); color:var(--ink-mute); }
+  /* zen / kilo 的启停是渠道文件开关，不是「运行中」——用 tgl 胶囊而不是带
+     状态点的 .act[data-on]，免得「已开启」旁边挂一颗让人以为在跑的绿灯。 */
+  .chan-pane .chead .tgl { margin-top:2px; }
+
+  /* ---- 渠道弹窗：点卡后承载该渠道的账号管理 ---- */
+  .chan-modal .modal-card { width:min(880px, 94vw); max-height:88vh; }
+  .chan-hd { display:flex; align-items:center; gap:11px; min-width:0; }
+  .chan-hd-ic { flex:none; width:34px; height:34px; border-radius:10px; display:grid; place-items:center;
+    overflow:hidden; background:#fff; }
+  .chan-hd-ic img { display:block; width:22px; height:22px; object-fit:contain; }
+  .chan-hd-ic[data-bare="true"] { background:transparent; }
+  .chan-hd-t { min-width:0; }
+  .chan-hd-t .n { font-size:15px; font-weight:600; color:var(--ink); }
+  .chan-hd-t .d { font-size:12px; color:var(--ink-mute); margin-top:2px; }
+  /* 搬进弹窗的管理卡去掉自己的壳，只剩内容 —— 弹窗已经是那张卡了 */
+  .chan-body > .card { background:transparent; border:0; border-radius:0; box-shadow:none; padding:0; }
+  .chan-body > .card > .chead { display:none; }
+  /* 每个渠道的管理面常驻 DOM，弹窗只显示其中一个。用 [hidden] 而不是重画，
+     面板里的轮询与已绑定 handler 全都保持原样。 */
+  .chan-pane[hidden] { display:none; }
+  .chan-pane .prose { margin-bottom:10px; }
+  /* 面板自带的标题行不重复：弹窗头条已经写了渠道名，这里去掉重名的 .cnm，
+     只留状态行（.cmeta）——状态是活的，头条那一行放不下它。 */
+  .chan-pane .chead .ct .cnm { display:none; }
+  .chan-pane .chead .ct .cmeta { margin-top:0; }
+  .chan-foot { flex:none; display:flex; justify-content:flex-end; align-items:center; gap:8px;
+    padding:12px 20px 16px; border-top:1px solid var(--hairline-soft); }
+  .wcard-name { font-size:13px; font-weight:600; color:var(--ink); overflow:hidden;
+    text-overflow:ellipsis; white-space:nowrap; }
+  .wcard-meta { display:flex; align-items:center; gap:6px; font-size:11.5px; color:var(--ink-mute);
+    width:100%; min-height:16px; }
+  .wcard-dot { flex:none; width:6px; height:6px; border-radius:50%; background:var(--ok); }
+  .wcard-state { flex:none; font-weight:650; }
+  .wcard-state[data-tone="warn"] { color:var(--warn); }
+  /* 「已关闭」是状态文字，不是装饰：用 --ink-mute 而不是 --ink-faint，
+     后者在深底上只有 1.7:1，读不出内容就等于没写。 */
+  .wcard-state[data-tone="off"] { color:var(--ink-mute); }
+  .wcard-meta-text { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-variant-numeric:tabular-nums; }
+  .cwall-empty { padding:14px 2px; font-size:12px; color:var(--ink-mute); }
+  /* 点卡去哪：目标卡片临时描一圈，用户一眼确认落点 */
+  .flash-target { animation:flashRing 1.8s var(--ease); }
+  @keyframes flashRing {
+    0%, 100% { box-shadow:0 0 0 0 transparent; }
+    12%, 60% { box-shadow:0 0 0 3px var(--accent-soft); border-color:var(--accent); }
+  }
   .msec .ghost { padding:3px 10px; font-size:11.5px; }
   /* 筛选 chips 行 */
   .mfilters { display:flex; align-items:center; gap:6px; flex-wrap:wrap; margin-top:10px; }
@@ -594,10 +688,13 @@
   .tgl:focus-visible { outline:2px solid var(--accent); outline-offset:2px; }
 
   /* ---- 自定义 API providers ---- */
-  input.tin { background:var(--panel-2); border:1px solid var(--hairline); color:var(--ink);
+  /* .tin 同时用在 <input> 和「多 Key 负载」的 <textarea> 上。只写 input.tin 的话，
+     那个 textarea 会掉回浏览器默认的白底黑字——弹窗里唯一一块刺眼的白。 */
+  input.tin, textarea.tin { background:var(--panel-2); border:1px solid var(--hairline); color:var(--ink);
     border-radius:var(--r-sm); padding:6px 9px; font-family:var(--mono); font-size:12.5px; }
-  input.tin:focus { border-color:var(--accent); outline:none; }
-  input.tin::placeholder { color:var(--ink-mute); }
+  input.tin:focus, textarea.tin:focus { border-color:var(--accent); outline:none; box-shadow:0 0 0 3px var(--accent-soft); }
+  input.tin::placeholder, textarea.tin::placeholder { color:var(--ink-mute); }
+  textarea.tin { resize:vertical; min-height:54px; line-height:1.5; }
   .pchips { display:grid; grid-template-columns:repeat(auto-fill,minmax(216px,1fr)); gap:10px; }
   .pchip { display:flex; flex-direction:column; align-items:flex-start; gap:2px; min-height:70px; background:var(--panel);
     border:1px solid var(--hairline); border-radius:10px; padding:10px 13px; cursor:pointer; min-width:0;
@@ -634,6 +731,25 @@
   .pv-picklist label span { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
   .pv-picklist input[type=checkbox] { accent-color:var(--accent); flex:none; margin:0; }
   .pv-picklist .pv-empty { grid-column:1/-1; font-size:12px; color:var(--ink-mute); padding:6px 4px; }
+
+  /* ---- 模态弹窗（添加/编辑供应商）---- */
+  .modal { position:fixed; inset:0; z-index:90; display:none; }
+  .modal.open { display:flex; align-items:center; justify-content:center; padding:24px; }
+  .modal-mask { position:absolute; inset:0; background:rgba(4,5,8,.62); backdrop-filter:blur(3px); -webkit-backdrop-filter:blur(3px); }
+  .modal-card { position:relative; width:min(680px, 94vw); max-height:86vh; display:flex; flex-direction:column;
+    background:var(--panel); border:1px solid var(--hairline); border-radius:var(--r-lg);
+    box-shadow:0 24px 64px rgba(0,0,0,.5); animation:modalIn .16s var(--ease); }
+  @keyframes modalIn { from { opacity:0; transform:translateY(10px) scale(.985); } to { opacity:1; transform:none; } }
+  .modal-hd { flex:none; display:flex; align-items:center; justify-content:space-between; gap:12px;
+    padding:15px 20px; border-bottom:1px solid var(--hairline-soft); }
+  .modal-title { font-size:15px; font-weight:600; color:var(--ink); }
+  .modal-x { flex:none; width:30px; height:30px; display:inline-flex; align-items:center; justify-content:center;
+    border-radius:var(--r-md); border:1px solid transparent; background:transparent; color:var(--ink-mute);
+    font-size:13px; cursor:pointer; }
+  .modal-x:hover { background:var(--panel-2); color:var(--ink); border-color:var(--hairline); }
+  .modal-bd { overflow-y:auto; padding:16px 20px 20px; }
+  .modal-bd .frow { display:flex; align-items:center; gap:10px; flex-wrap:wrap; margin-bottom:9px; }
+  .modal-bd .frow .flbl { width:76px; flex:none; font-size:12.5px; color:var(--ink-dim); }
 
   /* 供应商卡片 */
   /* 网格容器自己带底距：后跟的卡片（如「添加供应商」表单）不再与网格贴死 */
@@ -776,9 +892,8 @@
     .sumstrip { display:grid; grid-template-columns:repeat(3,1fr); }
     .sumstrip .cell:nth-child(3n) { border-right:0; }
     .sumstrip .cell:nth-child(n+4) { border-top:1px solid var(--hairline-soft); }
-    /* 5 格塞进 3 列会空出半行：最后一格横跨两列补满，不留空洞 */
-    .sumstrip .cell:last-child:nth-child(5) { grid-column:span 2; border-right:0; }
-    /* 窄窗口里公告只留标题 + 操作，日期先让位，标题行不再被挤成三行 */
+    /* 摘要条现在是 6 格（缓存命中占一格）：3 列 ×2 行、2 列 ×3 行都整除，
+       不再需要以前那条「最后一格横跨两列」的补洞规则。 */
     .ann-date { display:none; }
   }
   @media (max-width:640px) {
@@ -793,23 +908,32 @@
     .skel .sk-kpis { grid-template-columns:repeat(2,minmax(0,1fr)); }
     .skel .sk-cols, .skel .sk-cards { grid-template-columns:1fr; }
     .sumstrip { grid-template-columns:repeat(2,1fr); }
+    /* 这条看似与 900px 断点冗余，其实是必要重置：900px 里写了 3n{border-right:0}，
+       不在这里显式改回 1px，两列布局的第 3 格右边就没有分隔线（而它左边正是
+       第 4 格）。6 格 ÷ 2 列 = 3 行整，所以下面 2n 清的是第 2/4/6 格。 */
     .sumstrip .cell:nth-child(3n) { border-right:1px solid var(--hairline-soft); }
     .sumstrip .cell:nth-child(2n) { border-right:0; }
     .sumstrip .cell:nth-child(n+3) { border-top:1px solid var(--hairline-soft); }
-    .sumstrip .cell:last-child:nth-child(5) { grid-column:1 / -1; border-right:0; }
     h2.pt { font-size:18px; }
     h2.pt .sub { display:block; margin:4px 0 0; }
     .card { padding:13px 12px; }
     .row { align-items:flex-start; }
     .sel-btn, input[type=number], input.tin { min-height:36px; }
     .switch { align-items:flex-start; }
+    /* 渠道墙在窄屏：卡片改成两列以内的自适应，筛选框不再固定 220px。
+       下限是 190px 而不是 140px —— 140px 时 500px 宽的主区正好塞进三列，
+       每条车道名被压到「OpenCode ...」，而这里卡片的全部信息就是名字和
+       一行计数，名字读不全等于卡片读不全。两列让 22 条车道多占一屏。 */
+    .cwall-grid { grid-template-columns:repeat(auto-fill,minmax(190px,1fr)); }
+    .cwall-filter { width:100%; min-width:0; }
+    .cwall-tools { flex-wrap:wrap; }
   }
 </style>
 </head>
 <body>
 <div id="app">
   <header id="titlebar">
-    <div class="wm">ZEN<span class="tick">—</span>GATE</div>
+    <div class="wm"><span class="mark" aria-hidden="true"></span>ZEN<span class="tick">—</span>GATE</div>
     <div class="wbtns">
       <button id="w-min" title="最小化">—</button>
       <button id="w-max" title="最大化 / 还原">▢</button>
@@ -824,7 +948,7 @@
       </div>
       <div class="status-card">
         <div class="row1"><span class="dot" id="svcdot"></span><span id="svcstat">连接中…</span></div>
-        <div class="row2"><span class="nowrap">今日 <span id="side-today">0</span> tok</span> · <span class="nowrap"><span id="side-models">—</span> 模型可用</span></div>
+        <div class="row2"><span class="nowrap">今日 <span id="side-today">0</span> tok</span> · <span class="nowrap"><span id="side-models">—</span> 模型可用</span><span class="nowrap" id="side-cache-wrap" style="display:none"> · 缓存 <span id="side-cache">—</span></span></div>
       </div>
       <nav class="nav" id="nav"></nav>
       <div style="flex:1"></div>
@@ -848,7 +972,7 @@
 
 <script>
 const $ = s => document.querySelector(s);
-const PAGES = [["dash","总览","dash"],["agents","Agent 适配","agents"],["models","模型","models"],["providers","自定义 API","providers"],["access","接入","access"],["usage","用量","usage"],["logs","日志","logs"],["settings","设置","settings"]];
+const PAGES = [["dash","总览","dash"],["agents","Agent 适配","agents"],["models","模型","models"],["providers","渠道","providers"],["access","接入","access"],["usage","用量","usage"],["logs","日志","logs"],["settings","设置","settings"]];
 let cur = localStorage.getItem("zengate.page") || "dash";
 if (!PAGES.some(p=>p[0]===cur)) cur = "dash";
 let STATE = null;
@@ -1042,6 +1166,17 @@ function render(){ if(!STATE){ skeleton(); return; } const s=STATE;
   $("#svcstat").textContent = "运行中";
   const todayKey0 = Object.keys(s.stats.days||{}).sort().pop();
   $("#side-today").textContent = fmtN(todayKey0 ? (s.stats.days[todayKey0].output||0) : 0);
+  // 侧栏只在真的有缓存数字时才让这一格出现：显示「缓存 0%」比不显示更让人
+  // 以为坏了，而任何一条不返回缓存用量的上游都会造成 0%。
+  (()=>{
+    const d = todayKey0 ? s.stats.days[todayKey0] : null;
+    const pct = d ? cachePct(d.cacheRead||0, d.input||0) : null;
+    const wrap = $("#side-cache-wrap");
+    if(!wrap) return;
+    wrap.style.display = (pct!==null && (d.cacheRead||0) > 0) ? "" : "none";
+    const v = $("#side-cache");
+    if(v) v.textContent = pct!==null ? pct+"%" : "—";
+  })();
   // Only the free lane is probed on a timer; a custom provider's models are
   // tested on demand, so counting them here would cap the ratio below 100%.
   const lane = s.models.filter(m=>!m.custom);
@@ -1110,6 +1245,7 @@ function renderDash(s){
     </div>` : "";
   const fail = day ? day.failed : 0;
   const failPill = fail > 0 ? ` <span class="pill bad">${fail} 失败</span>` : "";
+  const todayHit = day ? cachePct(day.cacheRead||0, day.input||0) : null;
 
   $("#page-dash").innerHTML = `
     <h2 class="pt">总览 <span class="sub">本地免费模型网关 v${esc(s.version)}</span></h2>${banner}
@@ -1120,6 +1256,7 @@ function renderDash(s){
       <div class="cell"><div class="v">${fmtN(day?day.output:0)}</div><div class="l">今日输出 tokens</div></div>
       <div class="cell"><div class="v">${fmtN(day?day.requests:0)}</div><div class="l">今日请求${failPill}</div></div>
       <div class="cell"><div class="v">${fmtN(day?(day.input||0)+(day.output||0):0)}</div><div class="l">今日总 Token</div></div>
+      <div class="cell" title="今日输入里命中上游前缀缓存的占比；0 表示上游这条线不返回缓存用量"><div class="v">${todayHit!==null?todayHit+"%":"—"}</div><div class="l">今日缓存命中</div></div>
     </div>
 
     ${annHtml}
@@ -1470,13 +1607,45 @@ let mview = localStorage.getItem("zengate.mview") || "grid";
 // 折叠的渠道节：CN 出口下可用为 0 的整组默认收起，手动展开记住。
 const foldedChans = new Set(JSON.parse(localStorage.getItem("zengate.mfold") || "[]"));
 
+/* 渠道的中文名与一句话说明，供「模型」页的分组表头用。
+   渠道墙不用这张表：卡片的名称与说明由后端 /channel/wall 下发（那份才是
+   权威，因为它同时决定卡片显示什么状态），这里只补一个图标与短名称。 */
 const CHAN_META = {
-  zen:       { name: "OpenCode Zen 车道", desc: "免登录免费池，按出口 IP 限额" },
-  kilo:      { name: "Kilo 免费池",       desc: "免凭证，在列即可用" },
-  workbuddy: { name: "WorkBuddy 账号渠道", desc: "账号登录后出模型" },
-  codearts:  { name: "CodeArts 账号渠道",  desc: "华为账号，含轮换福利模型" },
-  custom:    { name: "自定义 API",        desc: "你自己的供应商" },
+  zen:       { name: "OpenCode Zen 车道", desc: "免登录免费池，按出口 IP 限额", mark: "Z" },
+  kilo:      { name: "Kilo 免费池",       desc: "免凭证，在列即可用",           mark: "K" },
+  workbuddy: { name: "WorkBuddy 账号渠道", desc: "账号登录后出模型",           mark: "W" },
+  codearts:  { name: "CodeArts 账号渠道",  desc: "华为账号，含轮换福利模型",   mark: "C" },
+  qoder:     { name: "Qoder 账号渠道",     desc: "内置网关 + 账号池，可加多个号", mark: "Q" },
+  zcode:     { name: "ZCode 账号渠道",     desc: "智谱账号，浏览器授权后出模型", mark: "Z" },
+  trae:      { name: "TRAE 账号渠道",      desc: "字节账号，浏览器回调授权",    mark: "T" },
+  cline:     { name: "Cline",             desc: "WorkOS 登录，粘贴令牌",        mark: "C" },
+  loomy:     { name: "Loomy (讯飞)",       desc: "讯飞账号，粘贴令牌",           mark: "L" },
+  raccoon:   { name: "Raccoon (商汤)",     desc: "商汤账号，粘贴令牌",           mark: "R" },
+  lobsterai: { name: "LobsterAI (有道)",   desc: "有道账号，粘贴令牌",           mark: "L" },
+  astudio:   { name: "AStudio (讯飞星火)", desc: "星火账号，粘贴令牌",           mark: "A" },
+  modelscope:{ name: "ModelScope (魔搭)",  desc: "魔搭账号，粘贴 ms- Key",       mark: "M" },
+  custom:    { name: "自定义 API",        desc: "你自己的供应商",             mark: "+" },
 };
+
+/* 渠道图标：直接取自 jet-hub 插件的那份（plugin-src/client/provider-icons.js），
+   同一张图、同一个白底图标座，两个界面上认起来是同一个渠道。
+   data URI 内联，不打额外的资源请求。 */
+const CHAN_ICONS = {
+  kilo: "data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2024%2024%22%20width%3D%2224%22%20height%3D%2224%22%3E%3Crect%20width%3D%2224%22%20height%3D%2224%22%20rx%3D%225%22%20fill%3D%22%236C4DF6%22%2F%3E%3Cpath%20d%3D%22M9%206.2V17.8%22%20stroke%3D%22%23fff%22%20stroke-width%3D%222.2%22%20stroke-linecap%3D%22round%22%2F%3E%3Cpath%20d%3D%22M15.6%206.4%209.9%2012.1%22%20stroke%3D%22%23fff%22%20stroke-width%3D%222.2%22%20stroke-linecap%3D%22round%22%2F%3E%3Cpath%20d%3D%22M9.9%2012.1%2015.9%2017.8%22%20stroke%3D%22%23fff%22%20stroke-width%3D%222.2%22%20stroke-linecap%3D%22round%22%2F%3E%3C%2Fsvg%3E",
+  codearts: "data:image/png;base64,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",
+  workbuddy: "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAEgAAABICAYAAABV7bNHAAAAAXNSR0IArs4c6QAAAARnQU1BAACxjwv8YQUAAAAJcEhZcwAADsMAAA7DAcdvqGQAABcVSURBVHhe7Zt3fBRl/scHEtJ3QwSxgIgFhDvb6XlY7myn3nln15PziojtPPVEakJCeu+FQKRJCS2AInqWl9iT7M7M7mzLBkJIQjG0ECG9Zz+/3/eZmWR3Ek+ORe+ffF+vz2unPc88n/d853memd3luJEYiZEYiZEYiZEYiaERZn5/ss763hy99M4qvWnn56HCdrOOL7HohO3S/0R8iYXaoBd3fKE37Vytc7w3J8z5/mRtu3/0GGsquU5v21Wsk3a2hVZ9hNCqD6F3vg+9YzdCHe8NkV5RKNu/W1mW1933DS7Tp3zs8PUMLrtrYLvzfcjt+gh66Z02amuwqeQ6rY8fJfTSzii99d3u0P0fQWfeAR2/FXp+K3T8NiZa1ivL8j71Uz5GXVf3uZfVamg9nmXHGDZhdPkmcOUbEWjcMnCMxznMO0BtpTZT27V+zl98GeurM20v0dd8DJ20AzrjloFG/NQiqATll/YPsbmhDpGHrQjlt8LXUKwA14jaKu1AaM0nIA/cl1/6au15HTpx23Z97SfKSQnO/0Z6fgt8DBsxVdoFoeUU6rvbcbynAzsbD2GCWML2yZCGlmVwyYO4bbvWn1cRwm+O1Nd+PMwJf3oFGTfDz1CMrafqcLirDY72M6hoP4NjPR349+lvcYGwDb4M0tCyqsgLedL6PKcIMW+erpNK+nRSCXT85vOmkGG2aTXcMVzZOsw+UIaj3e0MTGXHGeztaGJq6OnE1lMH4W8sRoCxeEjZAZEXqaSPvGn9/tcRImzeotv/AUKMmxDCk6jh6vIPSXus+7q6rD3Gfb/nPn/jRkwQt6G8pQE1nS0Mzr6OJlR1NGF/RzOqO5txpq8bGfUV4MreRvCQ+pVl4yYwT8LmLVq//1UEWksmhgibu0LMW4cx8NNKx28CV7YWcw8KONHTwTKG4OzvaGJgDnQ2M2gHO1vR1NuD2QdKwZWtGVLPgMiTsLkr0FAyUev7rCNI3PK8rmo3Qvji/7n8jBswQdwKvrUBdZ0tLGuqOwbB1Ha2sO0Hu1pxvLsD33a14Xrbe+DK32ZwtfWRdFXvIYgvfl7r+6wjWNi0Vle1CyH8Rk3l7uvaZe2xZ1Puh0XZ8HJNOetn3LNGBVPX1YpDXa04rKi5rwefNR1DoHEDAowbhj9n1S6QR63vsw4dX/xViHMnghXj9KnV923/of0qTO224cqQQfr8rOkovu1u88yarlaWNTKcNhzpbmPH0PDf4+pH5GEzuNJVQ87PzuOkiW7xV1rfZx0h/EYpxLFdqZAaKTf0h5fddTbHfN8+eRtXvgZ/3PspTvZ0DrmdhgNDI9yx7g409nbhu94u3GDbhVHlaxXwg/WGOEoQImyUtL7POoKFDRJVMrThP52CFEDrTlajsadTyRo3ON0ynPruNgWMPHGkjvxkTwf6XC7s/u4wRpWvQSC/3qNu5k3Y4B2gYMc2BLOK/5PohNpt50c+hrWYZtnBwFDfcrCrZaCvkbOmnWWNJ5hO1ledUjLIBRceq9oDrmwlQtzbSt68ARQorJeCHVuVCtchiF/P5L6unsx9n7qsXVfLeULQ1iPvp22+xrXgvl6GNw8a0dLXw7JmEIz77dQ+kDEMTE/nwO11ureLZZHUdgpBxnXgSt9CgNoG8ias9x4QNfqnkr/xbXDlK9nVvsS0CU9U7YG57RTLjiNdrQqYobdTQ0+HAqZzAMyZ3m4098kiSJa2Rvyl+guMKl/NzkHeyKPW91lHoLBOCnZscTPwttun+7L7Nne5lxtufXCbr3ENuLIitu3BvR+j6MReONtPo6mvm0E43N2qAaNmjZIxPZ5gqByBocxr7etBW38P1PisqR43298FJ70NzrjaO0BBDJDW+PmTDGYFJogb8VpdGb5uPsaMksFjPe1ut1ObBoz77dSpgJHLuYOR4fSio78Pnf196O7vZ5C6+vuw6IQFN9p2eANorRTk2Iwgfu15VwAvgwkT1mP+QQNsbY1sckfG5X5m6O10oqd9WDAkdzCDWdOLdgUMAel29bO5Ua9LhkThcrm8BbQJgTwNkWvdPlXRuvs27fLQ4wkOZ3gLXHkRZu3fA6G1gRmibKHRaTgwatYM18+09fWwUWq4oK0MTH/fABjqi/rdSngFKMADkPfy51eDKyvENMtWbDl1gD15k/HBYVuGowVDWXOqhyZ+MhgSGaegfXua6rHseAWij4iIOiwg+6gdH5w+xJ7H1CAo7mDU8BLQGinQUYxAfvUwItPabcMriF+D0SxrlmPOgS9QQ68lertwqEue22izxrOf8cya9v5eZmxfxxnMrSvDFGkTOEMRA8+VLVNUyM41XlyHp/d/iq+aj2qwDMZ5ALTRw2yAm7Qgvk9c+Qro+NVYccLJ+hnKDoLjCaaN3WYEZzgw1L9Q0L4lh3mECmvAlRZglOEt+POrhpwzgF8FHyNNF5YxWLMPfM7q0YaXgFZLAY6N7ATqiTzkftXK5as2ylCEMcaVrIGB/Cq273KpGHuavkVrf8/A07YHmIGskeEMgulkmUZBHezqE3txhVQMrjQfPsa3WP3DST23+unHr2RlZli2YH9n0/kD5C+skvzs63GncxcWHzIg95gdRSecTPnHHEiplxB+2IgXa77CI/s+wkzHTkyRiqETVoMzLAf3TS5utm+Hvb2RjTJq1hAYedhu8wCjjk4EhkRQKAjubyreBVdWwOol47LkC/H9GtwvX6wCTJE2snOfF0BceYH0bD29/6UHQno4pIdEehZqwbfdrTjaQwblvoKM0mRub8dplDYfw5ZT1Uirl1DZcZqlNu2jMmrWeILpwKnewayhkYmiquMMnq3eo2RnAQJ4yhpvRJmUh/sqd58vQPlS8ncV7HZwtDeiov07ODu+Y6YJxL6O08xEdecZHOhsQm1nM7t9qC8hs9RvyJO9QTDut5NnP9OJpl65n6HhO/6IgLEC9SG58ONXIJAvcpNsOOgspB6nlgvgi8CVZmPVycrzAKgsT3rpuIGZGw4M3c8EpkaBU9fVPJBhh5UsGwQjZ83JgX5GHrbVyV6/y8XmKJsaqjDdQv1MDnwMhQhSoHgaV9eLEEzLAq3Ly+7rnscOiuq9yLQGbTTsewXImC/dVvsBM05QBsFQ1qhwhoKRR6dWDzAet5Nb1tAsl6Ks5Sjur9zFMoYrzx/IFtmgImEFU/Bw4hW5ryvLajkmpS66AEsbrd4BGs0vl/QV6/FN81EGwBPMYNZowQz0M91tGjCDWUOzZ4qDXc34R+3n8DUUMDgByu0UxJMZFchyRbLxEH45QpTPIL4QfsYCBPLLoOOXD0g+ZjlCBPnTE9hy+POFGOtcj7KWY+cOyE8okjjLCqTWm1knqgVD5gbnMwTGM2uGA6MO2y30/dVRMyaI1HFmYYyxEIEMjmxAVbCbWWZeKGQKFZbD10hA83GltAahQiFGGXLYp14jtUwIT5LrJOC+9pW4xurFCzM/YYXEWYtwW8UOlg11GjA0Mskd8HC3UzsDc6pXfUToZM9DNNV/p/EArrdtAleaiVEGuvrLZTEohUzBzIwsnbAMekWhwjKMFZZhjDEHN9o2oLS5ng0GzvZGPLzvXYwuz0KYUMiOIdHxJLU81aXjl8l1O9bAhy/wBtByydexGj6GfPz79EFmVns7DQdGmzXq7WRpa8Aj+3aDK88GV56DAJ6yhuDIUFQwMhzZjCeYAoQJBdDz+Rgr5MPZfkoZrOXo6O/FdMtqBBqzMU4owAVCPi5QylBZkgesilUIEQq9A+TvoAfMLMyq/pi9QjjSrY5OMpzBfkYGo53TUCfc6epD3BEjAo3Uz2TCj6c5TaEMSFiGIEXB7MoSmALomRnZFBmUzeZjnJCPIGMWbnds9ICjxo7GffApT8UEIQ8XKhov5rFyVD5MILhy3aEVK6ETvcqgQsmPMshYwDpDvvU4G5K1WdOgZo0bGHkm3Mcmib+rfAdcaRpGG/MQwC8b0AAcvkCBU6DAkTOEzMhQ8jBeMTtBzEUYn4UZliK0Ks9n2niociuCDKm4RMzFxWIuLhJzMUHIxYWiXA/Vx2BVvAW994DoWYaetzIxp2YP60eO93hmzeCrCOXNXp/81E26x7mDwaGs8WeZo8IpQBCJwSlAiJDPwIQKeRjLDMhGxgu5DAqZvFjMwaViDiaK2QgyJCP/KK9lw0JqPYZxfBouFbMw0ZSNiWIOLhFzWHmq50Ihl9U7rqIIYWK+t4BWYgxfgNFGmpsUQGg9zh4F1BHKfbJHYOiZi0YoitfrvgD3TQr8+Hz4MxGgAgQK+UxBfD6C+XwFTh6DE8bgyAYmMENkjkxmY5KYjctMWZhsysKlQjqmmnNwrLtFy4fF/LqPoDcmYIpy/GUmufylYjaDRfVOqFiOcWLeuQPyFQoGAFEGcGXp+NP+D9mM1310ksHIryQIDr2W+rq5Hlx5FhuKVUAEJ2AInDzohVyECrkIo6sq5uBCZoCMEBgyl4XJYhammDJxhSkTV5kyMNWcgXHGOCys+7eWDYvj3S24TsrB5WIarjRlsHKXmzIZrElilgzKWUjZ6R2gMY63MIbPZ/Lh8zDakI1Pmw4xSGrWqGCoE1dfaD20j2bFdGvlKdlDgPIQKOQhiM9DMJ8HnZDL4IwxpoMrT8ao8mSM5TMYGLo9JolkKBNTTBnM5NWmdEwzp2O6OR0zzGmYbkrFlWICbG31Wj4sXqjeholCPK4xy+Wo/BWmDAbqMpKzAJeasr0BlK8AylOUz7LoDmcJexVB73cIDnWW9LUKwaF5TlXHafgTTGPOACCCEyDkIpDPRTCfixAGJwejDam4vWIDkr8tw5JDn2OqVIAwPoWBuZxdednYNaY0BuXn5lRcZ07FDeYU/EJKwdVCDP5etU7LhsWsvWtxtRiHa82p+BkBNadhmikNVymgplTmY5Ip0xtAedIYR5EboDz48nksM9Y3OBkM9TsnmoOoz1UrT9jBlVHfk8tAkVQ4QQxODnQCPYym4tF9O9hop0Z1RyOukXJxiZDMjEwzE5hUBuZ6cwpuNCfjJikZv5SS8CspCTOlJMwQI1F8wuCGBtjdaMW1pljcLCWx4280p+A6cwqrZ7o5FVNNabi6Mpey01tAK+DL5w5oDJ/LzC869DVrCGUNwZG/VpGNvlr3GbiyZAVQLvyFHAQIOQjicxDM4GRDx2chwJjGRhxtbG6wYqwxGtewK0/GyGAyM/srKRG3Som43ZKIX1sS8BtLAn5ticNMczQia7dh/fGvEXtwJ2ZKsbhVimPHzZQScQsDlcTqIVAEffreHFwtpZ07IJ8hgHLYJwFKrpeH2E4Fjvv3TY9XUf+jZpAMJ5DPQZCQjRAhG3oCJGRgrJCBus4zGjz0dY0Lj1auwWQhBjewjJHB3CYRjATcaYnH3ZZ43GuJw2+tcbjfGof7LLG41RSOW0yLMNMUjnsssbjXGo+7LPH4jSUed1gScKuUgFukRPxCSsL15mRcuzcL06RUbwDlSr6O5QqYQVF2JNcbmRnKGoLTpzxnUfxx304FUA78hWwECNkI5LMRzMBkIVTIRJiQCR9DAlYcFz3gqMG3HMRVwlLcJCVgppSAOyzxuNMSh3sYlFg8YI3F760xeNAagz9YY/BHa7Qsm7xO239njcH91lh2/N2WOAbqdikev5IScJOUiBv3Uucff+6AfHkCVAhfPttDXFkSoo6UMiPql3Hu3zc9U/2Bcotlw1/IQgCfhSAhCyFCFvRCJsYKmRgnZCCUT8FUKReNve1upQdjUe12TBfCmTEyKIORzT9ki8bDtmg8aluKx2xL8bibaJ22P2xbyqARyPutMbjXGou7LHEMNkH/WWUC5lR58eOFMXzOV75OyqChgObUfMxMDObNYEQfKQVXmgg/giNkIZDPQjADlIlQIQNhQgYuFNNxiZgGf0M0Ig99oq2CRX3XadxtpX5mKTP4oDWagSHzj9ui8KQtCn+yR+FpeyRmuelP9kg8ZZf303GPECgbgYrGfdYY3GWJxXRhAcJP7kJbb9e5/wTPV8he61tVBB8+y03Z4EoTEH5Y7qSHi0/O1IErT4KfkIkAPhOBQiaChUyl30nHOCEdE0R6FEjFRDEZE8UE7G0/oa2GRfaR3ZhpWog/WJcyo2T4KVskg/KMfQn+Yl+Cv9oj8Dc3/VXZ/mf7Enbck7ZIPGaLYhn1W0sEfmmah4jazaAe0+VynfuPOEeLWc/7aABxhlT8zLYW7W4/J9EGDfuXSSswypjCAAUJGQgRMqAX0hEmpGG8mIaLxVRMMqVgiikFF/JRmL2/WFsNi5IT3+B205t4xBaFJwiMbQkDQ1CetYdjtj0czznCMcdNtD7bEY6/M1gRDNSTtgjca56LpxxxeK9B7j8p+lyuc/8ZMGfNnugjZHX5mHPgw2cycWUJKDph9TAxXKQeNYArjUUAn4EgIR0hQjpChTRcIKRhgkhP2jQZTMaVpiRMMydiEh+BT0/L3zS4x+IDq3GftIBlwSyWGRH4uwLlecdivOhYjJcci/Cym2j9BcdizHEsxmzHYjxheQNPWheg8Mh2NPYMfnHocrm6XC7Xuf+QnMJHyNjis38FfIwZGMWnswyytA1/O7gHza4nS4UYbUhCsJAOnZCGsUIqxompuEhMwURTMqaYknC1KREzzAmYborGHdZkfHGmEq19nTjZfQYF377H4DxhW4JZLBvCWdaQ8RcVGK9ULMQ/KxbiVTfR+isVizDbNhezrK8hqWY59rcd1DaRAHn3VwQKP3PWdB8pu2+0lA3OmAYfPgMHOk9rzzVsrG+gGXUMgoU06IU0hIkpGC+m4GIxGZeZknCFKRHTzAn4uTkeN0nxuNEchZvNEXjMkYKH7XG4W5qHx23Uj6hwFuN5JUMIDMF4rWIh/lWxYEBvECDHm3jW+g8s2ZcAw2mTtlksXC42q/X+zywUo/n0SJ/aInB8GkYZU+FoP6k937BB49vtznXgDHEIFVJxgZiCC8VkXCImYbIpEVeZEjDdnIDrzHG4WYrFbZYY3GlZijstEXjAEo5HbUvwlC0Cz9ipP6FbhuBQdhAcFch8vOmUNbdiHl60vYx5zoX44MSH6Oof+mMFNVwu1/n5O5Qao4SM7aNrV4Arj8eu7/Zrz/e9UdZyBKMNcQgRknGBkIwJYhIuNSXiclMCrjYlYIY5DjdIsbhFisEdlmjcY43CA9ZIPGRbgidsEZhlD8ff7IvxnGMRXmRwFuA1Bmc+5jrnY55zHuY75+FV+yt43fEq1h9Zj4buBm0zPKIf/ef3D3Usvoz1HWXO3Mbty8Ib9Z9rz/kf47ka+lNJFMaLybhITMJEUyKmmBIw1RyPn5vj8AspBjOlaDbfudcaid9bI/GILQJP2cPxjH0xnmWd7kK8XLFAyRzKGBnMG47X8E/7S8ityUJ16w9fuDM9zSVf4kf4S+ZACAlRl1Wu7Bp8/v7hONrdggmmNATzsbhITMQkUwKuMMVjmpleRcTiJikGt7JbKwr3WSPxB1sEHrOF42n7YvzVvgjPORbiJccC/LNiPl6vmIe5znmYW/EG/mF7AXFVUTB8V6Y95ZDo6uvqPtBR+yP+qdc9vnzj2tKu4xtdLtfg70h+IN7trEGAPREXOdMwuTINV1WmYsbeZNywNwm37EvEr6vicW9VPB7cH4tHq2PwdPVS/O1AFObUROLlmiV4rTYCc2vDsaAuHPNr5yP20FJ80bZHe5ohQW3sd7mKa1prfpq/hbsHgMkul2uOy+Va5XK56L4zu1wuC33fPZxeqNkpBQpR0iQpXrpSipeukeKkay0x0k2WaOk261LpbmuU9IBtifSwI0J60hEu/dmxWHq2YqH0QsUC6RXnfOl153zp1Yp/SanVKdLhjoND6qdz9/f3S/39/V8obZpDbdS2eyRGYiRGYiRGYiRG4v/j/wA7uND5glG+pQAAAABJRU5ErkJggg==",
+  qoder: "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCIgd2lkdGg9IjI0IiBoZWlnaHQ9IjI0Ij48cmVjdCB3aWR0aD0iMjQiIGhlaWdodD0iMjQiIHJ4PSI1IiBmaWxsPSIjMWYyYTNmIi8+PGNpcmNsZSBjeD0iMTEiIGN5PSIxMSIgcj0iNC42IiBmaWxsPSJub25lIiBzdHJva2U9IiNmZmYiIHN0cm9rZS13aWR0aD0iMS44Ii8+PHBhdGggZD0iTTEzLjkgMTMuOSAxNyAxN2EwLjk1IDAuOTUgMCAwIDEtMS4zNSAxLjM1bC0zLjEtMy4xIiBmaWxsPSIjZmZmIi8+PC9zdmc+",
+  zen: "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCI+PHJlY3Qgd2lkdGg9IjI0IiBoZWlnaHQ9IjI0IiByeD0iNSIgZmlsbD0iIzEyMTYxZCIvPjxwYXRoIGQ9Ik02LjUgOC41IDEwLjUgMTJsLTQgMy41IiBzdHJva2U9IiNmZmYiIHN0cm9rZS13aWR0aD0iMS44IiBmaWxsPSJub25lIiBzdHJva2UtbGluZWNhcD0icm91bmQiIHN0cm9rZS1saW5lam9pbj0icm91bmQiLz48cGF0aCBkPSJNMTIuNSAxNmg1IiBzdHJva2U9IiNmZmYiIHN0cm9rZS13aWR0aD0iMS44IiBmaWxsPSJub25lIiBzdHJva2UtbGluZWNhcD0icm91bmQiLz48L3N2Zz4=",
+  zcode: "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAYAAABzenr0AAAAgklEQVR42u3XsRGAIAyF4UxgYe0g7j+FpZtgRwN36stLAhruqP+v4ICIdNaybsViy92yCj+CeMW7CO94gwgFRMUrIgFTAPbzgPe/Aa5nAInTAGicAtDE1QBtXAVgxGEAeuIpAFYYArDj81xEoQDLd+A1ID8k3wTkXDDEaDbEcBo1nl/XXoK4yMqvMgAAAABJRU5ErkJggg==",
+  trae: "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjM4IDM4IDQzNSA0MzUiIHdpZHRoPSIyNCIgaGVpZ2h0PSIyNCI+PHBhdGggZmlsbD0iIzMyRjA4QyIgZmlsbC1ydWxlPSJldmVub2RkIiBkPSJNNTggMTE2aDM5NXYyNzlIMTE1di01NUg1OHpNMTE1IDE3MmgyODF2MTY4SDExNXoiLz48cGF0aCBmaWxsPSIjMzJGMDhDIiBkPSJNMjE1LjUgMjE1LjVsMzkgMzktMzkgMzktMzktMzl6TTMyOSAyMTUuNWwzOSAzOS0zOSAzOS0zOS0zOXoiLz48L3N2Zz4=",
+  cline: "data:image/png;base64,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",
+  loomy: "data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2024%2024%22%3E%3Crect%20width%3D%2224%22%20height%3D%2224%22%20rx%3D%226%22%20fill%3D%22%23007aff%22%2F%3E%3Ctext%20x%3D%2212%22%20y%3D%2217.5%22%20font-size%3D%2215%22%20font-family%3D%22sans-serif%22%20font-weight%3D%22700%22%20fill%3D%22white%22%20text-anchor%3D%22middle%22%3EL%3C%2Ftext%3E%3C%2Fsvg%3E",
+  raccoon: "data:image/png;base64,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",
+  lobsterai: "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCIgd2lkdGg9IjI0IiBoZWlnaHQ9IjI0Ij48cmVjdCB3aWR0aD0iMjQiIGhlaWdodD0iMjQiIHJ4PSI1IiBmaWxsPSIjZTg1MDNhIi8+PHBhdGggZD0iTTEyIDUuNWMtMi40IDAtNC4yIDEuNi00LjIgNHY1LjJjMCAyLjMgMS44IDMuOCA0LjIgMy44czQuMi0xLjUgNC4yLTMuOFY5LjVjMC0yLjQtMS44LTQtNC4yLTR6IiBmaWxsPSIjZmZmIi8+PGNpcmNsZSBjeD0iMTAuMyIgY3k9IjEwLjIiIHI9IjEiIGZpbGw9IiNlODUwM2EiLz48Y2lyY2xlIGN4PSIxMy43IiBjeT0iMTAuMiIgcj0iMSIgZmlsbD0iI2U4NTAzYSIvPjxwYXRoIGQ9Ik04LjQgNy4yIDYuMiA0LjltOS40IDIuMyAyLjItMi4zTTkuOSAxOC41bC0xLjQgMm02LjYtMiAxLjQgMiIgc3Ryb2tlPSIjZmZmIiBzdHJva2Utd2lkdGg9IjEuNCIgc3Ryb2tlLWxpbmVjYXA9InJvdW5kIiBmaWxsPSJub25lIi8+PC9zdmc+",
+  astudio: "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCI+PHJlY3Qgd2lkdGg9IjI0IiBoZWlnaHQ9IjI0IiByeD0iNSIgZmlsbD0iIzFGNkZFQiIvPjxwYXRoIGQ9Ik0xMiA2LjIgMTcuNiAxOC4yaC0yLjJsLTEuMi0yLjlIOS44bC0xLjIgMi45SDYuNHoiIGZpbGw9IiNGRkZGRkYiLz48cmVjdCB4PSI5LjIiIHk9IjEyLjYiIHdpZHRoPSI1LjYiIGhlaWdodD0iMS41IiBmaWxsPSIjRkZGRkZGIi8+PC9zdmc+",
+  modelscope: "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCI+PHJlY3Qgd2lkdGg9IjI0IiBoZWlnaHQ9IjI0IiByeD0iNSIgZmlsbD0iIzYyNEFGRiIvPjxwYXRoIGQ9Ik02IDE3VjdoMi42bDMuNCA1LjJMMTUuNCA3SDE4djEwaC0yLjR2LTZsLTMgNC42aC0uMmwtMy00LjZ2Nkg2eiIgZmlsbD0iI2ZmZiIvPjwvc3ZnPg==",
+};
+
 
 // 上游原始错误 → 一句人话；原文收进 title，不再把 JSON 印在卡片上。
 function humanDetail(m){
@@ -1635,11 +1804,14 @@ function renderModels(s){
     && (!mf.state || m.state === mf.state);
 
   const groups = [];
-  for(const ch of ["zen","kilo","workbuddy","codearts"]){
-    const meta = CHAN_META[ch];
-    const st = chanState[ch] || { enabled: true, models: 0 };
-    groups.push({ ch, meta, enabled: st.enabled, roster: st.models, refreshedAt: st.refreshedAt||0,
-      cards: sorted.filter(m => !m.custom && (m.channel||"zen") === ch) });
+  // 每个渠道一组，顺序与名单都来自后端的 state.channels（与 lane.Channels 同源）。
+  // 不在这里写死渠道列表：那样加一条渠道得改几处，漏一处就有一批模型没有分组。
+  for(const st of chans){
+    if(st.id === "qoder") continue;   // Qoder 的模型由它自己的供应商条目承载
+    const meta = CHAN_META[st.id] || { name: st.id, desc: "", mark: st.id.slice(0,1).toUpperCase() };
+    groups.push({ ch: st.id, meta, enabled: st.enabled, roster: st.models,
+      refreshedAt: st.refreshedAt||0,
+      cards: sorted.filter(m => !m.custom && (m.channel||"zen") === st.id) });
   }
   groups.push({ ch: "custom", meta: CHAN_META.custom, enabled: true, roster: customModels.length,
     cards: sorted.filter(m => m.custom) });
@@ -1919,6 +2091,7 @@ function pvKeyLines(){
 
 async function renderQoderCard(){
   const st = await fetch("/admin/api/qoder/status").then(r=>r.json()).catch(()=>null);
+  wallStatus.qoder = st;
   const stateEl = $("#qoder-state"), body = $("#qoder-body");
   if(!stateEl || !body) return;
   const repo = 'https://github.com/Morpheus799/qodercn-gateway';
@@ -2099,6 +2272,7 @@ function bindQoderCard(){
 let caPollTimer = null;
 async function renderCodeartsCard(){
   const st = await fetch("/admin/api/codearts/status").then(r=>r.json()).catch(()=>null);
+  wallStatus.codearts = st;
   const state = $("#ca-state"), body = $("#ca-body");
   if(!state || !body || !st){ if(state) state.textContent = "状态获取失败"; return; }
   setToggle("#tg-codearts", !!st.enabled);
@@ -2172,97 +2346,11 @@ function renderProviders(s){
   const el = $("#page-providers");
   if(!el.dataset.rendered){
     el.innerHTML = `
-      <h2 class="pt">自定义 API <span class="sub">接入你自己的上游，模型以 供应商ID/模型名 出现在所有 Agent 选择器里</span></h2>
-      <div class="msec" style="margin-top:0">
-        <span class="dot on"></span>
-        <span class="chname">账号渠道</span>
-        <span class="chdesc">用 Qoder / CodeArts / WorkBuddy 账号授权，免费模型直接进「模型」页和 Agent 选择器</span>
-      </div>
-      <div class="card" id="qoder-card">
-        <div class="chead">
-          <div class="ct"><span class="cnm">Qoder 账号渠道</span><span class="cmeta" id="qoder-state">检查中…</span></div>
-          <div class="cact">
-            <button class="act" id="qoder-login" title="在浏览器里登录一个 Qoder 账号，登录凭据直接进账号池——不需要先打开 IDE，可以重复多次加多个号">授权登录</button>
-            <button class="ghost" id="qoder-import" title="把 Qoder IDE 当前的登录快照存进账号池，之后即使 IDE 掉线也还能用这个账号">收录当前 IDE 登录</button>
-          </div>
-        </div>
-        <div class="prose" id="qoder-body"></div>
-        <div id="qoder-pool" class="acc-list"></div>
-      </div>
-      <div class="card" id="ca-card">
-        <div class="chead">
-          <div class="ct"><span class="cnm">CodeArts 账号渠道（华为云）</span><span class="cmeta" id="ca-state">检查中…</span></div>
-          <div class="cact">
-            <button class="act" id="ca-login">授权登录</button>
-            <button class="ghost" id="ca-logout">退出登录</button>
-            <button class="act off" id="tg-codearts">关闭</button>
-          </div>
-        </div>
-        <div class="prose" id="ca-body">加载中…</div>
-      </div>
-      <div class="card" id="wb-card">
-        <div class="chead">
-          <div class="ct"><span class="cnm">WorkBuddy 账号渠道</span><span class="cmeta" id="wb-state">检查中…</span></div>
-          <div class="cact">
-            <button class="act" id="wb-login" title="在浏览器里登录一个 WorkBuddy 账号，凭据直接进账号池，可重复多次加号">授权登录</button>
-            <button class="act off" id="tg-workbuddy">关闭</button>
-          </div>
-        </div>
-        <div class="prose" id="wb-body">加载中…</div>
-        <div id="wb-accounts" class="acc-list"></div>
-        <div class="oprow">
-          <span class="k">登录版本</span>
-          <div class="seg" id="wb-realm">
-            <button data-v="intl" class="on">国际版 workbuddy.ai</button>
-            <button data-v="cn">国内版 codebuddy.cn</button>
-          </div>
-          <button class="ghost" id="wb-checkin" style="display:none">立即签到（全部 CN）</button>
-          <button class="ghost" id="wb-logout">全部退出</button>
-        </div>
-      </div>
-      <div class="msec">
-        <span class="chname">自定义供应商</span>
-        <span class="chdesc">OpenAI / Anthropic 兼容上游，Key 是你自己的</span>
-        <span class="chcount" id="pv-count"></span>
-      </div>
-      <div class="pgrid" id="pv-list"></div>
-      <div class="card pform">
-        <div class="chead">
-          <div class="ct"><span class="cnm" id="pv-form-title">添加供应商</span>
-            <span class="cmeta" id="pv-form-sub">OpenAI / Anthropic 兼容上游，或点下方预设卡一键填充</span></div>
-          <div class="cact"><button class="ghost" id="pv-form-toggle">＋ 展开</button></div>
-        </div>
-        <div id="pv-form-body" style="display:none">
-        <div class="frow"><span class="flbl">名称</span><input class="tin" id="pv-name" style="width:220px" placeholder="NVIDIA NIM">
-          <span class="flbl" style="width:52px">协议</span><span id="pv-proto"></span></div>
-        <div class="frow"><span class="flbl">Base URL</span><input class="tin" id="pv-url" style="width:340px" placeholder="https://integrate.api.nvidia.com/v1"></div>
-        <div class="frow"><span class="flbl">API Key</span><input class="tin" id="pv-key" type="password" style="width:260px" placeholder="自己的 Key；本地服务可留空">
-          <span class="muted" style="font-size:11.5px" id="pv-key-hint"></span></div>
-        <div class="frow"><span class="flbl">多 Key 负载</span><textarea class="tin" id="pv-keys" rows="3" style="width:260px;vertical-align:top" placeholder="可选：每行一个 Key，轮换使用"></textarea>
-          <span class="muted" style="font-size:11.5px">填多行即按请求轮换；留空保持原有 Key</span></div>
-        <div class="frow">
-          <button class="ghost" id="pv-fetch">拉取模型列表</button>
-          <button class="act" id="pv-save">保存</button>
-          <button class="ghost" id="pv-cancel" style="display:none">取消编辑</button>
-          <span class="muted" style="font-size:11.5px" id="pv-fetch-hint"></span>
-        </div>
-        <div id="pv-picker" style="display:none">
-          <div class="pv-pickhead">
-            <span class="dim" style="font-size:12px" id="pv-pick-count"></span>
-            <span style="display:flex; gap:6px; align-items:center">
-              <input class="tin" id="pv-pick-filter" placeholder="筛选模型 id…" style="width:200px">
-              <button class="ghost" id="pv-pick-all" style="padding:3px 10px; font-size:12px">全选</button>
-              <button class="ghost" id="pv-pick-none" style="padding:3px 10px; font-size:12px">清空</button>
-            </span>
-          </div>
-          <div class="pv-picklist" id="pv-picklist"></div>
-          <div class="muted" style="font-size:11px; margin-top:5px">勾选的模型才会计入保存；保存后仍可随时回来调整。</div>
-        </div>
-        </div>
-      </div>
+      <h2 class="pt">渠道 <span class="sub">每个渠道一张卡：点开它，管它的账号</span></h2>
+      <div class="cwall" id="cwall"></div>
       <div class="msec">
         <span class="chname">供应商预设</span>
-        <span class="chdesc">点击填充上方表单，Key 需要你自己去对应平台申请</span>
+        <span class="chdesc">点击打开添加弹窗并填充，Key 需要你自己去对应平台申请</span>
       </div>
       <div class="card">
         <div class="row" style="row-gap:8px">
@@ -2275,11 +2363,200 @@ function renderProviders(s){
         </div>
         <div class="pchips" id="pv-presets" style="margin-top:10px"></div>
         <div class="muted" style="font-size:11.5px;margin-top:8px" id="pv-preset-hint"></div>
+      </div>
+
+      <!-- 渠道弹窗：一张卡 = 一个渠道。每个渠道的管理面常驻在 .chan-pane 里
+           （只是 display:none），弹窗只负责显示对应那一块 —— 面板不搬 DOM，
+           账号池渲染 / 登录轮询 / status 轮询的入口 id 全部保持不变。 -->
+      <div class="modal chan-modal" id="chan-modal">
+        <div class="modal-mask" id="chan-modal-mask"></div>
+        <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="chan-modal-name">
+          <div class="modal-hd">
+            <span class="chan-hd">
+              <span class="chan-hd-ic" id="chan-modal-ic"></span>
+              <span class="chan-hd-t">
+                <span class="n" id="chan-modal-name">渠道</span>
+                <span class="d" id="chan-modal-desc"></span>
+              </span>
+            </span>
+            <button class="modal-x" id="chan-modal-x" title="关闭 (Esc)">✕</button>
+          </div>
+          <div class="modal-bd">
+            <div class="chan-body" id="chan-modal-body">
+              <div class="chan-pane" data-chan="zen">
+                <div class="chead"><div class="ct"><span class="cnm">OpenCode Zen 车道</span>
+                  <span class="cmeta" id="zen-state">—</span></div>
+                  <div class="cact"><button class="tgl" id="zen-toggle" role="switch" aria-checked="true" title="启停这个渠道"></button></div></div>
+                <div class="prose">免登录免费池：上游按<b>出口 IP</b> 限额，不需要任何 Key。占满窗口就换出口，
+                  或在「设置 → 代理」里挂一条订阅轮询。模型名单由上游推送，不能手工增删。</div>
+              </div>
+
+              <div class="chan-pane" data-chan="kilo">
+                <div class="chead"><div class="ct"><span class="cnm">Kilo 免费池</span>
+                  <span class="cmeta" id="kilo-state">—</span></div>
+                  <div class="cact"><button class="tgl" id="kilo-toggle" role="switch" aria-checked="true" title="启停这个渠道"></button></div></div>
+                <div class="prose">免凭证渠道：只要模型在名单里就能用，没有账号可加。名单随上游刷新，
+                  在「模型」页可以逐个隐藏不想要的。</div>
+              </div>
+
+              <div class="chan-pane" data-chan="qoder">
+                <div class="chead">
+                  <div class="ct"><span class="cnm">Qoder 账号渠道</span><span class="cmeta" id="qoder-state">检查中…</span></div>
+                  <div class="cact">
+                    <button class="act" id="qoder-login" title="在浏览器里登录一个 Qoder 账号，登录凭据直接进账号池——不需要先打开 IDE，可以重复多次加多个号">授权登录</button>
+                    <button class="ghost" id="qoder-import" title="把 Qoder IDE 当前的登录快照存进账号池，之后即使 IDE 掉线也还能用这个账号">收录当前 IDE 登录</button>
+                  </div>
+                </div>
+                <div class="prose" id="qoder-body"></div>
+                <div id="qoder-pool" class="acc-list"></div>
+              </div>
+
+              <div class="chan-pane" data-chan="codearts">
+                <div class="chead">
+                  <div class="ct"><span class="cnm">CodeArts 账号渠道（华为云）</span><span class="cmeta" id="ca-state">检查中…</span></div>
+                  <div class="cact">
+                    <button class="act" id="ca-login">授权登录</button>
+                    <button class="ghost" id="ca-logout">退出登录</button>
+                    <button class="act off" id="tg-codearts">关闭</button>
+                  </div>
+                </div>
+                <div class="prose" id="ca-body">加载中…</div>
+              </div>
+
+              <div class="chan-pane" data-chan="workbuddy">
+                <div class="chead">
+                  <div class="ct"><span class="cnm">WorkBuddy 账号渠道</span><span class="cmeta" id="wb-state">检查中…</span></div>
+                  <div class="cact">
+                    <button class="act" id="wb-login" title="在浏览器里登录一个 WorkBuddy 账号，凭据直接进账号池，可重复多次加号">授权登录</button>
+                    <button class="act off" id="tg-workbuddy">关闭</button>
+                  </div>
+                </div>
+                <div class="prose" id="wb-body">加载中…</div>
+                <div id="wb-accounts" class="acc-list"></div>
+                <div class="oprow">
+                  <span class="k">登录版本</span>
+                  <div class="seg" id="wb-realm">
+                    <button data-v="intl" class="on">国际版 workbuddy.ai</button>
+                    <button data-v="cn">国内版 codebuddy.cn</button>
+                  </div>
+                  <button class="ghost" id="wb-checkin" style="display:none">立即签到（全部 CN）</button>
+                  <button class="ghost" id="wb-logout">全部退出</button>
+                </div>
+              </div>
+
+              <div class="chan-pane" data-chan="zcode">
+                <div class="chead">
+                  <div class="ct"><span class="cnm">ZCode 账号渠道（智谱）</span><span class="cmeta" id="zc-state">检查中…</span></div>
+                  <div class="cact">
+                    <button class="act" id="zc-login" title="在本机发起智谱设备授权，浏览器里点一下同意即可，可重复多次加号">授权登录</button>
+                    <button class="ghost" id="zc-logout">全部退出</button>
+                    <button class="act off" id="tg-zcode">关闭</button>
+                  </div>
+                </div>
+                <div class="prose" id="zc-body">加载中…</div>
+                <div id="zc-accounts" class="acc-list"></div>
+              </div>
+
+              <div class="chan-pane" data-chan="trae">
+                <div class="chead">
+                  <div class="ct"><span class="cnm">TRAE 账号渠道（字节）</span><span class="cmeta" id="tr-state">检查中…</span></div>
+                  <div class="cact">
+                    <button class="act" id="tr-login" title="打开 TRAE 授权页，完成后本机回调收下令牌，可重复多次加号">授权登录</button>
+                    <button class="ghost" id="tr-logout">全部退出</button>
+                    <button class="act off" id="tg-trae">关闭</button>
+                  </div>
+                </div>
+                <div class="prose" id="tr-body">加载中…</div>
+                <div id="tr-accounts" class="acc-list"></div>
+              </div>
+
+              <!-- 六条预设渠道共用这一块：它们的登录方式相同（在厂商自己的
+                   IDE / 控制台里登录，把拿到的令牌粘进来），差别只有地址、私有
+                   头与一处 body 装填，全在后端 lane/ext.go 的表里。 -->
+              <div class="chan-pane" data-chan="ext">
+                <div class="chead">
+                  <div class="ct"><span class="cnm" id="ext-name">预设渠道</span>
+                    <span class="cmeta" id="ext-meta">—</span></div>
+                  <div class="cact">
+                    <button class="act off" id="tg-ext">关闭</button>
+                  </div>
+                </div>
+                <div class="prose" id="ext-body"></div>
+                <div class="frow"><span class="flbl">名称</span><input class="tin" id="ext-label" style="width:200px" placeholder="可留空，自动按凭据指纹命名"></div>
+                <div class="frow"><span class="flbl">凭据</span><input class="tin" id="ext-secret" type="password" style="width:420px" placeholder="在厂商自己的 IDE / 控制台里登录后拿到的令牌"></div>
+                <div class="frow"><span class="flbl">额外字段</span><input class="tin" id="ext-extra" style="width:320px" placeholder="可选：key=value，每行一个（如 accountId=…）"></div>
+                <div class="frow">
+                  <button class="act" id="ext-add">校验并添加</button>
+                  <span class="muted" style="font-size:11.5px" id="ext-hint">添加前会先拿它去拉一次模型目录——拉不到就不入库</span>
+                </div>
+                <div id="ext-accounts" class="acc-list"></div>
+              </div>
+
+              <div class="chan-pane" data-chan="pv">
+                <div class="msec" style="margin-top:0">
+                  <span class="chname">已接入的供应商</span>
+                  <span class="chdesc">模型以 供应商ID/模型名 出现在所有 Agent 选择器里</span>
+                  <span class="chcount" id="pv-count"></span>
+                  <button class="act" id="pv-form-toggle" title="打开添加弹窗；也可以到下方预设区挑一张卡一键填充">＋ 添加供应商</button>
+                </div>
+                <div class="pgrid" id="pv-list"></div>
+              </div>
+
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="modal" id="pv-modal">
+        <div class="modal-mask" id="pv-modal-mask"></div>
+        <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="pv-form-title">
+          <div class="modal-hd">
+            <span class="modal-title" id="pv-form-title">添加供应商</span>
+            <button class="modal-x" id="pv-modal-x" title="关闭 (Esc)">✕</button>
+          </div>
+          <div class="modal-bd">
+            <div id="pv-form-body">
+              <div class="frow"><span class="flbl">名称</span><input class="tin" id="pv-name" style="width:220px" placeholder="NVIDIA NIM">
+                <span class="flbl" style="width:52px">协议</span><span id="pv-proto"></span></div>
+              <div class="frow"><span class="flbl">Base URL</span><input class="tin" id="pv-url" style="width:340px" placeholder="https://integrate.api.nvidia.com/v1"></div>
+              <div class="frow"><span class="flbl">API Key</span><input class="tin" id="pv-key" type="password" style="width:260px" placeholder="自己的 Key；本地服务可留空">
+                <span class="muted" style="font-size:11.5px" id="pv-key-hint"></span></div>
+              <div class="frow"><span class="flbl">多 Key 负载</span><textarea class="tin" id="pv-keys" rows="3" style="width:260px;vertical-align:top" placeholder="可选：每行一个 Key，轮换使用"></textarea>
+                <span class="muted" style="font-size:11.5px">填多行即按请求轮换；留空保持原有 Key</span></div>
+              <div class="frow">
+                <button class="ghost" id="pv-fetch">拉取模型列表</button>
+                <button class="act" id="pv-save">保存</button>
+                <button class="ghost" id="pv-cancel" style="display:none">取消编辑</button>
+                <span class="muted" style="font-size:11.5px" id="pv-fetch-hint"></span>
+              </div>
+              <div id="pv-picker" style="display:none">
+                <div class="pv-pickhead">
+                  <span class="dim" style="font-size:12px" id="pv-pick-count"></span>
+                  <span style="display:flex; gap:6px; align-items:center">
+                    <input class="tin" id="pv-pick-filter" placeholder="筛选模型 id…" style="width:200px">
+                    <button class="ghost" id="pv-pick-all" style="padding:3px 10px; font-size:12px">全选</button>
+                    <button class="ghost" id="pv-pick-none" style="padding:3px 10px; font-size:12px">清空</button>
+                  </span>
+                </div>
+                <div class="pv-picklist" id="pv-picklist"></div>
+                <div class="muted" style="font-size:11px; margin-top:5px">勾选的模型才会计入保存；保存后仍可随时回来调整。</div>
+              </div>
+            </div>
+          </div>
+        </div>
       </div>`;
     makeDropdown(el.querySelector("#pv-proto"),
       [["openai","OpenAI 兼容"],["anthropic","Anthropic 兼容"]], "openai", null);
     el.querySelector("#pv-cancel").onclick = ()=>{ pvResetForm(); };
-    el.querySelector("#pv-form-toggle").onclick = ()=>{ pvSetFormOpen(!pvFormOpen); };
+    el.querySelector("#pv-modal-x").onclick = ()=>{ pvSetFormOpen(false); };
+    el.querySelector("#pv-modal-mask").onclick = ()=>{ pvSetFormOpen(false); };
+    el.querySelector("#chan-modal-x").onclick = ()=>{ chanModalClose(); };
+    el.querySelector("#chan-modal-mask").onclick = ()=>{ chanModalClose(); };
+    document.addEventListener("keydown", ev=>{
+      if(ev.key !== "Escape") return;
+      // 两个弹窗可以叠着：表单弹窗在上，先关它，再关渠道弹窗。
+      if(pvFormOpen) pvSetFormOpen(false);
+      else if(openChannelId) chanModalClose();
+    });
     el.querySelector("#pv-pick-filter").oninput = ()=> pvRenderPicker();
     el.querySelector("#pv-pick-all").onclick = ()=>{
       const f = el.querySelector("#pv-pick-filter").value.trim().toLowerCase();
@@ -2297,6 +2574,7 @@ function renderProviders(s){
         pvRenderPresets();
       };
     });
+    el.querySelector("#pv-form-toggle").onclick = ()=>{ pvResetForm(); pvSetFormOpen(true); };
     el.querySelector("#pv-fetch").onclick = async ()=>{
       const name = el.querySelector("#pv-name").value.trim();
       const url = el.querySelector("#pv-url").value.trim();
@@ -2378,6 +2656,638 @@ function renderProviders(s){
   bindCodeartsCard();
   renderQoderCard();
   bindQoderCard();
+  renderZCodeCard();
+  bindZCodeCard();
+  renderTraeCard();
+  bindTraeCard();
+  renderExtCard();
+  bindExtCard();
+  // 渠道墙的数据是后端的 /channel/wall，和上面几张卡各自拉 status 是两条并行
+  // 的路：墙先按已有快照画一笔，wall 回来后再画一笔（签名相等就不重绘）。
+  renderChannelWall(s);
+  loadWallChannels();
+}
+
+/* ---- 渠道墙 ------------------------------------------------------------
+
+   一张卡 = 一个渠道，分组只看一个判据：enabled。
+   状态行只把**确定**的事说成异常（未登录 / 已停用），缺数据一律按正常渲染
+   —— 和 hub 的 groupProviders 同一取向：显示可以保守，操作必须明确。
+
+   墙不持有渠道数据：条目来自 /admin/api/channel/wall（后端一次给全 12 条），
+   点击则委托给页面下方真实的管理面板。 */
+const wallStatus = {};
+
+/* 纯函数：一张卡要显示什么。tone 只有三种——ok / warn / off。
+   「没有账号」是引导（warn，点开就能加），「渠道关了」是状态（off，灰化），
+   两者不能混：前者要人做事，后者是人做过的事。 */
+function wallStateOf(channel, accounts, models, hint){
+  if(channel && channel.enabled === false){
+    return { tone: "off", prefix: "已关闭", text: "" };
+  }
+  if(accounts && accounts.total === 0){
+    // 有话可做才给「点开…」；没有登录入口的渠道不该显示一个做不到的动作。
+    return { tone: "warn", prefix: "未登录", text: hint ? "点开" + hint : "" };
+  }
+  if(accounts && accounts.enabled === 0 && accounts.total > 0){
+    return { tone: "warn", prefix: "已停用", text: "" };
+  }
+  const bits = [];
+  if(accounts && typeof accounts.total === "number") bits.push(accounts.total + " 账号");
+  if(typeof models === "number" && models > 0) bits.push(models + " 模型");
+  return { tone: "ok", prefix: "", text: bits.join(" · ") };
+}
+
+// Qoder 在 config.json 里有一个 id=qoder 的供应商条目，但那是网关自己同步
+// 出来的，当成自定义供应商列出来会和它自己的渠道卡重名。
+const WALL_MANAGED_PROVIDERS = new Set(["qoder"]);
+
+/* 全部渠道一份数据：/admin/api/channel/wall 一次给回 12 条渠道 + 各自的账号池。
+   以前是四次独立请求（三张账号卡的 status + state 里的渠道文件）拼出来的，
+   代价是卡片会先画成「没有账号」再补上数字，而且多一种渠道就要在客户端多一次
+   请求。现在后端说清每张卡是什么（login 类型），前端只管画。
+
+   注意：这里只说「这个渠道有什么」。登录/加号仍然走各自的既有接口——
+   wall 是读模型，写模型不重复实现。 */
+let wallChannels = null;     // null = 还没取回来；[] = 取过但没有
+let wallChannelsErr = "";
+let wallChannelsFetching = false;
+
+async function loadWallChannels(){
+  if(wallChannelsFetching) return;
+  wallChannelsFetching = true;
+  try{
+    const j = await fetch("/admin/api/channel/wall").then(r=>r.json());
+    wallChannels = Array.isArray(j.channels) ? j.channels : [];
+    wallChannelsErr = j.error || "";
+  }catch(e){
+    wallChannels = [];
+    wallChannelsErr = "渠道状态读取失败：" + (e && e.message || e);
+  }finally{
+    wallChannelsFetching = false;
+    renderChannelWall(STATE || {});
+  }
+}
+
+/* login 类型 → 这张卡点开后能做什么。文案跟着能力走，不跟着渠道名走：
+   一个没有登录入口的渠道不能显示「点开添加账号」。 */
+function wallLoginHint(login){
+  if(login === "paste")   return "粘贴凭据登录";
+  if(login === "browser") return "浏览器授权登录";
+  return "";
+}
+
+function wallChannelEntries(){
+  return (wallChannels || []).map(c=>{
+    const accs = c.accounts || { total: 0, enabled: 0 };
+    return {
+      key: c.id, id: c.id, name: c.label || c.id,
+      mark: (c.label || c.id).trim().slice(0,1).toUpperCase() || "+",
+      icon: "", iconURI: CHAN_ICONS[c.id] || "",
+      off: c.enabled === false,
+      accounts: c.login ? accs : null,   // 无账号池的渠道不画账号数
+      models: c.models || 0,
+      target: c.id,
+      login: c.login || "",
+      blurb: c.blurb || "",
+      extra: c.extra || "",
+    };
+  });
+}
+
+function wallEntries(s){
+  const list = wallChannelEntries();
+  for(const p of (s.providers||[])){
+    if(WALL_MANAGED_PROVIDERS.has(p.id)) continue;
+    list.push({
+      key: "pv:" + p.id, id: "pv:" + p.id, name: p.name || p.id,
+      mark: (p.name || p.id).trim().slice(0,1).toUpperCase() || "+",
+      icon: "", host: hostOf(p.baseUrl || "").toLowerCase(),
+      off: !p.enabled,
+      // A custom provider has no account pool — its "credential" is the Key the
+      // user typed, and a count of 1 would read as "one account logged in".
+      accounts: p.hasKey === false ? { total: 0, enabled: 0 } : null,
+      models: (p.models||[]).length,
+      target: "pv:" + p.id,
+    });
+  }
+  return list;
+}
+
+function renderChannelWall(s){
+  const wall = $("#cwall"); if(!wall) return;
+  // 输入框单独存在，过滤时只重画卡片区。整体重画 innerHTML 会把输入框一起
+  // 换掉——中文输入法组合期间的字符会被吞，这是这类「边输边筛」最常见的坑。
+  let tools = wall.querySelector(".cwall-tools");
+  if(!tools){
+    wall.innerHTML = `
+      <div class="cwall-tools">
+        <input class="cwall-filter" type="search" placeholder="筛选渠道…" value=""
+          aria-label="按名称筛选渠道">
+        <span class="muted" style="font-size:11.5px">点一张卡打开它的账号管理</span>
+        <button class="ghost" id="cwall-add" title="接入一个 OpenAI / Anthropic 兼容的自定义供应商"
+          style="margin-left:auto">＋ 添加供应商</button>
+      </div>
+      <div class="cwall-body"></div>`;
+    tools = wall.querySelector(".cwall-tools");
+    const addBtn = wall.querySelector("#cwall-add");
+    if(addBtn) addBtn.onclick = ()=>{ pvResetForm(); pvSetFormOpen(true); };
+    const input = wall.querySelector(".cwall-filter");
+    input.oninput = ()=>{
+      wall.dataset.q = input.value;
+      renderChannelWall(STATE);
+    };
+    // Esc 清空：搜索框里的「取消」在部分浏览器里不发 input 事件
+    input.onkeydown = (ev)=>{
+      if(ev.key === "Escape" && input.value !== ""){
+        input.value = "";
+        wall.dataset.q = "";
+        renderChannelWall(STATE);
+      }
+    };
+  }
+  const body = wall.querySelector(".cwall-body");
+  if(!body) return;
+
+  const entries = wallEntries(s);
+  const needle = (wall.dataset.q || "").trim().toLowerCase();
+  const match = e => !needle || e.name.toLowerCase().includes(needle) || e.id.toLowerCase().includes(needle) || (e.host||"").includes(needle);
+  // 状态缺失一律当打开：宁可多显示一张卡，也不要因为没读到而把渠道藏掉。
+  const open = entries.filter(e => !e.off).filter(match);
+  const closed = entries.filter(e => e.off).filter(match);
+  const groups = [
+    { key:"open", title:`本机网关 (${open.length})`, list: open },
+    { key:"closed", title: closed.length ? `已关闭 (${closed.length})` : null, list: closed },
+  ].filter(g => g.title === null || g.list.length > 0);
+
+  const sig = JSON.stringify([needle, entries.map(e=>[e.key,e.off,e.models,e.accounts&&e.accounts.total,e.accounts&&e.accounts.enabled,e.extra])]);
+  if(body.dataset.sig === sig) return;   // 10 秒轮询不该让墙闪
+  body.dataset.sig = sig;
+
+  const card = e => {
+    const st = wallStateOf({ enabled: !e.off }, e.accounts, e.models, wallLoginHint(e.login));
+    const meta = st.prefix || st.text
+      ? `<span class="wcard-meta">
+           ${st.tone === "ok" ? '<span class="wcard-dot" aria-hidden="true"></span>'
+             : `<span class="wcard-state" data-tone="${st.tone}">${esc(st.prefix)}</span>`}
+           ${st.text ? `<span class="wcard-meta-text">${esc(st.text)}</span>` : ""}
+         </span>`
+      : "";
+    // 图标：本网关内置的渠道图标 → 首字母方块（自定义供应商没有图标，那是真实情况）。
+    const icon = e.iconURI || CHAN_ICONS[e.icon];
+    const bare = e.icon === "zen";
+    const mark = icon
+      ? `<span class="wcard-ic"${bare?' data-bare="true"':""}><img src="${icon}" alt="" loading="lazy"></span>`
+      : `<span class="wcard-mark">${esc(e.mark)}</span>`;
+    const hint = e.off ? "（已关闭，点开去启用）" : "（点开管理）";
+    return `<button class="wcard" type="button" data-target="${esc(e.target)}"
+        data-off="${e.off ? "true" : "false"}"
+        title="${esc(e.name)}${esc(e.blurb ? " · " + e.blurb : "")}${hint}">
+        <span class="wcard-head">${mark}
+          <span class="wcard-name">${esc(e.name)}</span>
+        </span>${meta}</button>`;
+  };
+
+  // 「＋ 添加供应商」在筛选行右侧，不进卡片网格 —— 它是页面的动作，不是第 N 个渠道。
+  body.innerHTML = `
+    ${groups.map(g => `
+      <div class="cwall-group">
+        ${g.title !== null ? `<div class="cwall-group-title">${esc(g.title)}${
+          g.note ? `<span class="cwall-group-note">${esc(g.note)}</span>` : ""}</div>` : ""}
+        <div class="cwall-grid">${g.list.map(card).join("")}</div>
+      </div>`).join("")}
+    ${entries.length && !groups.length ? `<div class="cwall-empty">没有名称含「${esc(needle)}」的渠道</div>` : ""}
+    ${!entries.length ? `<div class="cwall-empty">还没有渠道。</div>` : ""}
+    ${wallChannelsErr ? `<div class="cwall-empty">${esc(wallChannelsErr)}</div>` : ""}`;
+
+  body.querySelectorAll(".wcard").forEach(b=>{
+    b.onclick = ()=> chanModalOpen(b.dataset.target);
+  });
+}
+
+/* ---- 渠道弹窗 ----------------------------------------------------------
+   一个渠道一张卡，点卡打开这个弹窗。弹窗不实现任何账号逻辑：所有 .chan-pane
+   常驻在 DOM 里（只是隐藏），弹窗只把对应的那一块显示出来。这样每个渠道自己
+   的渲染入口 id 与轮询都不必改。 */
+let openChannelId = null;
+
+// 六个预设渠道共用一块面板（它们的登录方式相同：粘贴令牌），其余一渠一面。
+const EXT_PANES = new Set(["cline","loomy","raccoon","lobsterai","astudio","modelscope"]);
+
+function chanPaneFor(target){
+  const t = String(target || "");
+  if(EXT_PANES.has(t)) return "ext";
+  return t.startsWith("pv:") ? "pv" : t;
+}
+
+function chanModalOpen(target){
+  const el = $("#page-providers"); if(!el) return;
+  const modal = el.querySelector("#chan-modal"); if(!modal) return;
+  const key = chanPaneFor(target);
+  const pane = modal.querySelector(`.chan-pane[data-chan="${key}"]`);
+  if(!pane){ return; }
+  openChannelId = target;
+
+  // 头条：渠道名 + 一句话说明 + 图标，和卡片上是同一套身份。
+  const entry = wallEntries(STATE || {}).find(e => e.target === target || e.key === target) || {};
+  const icon = entry.iconURI || CHAN_ICONS[entry.icon || key];
+  el.querySelector("#chan-modal-name").textContent = entry.name || key;
+  el.querySelector("#chan-modal-desc").textContent =
+    key === "pv" ? "OpenAI / Anthropic 兼容上游，Key 是你自己的" : (entry.blurb || "");
+  const ic = el.querySelector("#chan-modal-ic");
+  ic.innerHTML = icon ? `<img src="${icon}" alt="">` : "";
+  ic.dataset.bare = icon && key === "zen" ? "true" : "false";
+  if(!icon){ ic.innerHTML = `<span class="wcard-mark">${esc(entry.mark || "+")}</span>`; }
+
+  modal.querySelectorAll(".chan-pane").forEach(p=> p.hidden = p !== pane);
+  // 每次打开都刷一遍这一块的状态：卡片上的数字可能比上次开窗旧了。
+  if(key === "qoder") renderQoderCard();
+  else if(key === "workbuddy") renderWorkBuddyCard();
+  else if(key === "codearts") renderCodeartsCard();
+  else if(key === "zcode") renderZCodeCard();
+  else if(key === "trae") renderTraeCard();
+  else if(key === "ext") renderExtCard(entry.id || target);
+  else if(key === "pv") renderProviderList(STATE || {});
+  else paintLanePane(key);
+
+  modal.classList.add("open");
+  const first = modal.querySelector(".modal-card");
+  if(first) first.scrollTop = 0;
+
+  // 点的是某个具体的自定义供应商：滚到它那张卡并描一圈，而不是再叠一层编辑弹窗
+  // —— 两个弹窗上下叠着，关掉上面那个会露出下面一个「看起来没关掉」的弹窗。
+  // 编辑仍然是那张卡自己的「编辑」按钮，逻辑只留一份。
+  if(String(target).startsWith("pv:")){
+    const id = String(target).slice(3);
+    const card = Array.from(el.querySelectorAll("#pv-list .pvcard")).find(c=>c.dataset.pvId === id);
+    if(card){
+      card.scrollIntoView({ block:"nearest" });
+      card.classList.remove("flash-target");
+      void card.offsetWidth;          // 读一次布局，动画才会重播
+      card.classList.add("flash-target");
+      setTimeout(()=> card.classList.remove("flash-target"), 1900);
+    }
+  }
+}
+
+function chanModalClose(){
+  openChannelId = null;
+  const el = $("#page-providers"); if(!el) return;
+  const modal = el.querySelector("#chan-modal");
+  if(modal) modal.classList.remove("open");
+}
+
+/* ---- ZCode / TRAE 账号渠道 --------------------------------------------
+   这两条都是本网关自己发起的授权流（ZCode 是设备码轮询，TRAE 是本地回调），
+   所以账号池只有这一份，没有第二个程序要同步。两块面板形态一样：登录、账号
+   表、启停，差别只在接口前缀与状态形状。 */
+
+/* 一个渠道的账号行：名字 + 状态徽标 + 可选附注，三张卡共用。 */
+function accRow(name, enabled, id, notes){
+  return `<div class="acc${enabled ? "" : " off"}">
+    <div class="acc-hd">
+      <span class="acc-name" title="${esc(name)}">${esc(name)}</span>
+      <span class="pill ${enabled ? "ok" : "unknown"} acc-badge">${enabled ? "在用" : "已停用"}</span>
+    </div>
+    ${id ? `<div class="acc-id">${esc(id)}</div>` : ""}
+    ${notes && notes.length ? `<div class="acc-meta">${notes.join(" · ")}</div>` : ""}
+  </div>`;
+}
+
+/* 渠道启停按钮的两态：文案与 .off 类跟着走，dataset.on 是点击时的读取源
+   （setToggle 那套给设置页用，文案是「已开启/关闭」；渠道头的按钮是动作，
+   所以写的是「关闭/开启」——按钮上写的是点它会做什么）。 */
+function setChannelToggle(sel, on){
+  const b = $(sel);
+  if(!b) return;
+  b.classList.toggle("off", !on);
+  b.textContent = on ? "关闭" : "开启";
+  b.dataset.on = on ? "1" : "";
+}
+
+/* 启停一个渠道：走后端 /channel/<id>/enabled。 */
+async function toggleChannel(id, on){
+  const j = await api("/channel/" + id + "/enabled", { enabled: on });
+  if(j) toast(on ? "渠道已启用" : "渠道已停用，模型从选择器移除");
+  await refresh();
+  if(openChannelId) chanModalOpen(openChannelId);
+  loadWallChannels();
+}
+
+let zcPollTimer = null;
+async function renderZCodeCard(){
+  const st = await fetch("/admin/api/zcode/status").then(r=>r.json()).catch(()=>null);
+  const state = $("#zc-state"), body = $("#zc-body"), list = $("#zc-accounts");
+  if(!state || !body || !list || !st){ if(state) state.textContent = "状态获取失败"; return; }
+  const accts = st.accounts || [];
+  setChannelToggle("#tg-zcode", st.channel !== false);
+  const lb = $("#zc-login"), ob = $("#zc-logout");
+  if(lb) lb.disabled = false;
+  if(ob) ob.style.display = accts.length ? "" : "none";
+  if(!st.loggedIn){
+    state.textContent = "未登录";
+    body.innerHTML = '用智谱账号授权后，ZCode 的模型直接进入「模型」页和所有 Agent 选择器。' +
+      '点「授权登录」会在浏览器里打开智谱的授权页，点一下同意就进池，可以重复加多个号。' +
+      '提示词可能被上游记录，别交机密内容。';
+  } else {
+    state.textContent = (st.channel === false ? "已停用" : "已启用") + " · " + accts.length + " 个账号";
+    body.innerHTML = '账号池里有 <b>' + accts.filter(a=>a.enabled).length + '</b>/' + accts.length +
+      ' 个在用。同一个号被上游限流时，下一个请求会自动换号。';
+  }
+  list.innerHTML = accts.length ? accts.map(a=>{
+    const notes = [];
+    if(a.parked) notes.push("已暂停使用");
+    if(!a.hasZai) notes.push("缺智谱开放平台令牌（能力受限）");
+    return accRow(a.label || a.userId || a.id, a.enabled, a.userId || a.id, notes);
+  }).join("") : '<div class="acc-empty">还没有账号，点「授权登录」加一个。</div>';
+}
+
+function bindZCodeCard(){
+  const lg = $("#zc-login");
+  if(lg && !lg.dataset.bound){
+    lg.dataset.bound = "1";
+    lg.onclick = async ()=>{
+      lg.disabled = true;
+      const start = await api("/zcode/login/start", {});
+      lg.disabled = false;
+      if(!start || !start.authUrl) return;
+      window.open(start.authUrl, "_blank", "noopener");
+      toast("已在浏览器打开智谱授权页，点同意后账号自动进来");
+      const state = $("#zc-state"), body = $("#zc-body");
+      if(state) state.textContent = "等待授权…";
+      if(body) body.innerHTML = '授权页已在新标签打开。没有自动弹出时 <a href="' +
+        esc(safeHref(start.authUrl)) + '" target="_blank" rel="noopener">点这里打开</a>，' +
+        '同意后这里自动收下账号。';
+      if(zcPollTimer) clearInterval(zcPollTimer);
+      const deadline = Date.now() + 10*60*1000;
+      zcPollTimer = setInterval(async ()=>{
+        if(Date.now() > deadline){ clearInterval(zcPollTimer); zcPollTimer = null; renderZCodeCard(); return; }
+        const p = await fetch("/admin/api/zcode/login/poll").then(r=>r.json()).catch(()=>null);
+        if(!p) return;
+        if(p.state === "ok"){
+          clearInterval(zcPollTimer); zcPollTimer = null;
+          toast("智谱授权成功，模型正在进目录");
+          renderZCodeCard(); refresh(); loadWallChannels();
+        } else if(p.ok === false){
+          clearInterval(zcPollTimer); zcPollTimer = null;
+          toast("登录未完成：" + (p.error || "请重试"));
+          renderZCodeCard();
+        }
+      }, 2000);
+    };
+  }
+  const ob = $("#zc-logout");
+  if(ob && !ob.dataset.bound){
+    ob.dataset.bound = "1";
+    ob.onclick = async ()=>{
+      if(!confirm("退出全部 ZCode 账号？它们的模型会从选择器移除。")) return;
+      for(const a of ((await fetch("/admin/api/zcode/status").then(r=>r.json()).catch(()=>({}))).accounts || [])){
+        await api("/zcode/logout", { id: a.id });
+      }
+      toast("已退出全部 ZCode 账号");
+      renderZCodeCard(); refresh(); loadWallChannels();
+    };
+  }
+  const tg = $("#tg-zcode");
+  if(tg && !tg.dataset.bound){
+    tg.dataset.bound = "1";
+    tg.onclick = ()=> toggleChannel("zcode", tg.dataset.on !== "1");
+  }
+}
+
+let trPollTimer = null;
+async function renderTraeCard(){
+  const st = await fetch("/admin/api/trae/status").then(r=>r.json()).catch(()=>null);
+  const state = $("#tr-state"), body = $("#tr-body"), list = $("#tr-accounts");
+  if(!state || !body || !list || !st){ if(state) state.textContent = "状态获取失败"; return; }
+  const accts = st.accounts || [];
+  setChannelToggle("#tg-trae", st.channel !== false);
+  const lb = $("#tr-login"), ob = $("#tr-logout");
+  if(lb) lb.disabled = false;
+  if(ob) ob.style.display = accts.length ? "" : "none";
+  if(!st.loggedIn){
+    state.textContent = "未登录";
+    body.innerHTML = '用 TRAE 账号授权后，它的模型直接进入「模型」页和所有 Agent 选择器。' +
+      '点「授权登录」会打开 TRAE 授权页，完成后令牌由本机回调收下，可以重复加多个号。' +
+      '提示词可能被上游记录，别交机密内容。';
+  } else {
+    state.textContent = (st.channel === false ? "已停用" : "已启用") + " · " + accts.length + " 个账号";
+    body.innerHTML = '账号池里有 <b>' + accts.filter(a=>a.enabled).length + '</b>/' + accts.length + ' 个在用。';
+  }
+  list.innerHTML = accts.length ? accts.map(a=>{
+    const notes = [];
+    if(a.expiresAtMs){
+      const d = new Date(a.expiresAtMs);
+      notes.push("有效期至 <b>" + d.toLocaleString("zh-CN") + "</b>");
+      if(d.getTime() < Date.now()) notes.push("已过期，刷新令牌会续期");
+    }
+    if(a.hasRefresh) notes.push("可自动续期");
+    return accRow(a.nickname || a.uid || a.id, a.enabled, a.uid || a.id, notes);
+  }).join("") : '<div class="acc-empty">还没有账号，点「授权登录」加一个。</div>';
+}
+
+function bindTraeCard(){
+  const lg = $("#tr-login");
+  if(lg && !lg.dataset.bound){
+    lg.dataset.bound = "1";
+    lg.onclick = async ()=>{
+      lg.disabled = true;
+      const start = await api("/trae/login/start", {});
+      lg.disabled = false;
+      if(!start || !start.authUrl) return;
+      window.open(start.authUrl, "_blank", "noopener");
+      toast("已打开 TRAE 授权页，完成后账号自动进来");
+      const state = $("#tr-state"), body = $("#tr-body");
+      if(state) state.textContent = "等待授权…";
+      if(body) body.innerHTML = '授权页已在新标签打开。没有自动弹出时 <a href="' +
+        esc(safeHref(start.authUrl)) + '" target="_blank" rel="noopener">点这里打开</a>，' +
+        '完成后这里自动收下账号。';
+      if(trPollTimer) clearInterval(trPollTimer);
+      const deadline = Date.now() + 10*60*1000;
+      trPollTimer = setInterval(async ()=>{
+        if(Date.now() > deadline){ clearInterval(trPollTimer); trPollTimer = null; renderTraeCard(); return; }
+        const p = await fetch("/admin/api/trae/login/poll").then(r=>r.json()).catch(()=>null);
+        if(!p) return;
+        if(p.state === "ok"){
+          clearInterval(trPollTimer); trPollTimer = null;
+          toast("TRAE 授权成功，模型正在进目录");
+          renderTraeCard(); refresh(); loadWallChannels();
+        } else if(p.ok === false){
+          clearInterval(trPollTimer); trPollTimer = null;
+          toast("登录未完成：" + (p.error || "请重试"));
+          renderTraeCard();
+        }
+      }, 2000);
+    };
+  }
+  const ob = $("#tr-logout");
+  if(ob && !ob.dataset.bound){
+    ob.dataset.bound = "1";
+    ob.onclick = async ()=>{
+      if(!confirm("退出全部 TRAE 账号？它们的模型会从选择器移除。")) return;
+      for(const a of ((await fetch("/admin/api/trae/status").then(r=>r.json()).catch(()=>({}))).accounts || [])){
+        await api("/trae/logout", { id: a.id });
+      }
+      toast("已退出全部 TRAE 账号");
+      renderTraeCard(); refresh(); loadWallChannels();
+    };
+  }
+  const tg = $("#tg-trae");
+  if(tg && !tg.dataset.bound){
+    tg.dataset.bound = "1";
+    tg.onclick = ()=> toggleChannel("trae", tg.dataset.on !== "1");
+  }
+}
+
+/* ---- 预设渠道（粘贴凭据） ---------------------------------------------
+   六条渠道共用这一块面板：它们的登录方式相同（在厂商自己的 IDE / 控制台里登
+   录，把拿到的令牌粘进来），差别只有地址、私有头与一处 body 装填，全在后端。
+   所以面板只需要知道「当前是哪一条」，其余从 /ext/status 的同一份快照里取。 */
+
+let extKinds = [];       // /ext/status 回来的渠道表，按下发顺序
+let extCurrent = "";     // 面板当前显示的 kind
+
+async function renderExtCard(kind){
+  const el = $("#page-providers"); if(!el) return;
+  if(kind) extCurrent = kind;
+  const j = await fetch("/admin/api/ext/status").then(r=>r.json()).catch(()=>null);
+  if(!j || !Array.isArray(j.channels)) return;
+  extKinds = j.channels;
+  const row = extKinds.find(c=>c.kind === extCurrent) || extKinds[0];
+  if(!row) return;
+  extCurrent = row.kind;
+
+  const nameEl = el.querySelector("#ext-name");
+  const metaEl = el.querySelector("#ext-meta");
+  const bodyEl = el.querySelector("#ext-body");
+  const listEl = el.querySelector("#ext-accounts");
+  const accts = row.accounts || [];
+  if(nameEl) nameEl.textContent = row.label || row.kind;
+  if(metaEl) metaEl.textContent = (accts.length
+    ? accts.filter(a=>a.enabled).length + "/" + accts.length + " 个账号在用"
+    : "还没有账号") + " · " + (row.enabled === false ? "渠道已停用" : "渠道已启用");
+  setChannelToggle("#tg-ext", row.enabled !== false);
+
+  if(bodyEl){
+    // 面板只说做法，不说风险以外的判断：这一句是渠道性质的固定事实。
+    bodyEl.innerHTML = '在 <b>' + esc(row.label || row.kind) + '</b> 自己的 IDE 或控制台里登录，'
+      + '把拿到的令牌粘到下面「凭据」里。添加前网关会先拿它去拉一次模型目录——'
+      + '拉不到就不入库，避免存下一个用不了的令牌。'
+      + '每条渠道可以有多个凭据，用同一个按钮加，重复添加会覆盖同一个指纹的条目。';
+  }
+  if(!listEl) return;
+  listEl.innerHTML = accts.length ? accts.map(a=>{
+    const notes = [];
+    if(!a.hasSecret) notes.push("没有凭据");
+    if(a.extraKeys && a.extraKeys.length) notes.push("附加字段：" + a.extraKeys.join("、"));
+    return `<div class="acc${a.enabled ? "" : " off"}" data-acc="${esc(a.id)}">
+      <div class="acc-hd">
+        <span class="acc-name" title="${esc(a.label || a.id)}">${esc(a.label || a.id)}</span>
+        <span class="pill ${a.enabled ? "ok" : "unknown"} acc-badge">${a.enabled ? "在用" : "已停用"}</span>
+        <button class="ghost ext-act" data-act="toggle" data-id="${esc(a.id)}"
+          data-enabled="${a.enabled ? "1" : "0"}" style="margin-left:auto">${a.enabled ? "停用" : "启用"}</button>
+        <button class="ghost ext-act" data-act="remove" data-id="${esc(a.id)}">删除</button>
+      </div>
+      ${a.id ? `<div class="acc-id">${esc(a.id)}</div>` : ""}
+      ${notes.length ? `<div class="acc-meta">${notes.join(" · ")}</div>` : ""}
+    </div>`;
+  }).join("") : '<div class="acc-empty">这条渠道还没有凭据，粘一个进来就能用。</div>';
+}
+
+/* 额外字段：每行 key=value，空行与没有 = 的行被丢弃。 */
+function parseExtraFields(text){
+  const out = {};
+  for(const line of String(text||"").split(/\r?\n/)){
+    const i = line.indexOf("=");
+    if(i <= 0) continue;
+    const k = line.slice(0, i).trim(), v = line.slice(i+1).trim();
+    if(k && v) out[k] = v;
+  }
+  return out;
+}
+
+function bindExtCard(){
+  const el = $("#page-providers"); if(!el) return;
+  const add = el.querySelector("#ext-add");
+  if(add && !add.dataset.bound){
+    add.dataset.bound = "1";
+    add.onclick = async ()=>{
+      const secret = (el.querySelector("#ext-secret").value || "").trim();
+      if(!secret){ toast("先粘贴凭据"); return; }
+      const body = {
+        kind: extCurrent,
+        label: (el.querySelector("#ext-label").value || "").trim(),
+        secret,
+        extra: parseExtraFields(el.querySelector("#ext-extra").value),
+      };
+      const hint = el.querySelector("#ext-hint");
+      if(hint) hint.textContent = "正在用这个凭据拉模型目录…";
+      add.disabled = true;
+      const j = await api("/ext/add", body);
+      add.disabled = false;
+      if(hint) hint.textContent = "添加前会先拿它去拉一次模型目录——拉不到就不入库";
+      if(j && j.ok){
+        el.querySelector("#ext-secret").value = "";
+        el.querySelector("#ext-label").value = "";
+        el.querySelector("#ext-extra").value = "";
+        toast("已添加：" + (j.label || j.id));
+        renderExtCard(); refresh(); loadWallChannels();
+      }
+    };
+  }
+  // 行内动作委托：账号表每次重画，按钮不能各自绑。
+  const list = el.querySelector("#ext-accounts");
+  if(list && !list.dataset.bound){
+    list.dataset.bound = "1";
+    list.onclick = async (ev)=>{
+      const btn = ev.target.closest(".ext-act");
+      if(!btn || btn.disabled) return;
+      const id = btn.dataset.id, act = btn.dataset.act;
+      btn.disabled = true;
+      if(act === "toggle"){
+        await api("/ext/account/toggle", { kind: extCurrent, id, enabled: btn.dataset.enabled !== "1" });
+      } else if(act === "remove"){
+        if(!confirm("删除这个凭据？之后它提供的模型会从选择器移除。")){ btn.disabled = false; return; }
+        await api("/ext/remove", { kind: extCurrent, id });
+      }
+      btn.disabled = false;
+      renderExtCard(); refresh(); loadWallChannels();
+    };
+  }
+  const tg = el.querySelector("#tg-ext");
+  if(tg && !tg.dataset.bound){
+    tg.dataset.bound = "1";
+    tg.onclick = ()=> toggleChannel(extCurrent, tg.dataset.on !== "1");
+  }
+}
+
+/* zen / kilo 没有账号池，弹窗里只放一段说明和一个启停开关；状态行写「几个模型」。 */
+function paintLanePane(key){
+  const el = $("#page-providers"); if(!el) return;
+  const c = (STATE && STATE.channels || []).find(x=>x.id === key) || {};
+  const on = c.enabled !== false;
+  const st = el.querySelector("#" + key + "-state");
+  if(st) st.textContent = (on ? "已启用" : "已停用") + " · " + (c.models || 0) + " 个模型";
+  const tg = el.querySelector("#" + key + "-toggle");
+  if(!tg) return;
+  tg.classList.toggle("on", on);
+  tg.setAttribute("aria-checked", on ? "true" : "false");
+  tg.title = on ? "点一下停用这个渠道" : "点一下启用这个渠道";
+  if(!tg.dataset.bound){
+    tg.dataset.bound = "1";
+    tg.onclick = async ()=>{
+      const cur = ((STATE && STATE.channels) || []).find(x=>x.id === key) || {};
+      const next = cur.enabled === false;   // 当前关着 → 开启
+      tg.disabled = true;
+      const j = await api("/channel/" + key + "/enabled", { enabled: next });
+      tg.disabled = false;
+      if(j){
+        toast(next ? "渠道已启用" : "渠道已停用，模型从选择器移除");
+        await refresh();
+        if(openChannelId) chanModalOpen(openChannelId);
+      }
+    };
+  }
 }
 
 /* 预设区：常用 = 六家高频免费商，其余归「全部」；搜索跨全部预设。
@@ -2415,10 +3325,6 @@ function pvRenderPresets(){
           (p.keyUrl ? ` · <a href="${esc(safeHref(p.keyUrl))}" target="_blank" style="color:var(--accent)">申请 Key →</a>` : "");
         pvRenderPicker();
         pvSetFormOpen(true);
-        // WebView 里 scrollIntoView/smooth 不可靠，直接算 scrollTop 瞬时跳转
-        const scroller = document.querySelector("main.main");
-        const tgt = el.querySelector("#pv-form-body");
-        if(scroller && tgt) scroller.scrollTop = tgt.getBoundingClientRect().top - scroller.getBoundingClientRect().top + scroller.scrollTop - 90;
       };
     });
   }
@@ -2432,6 +3338,7 @@ function pvRenderPresets(){
 let wbPollTimer = null;
 async function renderWorkBuddyCard(){
   const st = await fetch("/admin/api/workbuddy/status").then(r=>r.json()).catch(()=>null);
+  wallStatus.workbuddy = st;
   const state = $("#wb-state"), body = $("#wb-body"), list = $("#wb-accounts");
   if(!state || !body || !st){ if(state) state.textContent = "状态获取失败"; return; }
   const accts = st.accounts || [];
@@ -2538,6 +3445,11 @@ function wbRenderAccounts(st){
     if(a.state === "cooldown"){
       if(a.cooldownModel) meta.push(`限流模型 <b>${esc(a.cooldownModel)}</b>`);
       if(a.cooldownUntil) meta.push(`恢复 <b>${new Date(a.cooldownUntil).toLocaleTimeString().slice(0,5)}</b>`);
+    }
+    // 内容门冷却：和限流分开说。限流是「等窗口」，内容门是「这批请求被标记过」，
+    // 两者的处置完全不同——前者等，后者别再用这个号发同样的东西。
+    if(a.sanitizeUntil){
+      meta.push(`内容门冷却 <b>${new Date(a.sanitizeUntil).toLocaleTimeString().slice(0,5)}</b>`);
     }
     const chips = [`<span class="acc-chip">${a.realm === "cn" ? "国内版 codebuddy.cn" : "国际版 workbuddy.ai"}</span>`];
     const split = wbCreditSplitChip(a);
@@ -2679,17 +3591,17 @@ function pvPickCount(){
   el.innerHTML = `拉到 <b>${pvFetched.length}</b> 个 · 已勾选 <b style="color:var(--accent)">${pvSelected.size}</b> 个`;
 }
 
-// 表单默认收起：点「展开」/点预设卡/点编辑时才展开，空闲时整卡只剩一行标题
+// 添加/编辑供应商走模态弹窗：入口卡一个按钮，预设卡/编辑也唤起同一个弹窗
 let pvFormOpen = false;
 function pvSetFormOpen(on){
   pvFormOpen = !!on;
   const el = $("#page-providers"); if(!el) return;
-  const body = el.querySelector("#pv-form-body");
-  const btn = el.querySelector("#pv-form-toggle");
-  const sub = el.querySelector("#pv-form-sub");
-  if(body) body.style.display = pvFormOpen ? "" : "none";
-  if(btn) btn.textContent = pvFormOpen ? "收起 ▴" : "＋ 展开";
-  if(sub) sub.style.display = pvFormOpen ? "none" : "";
+  const modal = el.querySelector("#pv-modal");
+  if(modal) modal.classList.toggle("open", pvFormOpen);
+  if(pvFormOpen){
+    const name = el.querySelector("#pv-name");
+    if(name) setTimeout(()=>name.focus(), 30);
+  }
 }
 
 function pvResetForm(){
@@ -2708,12 +3620,16 @@ function pvResetForm(){
 function renderProviderList(s){
   const el = $("#page-providers");
   const box = el.querySelector("#pv-list"); if(!box) return;
-  const providers = s.providers || [];
+  // Channel-managed providers (Qoder) are not user-added suppliers: the gateway
+  // syncs that entry itself, and its card on the wall opens the Qoder pane. Listing
+  // it here too put a second, identical-looking card in the provider pane with a
+  // 「删除」 that would break the channel.
+  const providers = (s.providers || []).filter(p => !WALL_MANAGED_PROVIDERS.has(p.id));
   const cntEl = el.querySelector("#pv-count");
   if(cntEl) cntEl.textContent = providers.length ? `${providers.length} 个已接入` : "尚未接入";
   if(!providers.length){
     box.innerHTML = `<div class="card"><div class="muted" style="font-size:12.5px">
-      还没有自定义供应商。在下方表单填 Base URL + Key，或到「供应商预设」挑一张卡片一键填充：拉取模型列表 → 勾选想要的模型 → 保存。
+      还没有自定义供应商。点上方「＋ 添加供应商」，或到页面下方「供应商预设」挑一张卡片一键填充：拉取模型列表 → 勾选想要的模型 → 保存。
       接入后模型会以 <code class="k">供应商ID/模型名</code> 出现在所有已开启 Agent 的模型选择器里。</div></div>`;
     return;
   }
@@ -2721,6 +3637,7 @@ function renderProviderList(s){
   for(const p of providers){
     const d = document.createElement("div");
     d.className = "pvcard" + (p.enabled ? "" : " off");
+    d.dataset.pvId = p.id;   // 渠道墙的落点锚：墙只负责找到这张卡，弹窗由它自己开
     const models = p.models || [];
     const chips = models.slice(0,12).map(m=>`<span class="pm">${esc(m)}</span>`).join("")
       + (models.length>12 ? `<span class="pm">+${models.length-12} …</span>` : "");
@@ -2762,9 +3679,6 @@ function renderProviderList(s){
       el.querySelector("#pv-cancel").style.display = "";
       pvRenderPicker();
       pvSetFormOpen(true);
-      const scroller = document.querySelector("main.main");
-      const tgt = el.querySelector("#pv-form-body");
-      if(scroller && tgt) scroller.scrollTop = tgt.getBoundingClientRect().top - scroller.getBoundingClientRect().top + scroller.scrollTop - 90;
     };
     d.querySelector('[data-op="edit"]').onclick = openEditor;
     d.querySelector('[data-op="pick"]').onclick = ()=>{ openEditor(); el.querySelector("#pv-fetch").click(); };
@@ -2852,6 +3766,7 @@ function buildUsage(s){
   for(const k of keys){
     const v = s.stats.days[k];
     byDay[k] = { requests:v.requests, failed:v.failed, input:v.input, output:v.output,
+      cacheRead:v.cacheRead||0, cacheWrite:v.cacheWrite||0,
       total:(v.input||0)+(v.output||0), models:v.models||{}, modelReqs:v.modelReqs||{}, agents:v.agents||{} };
   }
   const life = {};
@@ -2860,13 +3775,29 @@ function buildUsage(s){
   return { keys, byDay, top, life };
 }
 
+/* 缓存命中率：唯一的算法。
+   read = 命中缓存的输入 token，input = 全部输入 token（含命中）。
+   没有输入时返回 null —— 显示「—」而不是 0%，因为「没有请求」和「一次都没命中」
+   是两件不同的事，把后者显示成 0% 会让人以为缓存坏了。 */
+function cachePct(read, input){
+  const r = read||0, i = input||0;
+  if(i <= 0) return null;
+  return Math.min(100, Math.round(r / i * 1000) / 10);
+}
+function cacheCell(read, input){
+  const pct = cachePct(read, input);
+  if(pct === null) return '<span class="muted">—</span>';
+  return '<span class="mono">'+fmtN(read||0)+'</span> <span class="muted" style="font-size:11.5px">· '+pct+'%</span>';
+}
+
 function renderUsage(s){
   const el = $("#page-usage");
   const U = buildUsage(s);
   const recent = (s.stats.recent||[]).slice(-40);
-  const grand = U.keys.reduce((a,k)=>{ const d=U.byDay[k]; a.out+=d.output; a.inp+=d.input; a.req+=d.requests; a.fail+=d.failed; return a; },{out:0,inp:0,req:0,fail:0});
+  const grand = U.keys.reduce((a,k)=>{ const d=U.byDay[k]; a.out+=d.output; a.inp+=d.input; a.req+=d.requests; a.fail+=d.failed; a.cr+=d.cacheRead; a.cw+=d.cacheWrite; return a; },{out:0,inp:0,req:0,fail:0,cr:0,cw:0});
   const ttfts = recent.filter(r=>r.ttftMs>0).map(r=>r.ttftMs);
   const avgTtft = ttfts.length ? Math.round(ttfts.reduce((a,b)=>a+b,0)/ttfts.length) : null;
+  const hitPct = cachePct(grand.cr, grand.inp);
 
   el.innerHTML = `
     <h2 class="pt">用量 <span class="sub">全部只保存在本机</span></h2>
@@ -2874,6 +3805,7 @@ function renderUsage(s){
     <div class="sumstrip">
       <div class="cell"><div class="v">${fmtN(grand.inp+grand.out)}</div><div class="l">累计 Token</div></div>
       <div class="cell"><div class="v">${fmtN(grand.out)}</div><div class="l">输出 Token</div></div>
+      <div class="cell"><div class="v" title="上游前缀缓存命中的输入 token / 全部输入 token；0% 是结论不是故障——这些渠道至今没报过任何缓存用量">${hitPct!==null?hitPct+"%":"—"}</div><div class="l">缓存命中${grand.cr>0?` <span style="opacity:.7">${fmtN(grand.cr)}</span>`:""}</div></div>
       <div class="cell"><div class="v">${grand.req}</div><div class="l">请求数</div></div>
       <div class="cell"><div class="v${grand.fail>0?" bad":""}">${grand.fail}</div><div class="l">失败</div></div>
       <div class="cell"><div class="v">${avgTtft!==null?(avgTtft/1000).toFixed(1)+"s":"—"}</div><div class="l">平均首字</div></div>
@@ -3025,7 +3957,8 @@ function renderDayDetail(U){
   const rows = Object.entries(d.models).sort((a,b)=>b[1]-a[1]);
   const peak = rows.length ? rows[0][1] : 0;
   let html = '<div class="dayhead"><b class="mono">'+usageDay+'</b>'+
-    '<span class="muted" style="font-size:12px">'+d.requests+' 次请求 · '+d.failed+' 失败 · 输入 '+fmtN(d.input)+' · 输出 '+fmtN(d.output)+'</span>'+
+    '<span class="muted" style="font-size:12px">'+d.requests+' 次请求 · '+d.failed+' 失败 · 输入 '+fmtN(d.input)+
+      ' · 缓存 '+cacheCell(d.cacheRead, d.input)+' · 输出 '+fmtN(d.output)+'</span>'+
     '<span class="x" data-x>×</span></div>';
   if(rows.length===0){ html += '<div class="muted" style="font-size:12px">当天没有成功产出 token。</div>'; }
   else {
@@ -3093,7 +4026,7 @@ function renderByAgent(U){
 function renderRecent(recent){
   const box = $("#recent-list");
   if(!recent.length){ box.innerHTML = '<div class="muted" style="font-size:12px">还没有请求。</div>'; return; }
-  box.innerHTML = '<table><tr><th>时间</th><th>模型</th><th>Agent</th><th>档位</th><th>结果</th><th>输入/输出</th><th>首字</th></tr>' +
+  box.innerHTML = '<table><tr><th>时间</th><th>模型</th><th>Agent</th><th>档位</th><th>结果</th><th>输入/输出</th><th>缓存</th><th>首字</th></tr>' +
     recent.slice().reverse().map(r=>{
       const t = new Date(r.at).toTimeString().slice(0,8);
       const res = r.ok ? '<span class="pill ok">完成'+(r.recovered?" · 已恢复":"")+'</span>'
@@ -3101,6 +4034,7 @@ function renderRecent(recent){
       return '<tr><td class="mono">'+t+'</td><td class="mono">'+esc(r.model)+'</td>'+
         '<td>'+esc(r.agent||"—")+'</td><td class="mono">'+esc(r.effort||"—")+'</td>'+
         '<td>'+res+'</td><td class="num">'+fmtN(r.input||0)+' / '+fmtN(r.output||0)+'</td>'+
+        '<td class="num">'+(r.cacheRead?cacheCell(r.cacheRead, r.input):'<span class="muted">—</span>')+'</td>'+
         '<td class="num">'+(r.ttftMs?(r.ttftMs/1000).toFixed(1)+"s":"—")+'</td></tr>';
     }).join("") + '</table>';
 }
@@ -3296,6 +4230,8 @@ function renderSettings(s){
           </div></div>
         <div class="switch"><div><span class="nm">公开容量参考</span><div class="ds">用无需凭据的公开模型目录为「本地能力表完全没收录」的新模型补全上下文窗口/最大输出容量，每 6 小时同步；只写容量不写模态，来源记为「上游声明」，策展表认识的、以及被实测/AI 标注过的模型一律不动</div></div>
           <button class="act off" id="tg-openref">关闭</button></div>
+        <div class="switch"><div><span class="nm">WorkBuddy 前缀缓存</span><div class="ds">给 WorkBuddy 的请求体加 <code class="k">prompt_cache_key</code>（= 本会话 id），让上游按会话复用已算过的前缀。实测依据：同后端参考实现在 8k 前缀上把命中量从 0 提到 7808、计费从 0.34 降到 0.02。默认关闭——这条渠道的风控会看请求体，没有本机实测前不加。CodeArts 与自定义供应商不受此开关影响，它们的缓存提示一直开着</div></div>
+          <button class="act off" id="tg-wbcache">关闭</button></div>
       </div>
 
       <div class="card" id="set-desktop">
@@ -3574,6 +4510,7 @@ function renderSettings(s){
   setToggle("#tg-fallback", s.settings.laneFallbackToProviders);
   setToggle("#tg-autotag", s.settings.autoTagEnabled);
   setToggle("#tg-openref", s.settings.openRefEnabled);
+  setToggle("#tg-wbcache", s.settings.workBuddyCacheKey);
   setToggle("#tg-lan", s.settings.allowLan);
   const sseg = el.querySelector("#strategy-seg");
   if (sseg){
@@ -3604,6 +4541,9 @@ function renderSettings(s){
   bindSettingToggle("#tg-fallback", "laneFallbackToProviders", "耗尽后回落自定义 API 已开启（消耗你的 Key 额度）", "耗尽后回落自定义 API 已关闭");
   bindSettingToggle("#tg-autotag", "autoTagEnabled", "AI 能力标注已开启", "AI 能力标注已暂停");
   bindSettingToggle("#tg-openref", "openRefEnabled", "公开容量参考已开启：新模型将自动获得上游容量", "公开容量参考已暂停");
+  bindSettingToggle("#tg-wbcache", "workBuddyCacheKey",
+    "WorkBuddy 请求已带 prompt_cache_key——去「用量」页看命中率是否真的动了",
+    "WorkBuddy 请求回到纯请求体（不带缓存提示）");
   const lanBtn = el.querySelector("#tg-lan");
   if(lanBtn && !lanBtn.dataset.bound){
     lanBtn.dataset.bound = "1";

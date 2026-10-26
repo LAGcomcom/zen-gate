@@ -146,6 +146,36 @@ func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request, rest string
 		s.adminCodeartsLoginPoll(w, r)
 	case rest == "codearts/logout" && r.Method == http.MethodPost:
 		s.adminCodeartsLogout(w)
+	case rest == "zcode/status" && r.Method == http.MethodGet:
+		s.adminZCodeStatus(w)
+	case rest == "zcode/login/start" && r.Method == http.MethodPost:
+		s.adminZCodeLoginStart(w, r)
+	case rest == "zcode/login/poll" && r.Method == http.MethodGet:
+		s.adminZCodeLoginPoll(w)
+	case rest == "zcode/logout" && r.Method == http.MethodPost:
+		s.adminZCodeLogout(w, r)
+	case rest == "zcode/account/toggle" && r.Method == http.MethodPost:
+		s.adminZCodeAccountToggle(w, r)
+	case rest == "trae/status" && r.Method == http.MethodGet:
+		s.adminTraeStatus(w)
+	case rest == "trae/login/start" && r.Method == http.MethodPost:
+		s.adminTraeLoginStart(w)
+	case rest == "trae/login/poll" && r.Method == http.MethodGet:
+		s.adminTraeLoginPoll(w)
+	case rest == "trae/logout" && r.Method == http.MethodPost:
+		s.adminTraeLogout(w, r)
+	case rest == "trae/account/toggle" && r.Method == http.MethodPost:
+		s.adminTraeAccountToggle(w, r)
+	case rest == "ext/status" && r.Method == http.MethodGet:
+		s.adminExtStatus(w)
+	case rest == "ext/add" && r.Method == http.MethodPost:
+		s.adminExtAdd(w, r)
+	case rest == "ext/remove" && r.Method == http.MethodPost:
+		s.adminExtRemove(w, r)
+	case rest == "ext/account/toggle" && r.Method == http.MethodPost:
+		s.adminExtToggle(w, r)
+	case rest == "channel/wall" && r.Method == http.MethodGet:
+		s.adminChannelWall(w)
 	case rest == "providers" && r.Method == http.MethodPost:
 		s.adminProviderSave(w, r)
 	case rest == "providers/delete" && r.Method == http.MethodPost:
@@ -440,6 +470,7 @@ func (s *Server) adminState(w http.ResponseWriter) {
 		"smartRouting":            cfg.SmartRouting,
 		"routingStrategy":         cfg.RoutingStrategy,
 		"laneFallbackToProviders": cfg.LaneFallbackToProviders,
+		"workBuddyCacheKey":       cfg.WorkBuddyCacheKey,
 		"autoTagEnabled":          cfg.AutoTagEnabled,
 		"openRefEnabled":          cfg.OpenRefEnabled,
 		"workBuddyEnabled":        cfg.WorkBuddyEnabled(),
@@ -535,6 +566,7 @@ func (s *Server) adminSettings(w http.ResponseWriter, r *http.Request) {
 		SmartRouting            *bool            `json:"smartRouting"`
 		RoutingStrategy         *string          `json:"routingStrategy"`
 		LaneFallbackToProviders *bool            `json:"laneFallbackToProviders"`
+		WorkBuddyCacheKey       *bool            `json:"workBuddyCacheKey"`
 		AutoTagEnabled          *bool            `json:"autoTagEnabled"`
 		OpenRefEnabled          *bool            `json:"openRefEnabled"`
 		WorkBuddyEnabled        *bool            `json:"workBuddyEnabled"`
@@ -683,6 +715,12 @@ func (s *Server) adminSettings(w http.ResponseWriter, r *http.Request) {
 		cfg.LaneFallbackToProviders = *in.LaneFallbackToProviders
 		changed = true
 		dirty["laneFallbackToProviders"] = true
+	}
+	if in.WorkBuddyCacheKey != nil {
+		cfg.WorkBuddyCacheKey = *in.WorkBuddyCacheKey
+		s.Lane.SetWorkBuddyCacheKey(cfg.WorkBuddyCacheKey)
+		changed = true
+		dirty["workBuddyCacheKey"] = true
 	}
 	if in.AutoTagEnabled != nil {
 		cfg.AutoTagEnabled = *in.AutoTagEnabled
@@ -848,6 +886,13 @@ func (s *Server) commitSettings(next *store.Config, dirty map[string]bool) {
 		}
 		if dirty["laneFallbackToProviders"] {
 			c.LaneFallbackToProviders = next.LaneFallbackToProviders
+		}
+		// Without this branch the WorkBuddy cache toggle was a phantom: the
+		// handler set the lane flag, answered {"changed":true}, and the next
+		// boot read the old false back. Exactly the failure the note above
+		// about workBuddyEnabled records, one field over.
+		if dirty["workBuddyCacheKey"] {
+			c.WorkBuddyCacheKey = next.WorkBuddyCacheKey
 		}
 		if dirty["autoTagEnabled"] {
 			c.AutoTagEnabled = next.AutoTagEnabled
@@ -1403,7 +1448,10 @@ func (s *Server) adminUsageCSV(w http.ResponseWriter, r *http.Request) {
 	}
 	sort.Strings(modelList)
 	cw := csv.NewWriter(w)
-	_ = cw.Write(append([]string{"date", "requests", "failed", "input", "output"}, modelList...))
+	// cacheRead / cacheWrite sit next to input on purpose: "input" is every
+	// prompt token sent and cacheRead is the part of it the upstream already
+	// had, so the hit rate is a division on one row instead of a join.
+	_ = cw.Write(append([]string{"date", "requests", "failed", "input", "cacheRead", "cacheWrite", "output"}, modelList...))
 	dayKeys := make([]string, 0, len(days))
 	for k := range days {
 		dayKeys = append(dayKeys, k)
@@ -1412,7 +1460,8 @@ func (s *Server) adminUsageCSV(w http.ResponseWriter, r *http.Request) {
 	for _, day := range dayKeys {
 		d := days[day]
 		row := []string{day, strconv.Itoa(d.Requests), strconv.Itoa(d.Failed),
-			strconv.Itoa(d.Input), strconv.Itoa(d.Output)}
+			strconv.Itoa(d.Input), strconv.Itoa(d.CacheRead), strconv.Itoa(d.CacheWrite),
+			strconv.Itoa(d.Output)}
 		for _, m := range modelList {
 			row = append(row, strconv.Itoa(d.Models[m]))
 		}

@@ -60,6 +60,8 @@ failover 与出口轮换自动消化：
 | 🔌 **自定义 API** | 免费商预设一键填充 + 自动检索模型列表，自己的 Key 自己填，用量照常入账 |
 | 📖 **能力元数据进标准接口** | `GET /v1/models` 每条模型除 OpenAI 字段外附带 `context_window`、`max_output_tokens`、`input_modalities`、`reasoning`、`supported_reasoning_levels` 与 `capability_source`（实测 > 上游声明 > AI标注 > 规则 / 未标注）——一键实测的结论不用打开面板也能被 Agent、SDK 或任意脚本读到；重启后实测结论仍随 `tags.json` 生效 |
 | 🌐 **订阅轮询** | 粘贴代理订阅（vless / vmess / ss / trojan / hy2 / tuic），内嵌 sing-box 侧车转成本地 socks 池，**每个请求轮换一个健康出口**——免费车道额度按出口 IP 计，多节点就是多份额度；节点健康探测 + 拨号失败自动跳下一节点 |
+| 🗂 **渠道墙** | 「自定义 API」页顶部一屏看完所有渠道：已打开 / 已关闭分组，每张卡带状态行（`N 账号 · M 模型` / 未登录 / 已停用），可按名称筛选，点卡直接跳到它的管理区。判据只有渠道文件里那一个 `enabled`，墙本身不持有状态 |
+| 💾 **前缀缓存** | 三条主动声明 + 一条被动统计。**主动**：CodeArts 与自定义供应商的请求带 `prompt_cache_key`（OpenAI 协议）或 `cache_control` 断点（Anthropic 协议，只打在最长的稳定前缀上：最后一个 system 块 + 最后一个 tool，占 2/4 个断点预算）；WorkBuddy 同一个字段放在设置里手动开（实测通过再打开）。Zen 车道与 Kilo 不动——前者按字节校验请求体，多一个字段就 403。**被动**：用量页、最近请求、CSV、`stats.json` 日桶都记命中量，`prompt_cache_hit_tokens` / `prompt_tokens_details.cached_tokens` / `cache_read_input_tokens` 三种拼法都认 |
 | 📊 **额度测算** | 无官方余额 API 也能估：限额时段追踪 + 恢复时间预估 + 日额度进度条 |
 | ⏱ **首字历史** | 每次探测的首字延迟入样本环，重启不丢，模型页直接看平均首字 |
 | 🌡 **GitHub 式热力图** | 365 天用量热力图 + 多模型趋势折线 + 每 / 周 / 累计三种视图 |

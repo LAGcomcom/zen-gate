@@ -26,6 +26,7 @@ import (
 	"zen-gate/internal/autotag"
 	"zen-gate/internal/lane"
 	"zen-gate/internal/logx"
+	"zen-gate/internal/relay"
 	"zen-gate/internal/store"
 )
 
@@ -252,6 +253,23 @@ func New(l *lane.Lane, st *store.Store) *Server {
 		_ = st.FlushStats()
 		s.NoteCall(rec)
 	}
+	// A custom provider that refuses the cache-declaring request shape is
+	// remembered: the refusal is about our body, not the user's key, and
+	// rediscovering it on every turn would bill the same 400 twice per request
+	// forever. One retry in the plain shape, then the provider carries NoCache.
+	relay.SetCacheRefusedHandler(func(providerID string) {
+		st.Mutate(func(cfg *store.Config) {
+			for i := range cfg.Providers {
+				if cfg.Providers[i].ID == providerID {
+					cfg.Providers[i].NoCache = true
+				}
+			}
+		})
+		_ = st.Save()
+		if s.logger != nil {
+			s.logger.Infof("供应商 %s 拒绝缓存字段，已记住并改发纯请求体", providerID)
+		}
+	})
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", s.safeRoute)
 	s.mux = mux

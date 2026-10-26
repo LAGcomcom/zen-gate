@@ -66,11 +66,16 @@ type CallRecord struct {
 	Output    int    `json:"output"`
 	Reasoning int    `json:"reasoning,omitempty"`
 	CacheRead int    `json:"cacheRead,omitempty"`
-	TTFTMs    int64  `json:"ttftMs,omitempty"`
-	DecodeMs  int64  `json:"decodeMs,omitempty"`
-	DecodeTok int    `json:"decodeTokens,omitempty"`
-	Effort    string `json:"effort,omitempty"`
-	At        int64  `json:"at"`
+	// CacheWrite is what an Anthropic-family upstream billed to CREATE the
+	// cache (cache_creation_input_tokens). It costs more than a plain read, so
+	// a day bucket that drops it cannot tell "cache saved money" from "cache
+	// was paid for and never read".
+	CacheWrite int    `json:"cacheWrite,omitempty"`
+	TTFTMs     int64  `json:"ttftMs,omitempty"`
+	DecodeMs   int64  `json:"decodeMs,omitempty"`
+	DecodeTok  int    `json:"decodeTokens,omitempty"`
+	Effort     string `json:"effort,omitempty"`
+	At         int64  `json:"at"`
 	// Exit records which egress actually served this physical request. Under
 	// concurrency the first question asked is always whether these requests
 	// went out through the same exit; without it you can only guess. Empty
@@ -87,17 +92,17 @@ type CallRecord struct {
 
 // Lane orchestrates the free lane: catalog, availability, and completion calls.
 type Lane struct {
-	mu               sync.RWMutex
-	catalog          []ModelInfo
-	availability     map[string]ProbeResult
-	realOK           map[string]int64 // model -> unix-milli until which live traffic vouches for it
+	mu           sync.RWMutex
+	catalog      []ModelInfo
+	availability map[string]ProbeResult
+	realOK       map[string]int64 // model -> unix-milli until which live traffic vouches for it
 	// hidden holds the ids the user unchecked on the 模型 page. Hidden models
 	// stay directly callable — a client that names one explicitly still gets
 	// it — but they stop consuming probe rounds and stop acting as
 	// failover / throttle-switch candidates (issue #103). SetHidden replaces
 	// the whole map and readers snapshot the reference under mu, so never
 	// edit the map in place.
-	hidden           map[string]bool
+	hidden map[string]bool
 	// channelGate reports whether a free-lane channel is enabled (its
 	// channels/<id>.json file). nil means every channel is on. A disabled
 	// channel empties its catalog bucket — the same shape as a logged-out
@@ -105,7 +110,7 @@ type Lane struct {
 	channelGate func(string) bool
 	// OnChannelRoster receives each channel's live roster after a catalog
 	// rebuild, for the per-channel files (store.WriteChannelRoster).
-	OnChannelRoster func(channel string, models []ModelInfo)
+	OnChannelRoster  func(channel string, models []ModelInfo)
 	egress           Egress
 	defaultMaxTokens int
 	exposeRegion     bool
@@ -115,6 +120,13 @@ type Lane struct {
 	strategy         string
 	ttft             TTFTSource
 	throttle         *ThrottleBook
+
+	// wbCacheKey asks the WorkBuddy gateways to bucket their prefix cache by
+	// our conversation id (prompt_cache_key). Off by default: the field is
+	// measured on the reference client but not yet on this lane, and an
+	// unverified body field on a WAF-fronted gateway is a way to break working
+	// traffic. Turn it on from 设置 once a live A/B says it is accepted.
+	wbCacheKey bool
 
 	// WorkBuddy 账号渠道 state. The pool lives in workbuddy_pool.go: wbMu
 	// guards the slot slice and the active pointer only, while each slot
@@ -142,8 +154,27 @@ type Lane struct {
 	caAcct        CAAccount
 	caPersist     func(CAAccount)
 	caRefreshedAt time.Time
-	// The in-flight login: PKCE + ticket the browser round-trip completes.
 	caLogin       *caPendingLogin
+
+	// ZCode account pool. The login is a device-authorization flow this gateway
+	// owns end to end (no IDE, no local callback port), so the accounts are ours
+	// to store and spend. zcPersist writes one account after a login.
+	zcMu      sync.RWMutex
+	zcAccts   []ZCodeAccount
+	zcPersist func(ZCodeAccount)
+
+	// TRAE account pool: a Cloud-IDE-JWT login plus the desktop fingerprint
+	// (machine id / device id) the upstream scores. trPersist writes rotations.
+	trMu      sync.RWMutex
+	trAccts   []TraeAccount
+	trPersist func(TraeAccount)
+
+	// Preset "OpenAI-compatible + private headers" channel pool (cline / loomy /
+	// raccoon / lobsterai / astudio / modelscope). They share one transport and
+	// differ only in URL, headers and a body quirk, so one pool serves all six.
+	extMu      sync.RWMutex
+	extAccts   []ExtAccount
+	extPersist func(ExtAccount)
 
 	probing         atomicFlag
 	lastProbeAt     time.Time
@@ -224,6 +255,20 @@ func (l *Lane) SetChannelGate(fn func(string) bool) {
 
 func (l *Lane) channelOn(id string) bool {
 	return l.channelGate == nil || l.channelGate(id)
+}
+
+// SetWorkBuddyCacheKey enables the WorkBuddy prompt_cache_key hint. Default
+// off; see the field's own comment for why.
+func (l *Lane) SetWorkBuddyCacheKey(on bool) {
+	l.mu.Lock()
+	l.wbCacheKey = on
+	l.mu.Unlock()
+}
+
+func (l *Lane) workBuddyCacheKey() bool {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	return l.wbCacheKey
 }
 
 // SetHidden replaces the set of user-hidden model ids. Hidden models remain
@@ -421,7 +466,7 @@ func (l *Lane) RefreshCatalog(ctx context.Context) {
 	prev := l.catalog
 	l.mu.Unlock()
 
-	var zen, kilo, wb, ca []ModelInfo
+	var zen, kilo, wb, ca, zc, tr []ModelInfo
 	for _, m := range prev {
 		switch m.Channel {
 		case ChannelKilo:
@@ -430,6 +475,10 @@ func (l *Lane) RefreshCatalog(ctx context.Context) {
 			wb = append(wb, m)
 		case ChannelCodeArts:
 			ca = append(ca, m)
+		case ChannelZCode:
+			zc = append(zc, m)
+		case ChannelTrae:
+			tr = append(tr, m)
 		default:
 			zen = append(zen, m)
 		}
@@ -492,11 +541,101 @@ func (l *Lane) RefreshCatalog(ctx context.Context) {
 		}
 		ca = nil
 	}
-	cat := make([]ModelInfo, 0, len(zen)+len(kilo)+len(wb)+len(ca))
+	// The six preset channels (cline / loomy / raccoon / lobsterai / astudio /
+	// modelscope) share one transport but keep separate buckets, because their
+	// rosters come from six different endpoints and one vendor being down must
+	// not empty another's picker.
+	extBuckets := map[string][]ModelInfo{}
+	for _, m := range prev {
+		if _, isPreset := extPresets[m.Channel]; isPreset {
+			extBuckets[m.Channel] = append(extBuckets[m.Channel], m)
+		}
+	}
+	for _, kind := range extKindOrder {
+		bucket := extBuckets[kind]
+		if !l.channelOn(kind) {
+			if len(bucket) > 0 {
+				subtracted = true
+			}
+			extBuckets[kind] = nil
+			continue
+		}
+		accts := l.extSpendable(kind)
+		if len(accts) == 0 {
+			// No account means the channel has nothing to serve; emptying is
+			// the point, exactly like a logged-out WorkBuddy.
+			if len(bucket) > 0 {
+				subtracted = true
+			}
+			extBuckets[kind] = nil
+			continue
+		}
+		p := extPresets[kind]
+		if fresh, err := fetchListingWithColdBootRetry(ctx, len(bucket), func(fctx context.Context) ([]ModelInfo, error) {
+			return extFetchCatalog(fctx, p, accts[0])
+		}); err == nil && len(fresh) > 0 {
+			extBuckets[kind] = fresh
+		}
+	}
+
+	if !l.channelOn("zcode") {
+		if len(zc) > 0 {
+			subtracted = true
+		}
+		zc = nil
+	} else if accts := l.zcodeSpendable(); len(accts) > 0 {
+		if fresh, err := fetchListingWithColdBootRetry(ctx, len(zc), func(fctx context.Context) ([]ModelInfo, error) {
+			rows, rerr := zcodeFetchConfigs(fctx, accts[0])
+			if rerr != nil {
+				return nil, rerr
+			}
+			setZcodeLevels(rows)
+			return zcodeBuildCatalog(rows), nil
+		}); err == nil && len(fresh) > 0 {
+			zc = fresh
+		}
+	} else {
+		if len(zc) > 0 {
+			subtracted = true
+		}
+		zc = nil
+	}
+	// TRAE's roster is LIVE but channel-attributed: a model is only callable
+	// through the channel that listed it, so the fetch records the routing
+	// alongside the ids. Same discipline: a failed fetch keeps, a logged-out
+	// account subtracts.
+	if !l.channelOn("trae") {
+		if len(tr) > 0 {
+			subtracted = true
+		}
+		tr = nil
+	} else if accts := l.traeSpendable(); len(accts) > 0 {
+		if fresh, err := fetchListingWithColdBootRetry(ctx, len(tr), func(fctx context.Context) ([]ModelInfo, error) {
+			rows, routes, rerr := traeFetchModels(fctx, accts[0])
+			if rerr != nil {
+				return nil, rerr
+			}
+			setTraeRoutes(routes)
+			return rows, nil
+		}); err == nil && len(fresh) > 0 {
+			tr = fresh
+		}
+	} else {
+		if len(tr) > 0 {
+			subtracted = true
+		}
+		tr = nil
+	}
+	cat := make([]ModelInfo, 0, len(zen)+len(kilo)+len(wb)+len(ca)+len(zc)+len(tr)+64)
 	cat = append(cat, zen...)
 	cat = append(cat, kilo...)
 	cat = append(cat, wb...)
 	cat = append(cat, ca...)
+	cat = append(cat, zc...)
+	cat = append(cat, tr...)
+	for _, kind := range extKindOrder {
+		cat = append(cat, extBuckets[kind]...)
+	}
 	if len(cat) == 0 && !subtracted {
 		return
 	}
@@ -514,7 +653,7 @@ func (l *Lane) RefreshCatalog(ctx context.Context) {
 			}
 			byChannel[id] = append(byChannel[id], m)
 		}
-		for _, ch := range []string{"zen", "kilo", "workbuddy", "codearts"} {
+		for _, ch := range Channels() {
 			// A disabled channel keeps its last recorded roster: the file then
 			// still says what the channel would serve, which is the point of
 			// keeping per-channel files at all.
@@ -903,7 +1042,13 @@ func (l *Lane) Complete(ctx context.Context, req Request, emit func(Chunk)) (Out
 		if !failover || sawAny || !switchableFailure(uerr) {
 			return out, uerr
 		}
-		next := l.nextCandidate(req.Needs, tried)
+		next := l.nextSameModel(req.Needs, model, tried, req.Needs.PromptTokens)
+		if next == "" {
+			// No same-model channel left: fall back to the old behaviour of
+			// switching to whatever model can answer. That changes the model
+			// the user asked for, so it stays the second choice.
+			next = l.nextCandidate(req.Needs, tried)
+		}
 		if next == "" {
 			// The lane has nothing left to offer this request — tell the
 			// gateway so it can (optionally) offer the turn to user-added
@@ -987,6 +1132,72 @@ func (l *Lane) Candidates(needs Needs, exclude string, n int) []string {
 		out = append(out, c)
 	}
 	return out
+}
+
+// nextSameModel returns another channel that serves the SAME model, when the
+// catalog holds one. Failover prefers this over switching models: a throttled
+// OpenCode Zen twin can be answered by the WorkBuddy pool without changing what
+// the user asked for, which is the whole point of grouping cross-channel twins.
+//
+// It returns "" when the model has no twin (the common case: most ids live on
+// one channel), is not the model the caller actually requested, or every twin is
+// throttled, unavailable, or too small for this request — the caller then falls
+// back to nextCandidate and the pre-existing behaviour.
+//
+// ⚠️ The group is keyed on the *served* id, not the requested one: a failover
+// already moved to another model, and looking up the original id would let a
+// two-hop chain bounce between models.
+func (l *Lane) nextSameModel(needs Needs, servedModel string, tried map[string]bool, promptTokens int) string {
+	l.mu.RLock()
+	groups := AggregateGroups(l.catalog)
+	throttle := l.throttle
+	availability := make(map[string]ProbeResult, len(l.availability))
+	for k, v := range l.availability {
+		availability[k] = v
+	}
+	smart := l.smartRouting
+	l.mu.RUnlock()
+
+	group := groups[servedModel]
+	if group == nil {
+		return ""
+	}
+	for _, id := range aggregateAlternates(group, servedModel, promptTokens, tried) {
+		if throttle.Throttled(id) {
+			continue
+		}
+		switch FreshState(availability[id]) {
+		case StateUnavailable, StateRegionBlock:
+			continue
+		}
+		if smart {
+			if m, ok := l.modelByID(id); ok {
+				if needs.Image && !m.Vision {
+					continue
+				}
+				if needs.Audio && !m.AudioInput {
+					continue
+				}
+				if needs.File && !m.FileInput {
+					continue
+				}
+			}
+		}
+		return id
+	}
+	return ""
+}
+
+// modelByID reads one catalog row.
+func (l *Lane) modelByID(id string) (ModelInfo, bool) {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	for _, m := range l.catalog {
+		if m.ID == id {
+			return m, true
+		}
+	}
+	return ModelInfo{}, false
 }
 
 // nextCandidate picks the best failover target: probed-available models
@@ -1120,6 +1331,7 @@ func (l *Lane) attemptModel(ctx context.Context, req Request, model, effort stri
 	kilo := entry.Channel == ChannelKilo
 	wb := entry.Channel == ChannelWorkBuddy
 	ca := entry.Channel == ChannelCodeArts
+	zc := entry.Channel == ChannelZCode
 	baseRequested := base
 	if ca {
 		// CodeArts matches registered names case-sensitively; the catalog row
@@ -1173,6 +1385,10 @@ func (l *Lane) attemptModel(ctx context.Context, req Request, model, effort stri
 			wbApplyModelQuirks(body, base, effort)
 			wbBackfillReasoning(body)
 		}
+		// ZCode speaks the Anthropic messages shape but with its own envelope:
+		// identity block first in `system`, effort in `output_config.effort`.
+		// Both are applied in zcodeBuildBody, which the post path calls — the
+		// body built here is the caller's shape only.
 		return body
 	}
 
@@ -1196,6 +1412,15 @@ func (l *Lane) attemptModel(ctx context.Context, req Request, model, effort stri
 		if kilo {
 			return PostKiloStreamed(cctx, body, onData)
 		}
+		if zc {
+			return l.zcodePost(cctx, body, onData)
+		}
+		if entry.Channel == ChannelTrae {
+			return l.traePost(cctx, body, onData)
+		}
+		if p, ok := extPresets[entry.Channel]; ok {
+			return l.extPost(cctx, p, body, effort, onData)
+		}
 		return PostStreamed(cctx, EndpointFor(base), body, session, requestID, onData)
 	}
 
@@ -1203,6 +1428,25 @@ func (l *Lane) attemptModel(ctx context.Context, req Request, model, effort stri
 	rename := map[string]string{}
 	if !kilo && !ca {
 		rename = ApplyFingerprint(body, style)
+	}
+	// Prompt-cache hints ride only the channels whose request shape we control
+	// end to end.
+	//
+	//   - Zen: byte-checked against the reference CLI (key order, exact tool
+	//     definitions). An extra top-level field draws 403 FreeTierError, so
+	//     nothing is added here.
+	//   - Kilo: no measured behaviour for this field at all.
+	//   - CodeArts: its own reference body builder has always sent the key
+	//     (`chatBodyV2`), and this lane is a plain OpenAI-compatible endpoint —
+	//     the request we build is the one that builder describes.
+	//   - WorkBuddy: measured on the reference plugin (8k prefix: 0 → 7808 hit
+	//     tokens, credit 0.34 → 0.02), but not yet on this lane, so it stays
+	//     behind a switch until a live A/B says the WAF accepts it.
+	if ca {
+		WithCacheKey(body, wire, caChatID)
+	}
+	if wb && l.workBuddyCacheKey() {
+		WithCacheKey(body, wire, wbConversationID(req.SessionSeed))
 	}
 
 	decoder := NewDecoder(wire, rename, emit)
@@ -1359,10 +1603,14 @@ func (l *Lane) record(ctx context.Context, rec CallRecord, result StreamResult, 
 	} else {
 		rec.Ok = result.SawFinish
 	}
-	rec.Input = result.Usage.Input
+	// Account the whole prompt, not just its uncached part: the day buckets and
+	// the access line both read this figure as "tokens sent", and an Anthropic
+	// upstream reports only the miss there.
+	rec.Input = result.Usage.InputTotal()
 	rec.Output = result.Usage.Output
 	rec.Reasoning = result.Usage.Reasoning
 	rec.CacheRead = result.Usage.CacheRead
+	rec.CacheWrite = result.Usage.CacheWrite
 	rec.TTFTMs = firstAt
 	if result.SawText {
 		rec.DecodeTok = WindowTokens(result.Usage, result.SawReasoning)
@@ -1486,7 +1734,7 @@ func channelCopyRank(m *ModelInfo, av map[string]ProbeResult) int {
 	default:
 		score = 4
 	}
-		ttft := av[m.ID].TTFTMs
+	ttft := av[m.ID].TTFTMs
 	if ttft < 0 {
 		ttft = 999_999_999
 	}

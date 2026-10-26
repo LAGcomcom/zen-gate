@@ -5,6 +5,8 @@ import (
 	"time"
 	"path/filepath"
 	"sort"
+
+	"zen-gate/internal/lane"
 )
 
 // One channel, one file.
@@ -21,8 +23,14 @@ import (
 // are deliberately free of credentials — accounts and tokens stay in
 // config.json, which already has the masking and 0600 treatment.
 
-// ChannelIDs lists the free-lane channels in catalog order.
-var ChannelIDs = []string{"zen", "kilo", "workbuddy", "codearts"}
+// ChannelIDs lists every channel in display order: the free lanes, the two
+// device-authorization channels (ZCode / TRAE) and the six preset channels.
+//
+// Derived from lane.Channels() rather than a second literal list: the dashboard
+// wall, the catalog's per-channel roster writer and this file's materialized
+// channels/<id>.json must agree on the set, and three parallel lists is how a
+// card ends up pointing at a channel file that was never created.
+var ChannelIDs = lane.Channels()
 
 // ChannelModel is one roster row as the channel file records it: the fields
 // the panel shows, nothing secret.

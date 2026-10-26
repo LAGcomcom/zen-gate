@@ -75,6 +75,82 @@ func relayHTTP() *http.Client {
 	return relayClient
 }
 
+// OnCacheRefused, when set, is told that a provider rejected the
+// cache-declaring request shape. The gateway persists NoCache through it so the
+// refusal is learned once instead of rediscovered on every turn; nil (tests,
+// headless embeds) keeps the fallback purely per-request.
+//
+// Guarded by a mutex because Complete runs on request goroutines while a test
+// or a second Server may install it concurrently. Assign with
+// SetCacheRefusedHandler rather than writing this directly.
+var (
+	cacheRefusedMu sync.RWMutex
+	onCacheRefused func(providerID string)
+)
+
+// SetCacheRefusedHandler installs (or clears, with nil) the provider-refusal
+// callback.
+func SetCacheRefusedHandler(fn func(providerID string)) {
+	cacheRefusedMu.Lock()
+	onCacheRefused = fn
+	cacheRefusedMu.Unlock()
+}
+
+// cacheRefusal reports whether an upstream error is a rejection of the CACHE
+// FIELDS this gateway added, which is the one 4xx worth retrying in a plainer
+// shape. Everything else — a bad key, an unknown model, a malformed tool
+// schema — is the caller's problem and re-sending it unchanged would only
+// double the bill.
+//
+// The code accepted here is CodeServer, not CodeClient: ClassifyFailure files a
+// 400 as an *unavailable-model* verdict (CodeServer + Unavailable), because a
+// 400 on this lane usually means "this model will not serve this id".
+//
+// The payload rule is deliberately narrow. "unexpected field" alone is NOT
+// enough — any upstream refusing any unknown field says that, including one
+// objecting to a parameter the user configured themselves, and re-sending such
+// a request pays twice for an answer that cannot change. A generic phrase only
+// counts when a cache-specific word appears in the SAME message, which by
+// construction names a field this gateway is the one that added.
+func cacheRefusal(err *lane.UpstreamError) bool {
+	if err == nil {
+		return false
+	}
+	switch err.Code {
+	case lane.CodeClient, lane.CodeServer:
+	default:
+		return false
+	}
+	m := strings.ToLower(err.Message)
+	cacheish := []string{"cache_control", "cache control", "prompt_cache", "cache key",
+		"cached_tokens", "cache_read", "cache_creation"}
+	for _, needle := range cacheish {
+		if strings.Contains(m, needle) {
+			return true
+		}
+	}
+	return false
+}
+
+// dropCacheKey removes the OpenAI-side bucket key, for a provider that refused
+// the field rather than the block shape.
+func dropCacheKey(body map[string]any) bool {
+	if _, has := body["prompt_cache_key"]; !has {
+		return false
+	}
+	delete(body, "prompt_cache_key")
+	return true
+}
+
+func onCacheRefusedNotify(p *store.Provider) {
+	cacheRefusedMu.RLock()
+	fn := onCacheRefused
+	cacheRefusedMu.RUnlock()
+	if fn != nil {
+		fn(p.ID)
+	}
+}
+
 // NormalizeBaseURL trims and scheme-fills a provider base URL.
 func NormalizeBaseURL(raw string) string {
 	u := strings.TrimRight(strings.TrimSpace(raw), "/")
@@ -259,6 +335,14 @@ func Complete(ctx context.Context, t Turn, emit func(lane.Chunk)) (lane.Usage, s
 		if tl := lane.ToToolDefs(t.Tools, style); tl != nil {
 			body["tools"] = tl
 		}
+		// Prefix caching on this wire is declared inline. One breakpoint on the
+		// last system block covers the whole system prompt and one on the last
+		// tool covers every schema before it — 2 of the 4 slots a request may
+		// carry, spent on the two prefixes a conversation resends verbatim.
+		// Skipped for a provider that already refused the block shape.
+		if !p.NoCache {
+			lane.WithCacheBreakpoints(body)
+		}
 	default:
 		body["messages"] = lane.ToChatMessages(msgs)
 		body["max_tokens"] = maxTok
@@ -269,14 +353,54 @@ func Complete(ctx context.Context, t Turn, emit func(lane.Chunk)) (lane.Usage, s
 			body["reasoning_effort"] = t.ReasoningEffort
 		}
 		body["stream_options"] = map[string]any{"include_usage": true}
+		// OpenAI-compatible gateways bucket their prefix cache by this field. It
+		// has to be the conversation, not the request: the whole point is that
+		// turn N+2 lands in the bucket turn N created. A provider that refused
+		// it once keeps its requests clean from then on.
+		if !p.NoCache {
+			lane.WithCacheKey(body, wire, session)
+		}
 	}
 
 	decoder := lane.NewDecoder(wire, nil, emit)
+	// sawFrame records that the upstream started streaming, i.e. that this was
+	// not a refusal at the head. A cache-field 400 is answered before any frame,
+	// so a refusal with frames behind it is a different animal — replaying it
+	// would duplicate whatever already reached the client.
+	sawFrame := false
 	usage, err := postStreamed(ctx, p, session, body, func(payload []byte) error {
+		if len(payload) > 0 {
+			sawFrame = true
+		}
 		decoder.Decode(payload)
 		return nil
 	})
 	result := decoder.Finish()
+	// An upstream that refuses the cache-declaring shape answers 400 and quotes
+	// the field it did not like. That verdict is about OUR body, not the key,
+	// so: retry once in the plain shape, then remember the refusal on the
+	// provider — one bad guess costs one retry, not one failed turn per request
+	// for the rest of time.
+	//
+	// Two conditions keep the retry honest:
+	//
+	//   - nothing may have reached the client yet. A refusal at the head emits
+	//     nothing, so this is the normal case; a mid-stream error means the
+	//     turn is committed and replaying it would duplicate the answer.
+	//   - the retry gets a FRESH decoder. Reusing one that already decoded a
+	//     frame would fold the same text in twice (the decoder accumulates
+	//     block state, it does not replace it).
+	if err != nil && cacheRefusal(err) && !p.NoCache && !sawFrame {
+		if lane.StripCacheBreakpoints(body) || dropCacheKey(body) {
+			retryDecoder := lane.NewDecoder(wire, nil, emit)
+			usage, err = postStreamed(ctx, p, session, body, func(payload []byte) error {
+				retryDecoder.Decode(payload)
+				return nil
+			})
+			result = retryDecoder.Finish()
+			onCacheRefusedNotify(p)
+		}
+	}
 	if usage != nil && result.Usage.TotalTokens == 0 {
 		result.Usage = *usage
 	}
@@ -336,10 +460,17 @@ func postStreamed(ctx context.Context, p *store.Provider, session string, body m
 				retryAfter = n
 			}
 		}
-		// The request never reached the model, so the failure — credential
-		// rejection, rate limit, server wobble — is the key's to answer for.
-		penalizeKey(p, key, resp.StatusCode, time.Duration(retryAfter)*time.Second)
-		return nil, lane.ClassifyFailure(resp.StatusCode, string(data), retryAfter)
+		ue := lane.ClassifyFailure(resp.StatusCode, string(data), retryAfter)
+		// A refusal that names one of OUR cache fields is not the key's fault:
+		// the same key answers fine once the field is gone. Penalising it here
+		// would bench a healthy key over a body this gateway built, and the
+		// retry would then run on a demoted key.
+		if !cacheRefusal(ue) {
+			// The request never reached the model, so the failure — credential
+			// rejection, rate limit, server wobble — is the key's to answer for.
+			penalizeKey(p, key, resp.StatusCode, time.Duration(retryAfter)*time.Second)
+		}
+		return nil, ue
 	}
 
 	// Idle-bounded pump: an upstream that answers 200 and then queues in

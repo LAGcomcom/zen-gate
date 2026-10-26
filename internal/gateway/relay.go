@@ -95,8 +95,9 @@ func (s *Server) relayError(w http.ResponseWriter, anthropic bool, uerr *lane.Up
 func (s *Server) recordRelay(ctx context.Context, p *store.Provider, upstream, agent string, ok bool, usage lane.Usage, ttftMs int64, finish string, err *lane.UpstreamError) {
 	rec := lane.CallRecord{
 		Model: p.ID + "/" + upstream, Agent: agent, Ok: ok && err == nil,
-		Input: usage.Input, Output: usage.Output, Reasoning: usage.Reasoning,
-		CacheRead: usage.CacheRead, TTFTMs: ttftMs, At: time.Now().UnixMilli(),
+		Input: usage.InputTotal(), Output: usage.Output, Reasoning: usage.Reasoning,
+		CacheRead: usage.CacheRead, CacheWrite: usage.CacheWrite,
+		TTFTMs: ttftMs, At: time.Now().UnixMilli(),
 		Trace: lane.TraceFrom(ctx),
 	}
 	if err != nil {
@@ -450,10 +451,16 @@ type providerIn struct {
 }
 
 // effectiveKeysIn folds the request's key fields into the store invariant:
-// one key in APIKey, two or more in APIKeys. nil APIKeys means "unchanged" —
-// the form is write-only and never round-trips keys.
+// one key in APIKey, two or more in APIKeys. Both fields empty means
+// "unchanged" — the form is write-only and never round-trips keys, so an edit
+// that leaves the boxes blank must keep the stored keys.
+//
+// The single-key case has to be read from apiKey as well as apiKeys: the form
+// sends ONE key in apiKey (only a multi-key paste fills apiKeys), so keying the
+// "unchanged" decision on apiKeys alone silently dropped every single-key save
+// — the provider was created with no credential at all.
 func (in *providerIn) effectiveKeysIn() ([]string, bool) {
-	if in.APIKeys == nil {
+	if in.APIKeys == nil && strings.TrimSpace(in.APIKey) == "" {
 		return nil, false
 	}
 	seen := map[string]bool{}

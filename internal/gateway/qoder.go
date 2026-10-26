@@ -59,6 +59,14 @@ type qoderStatus struct {
 	Pool        []qoderPoolAccount `json:"pool"`
 	IDELogin    bool               `json:"ideLogin"`
 	PoolDetail  string             `json:"poolDetail"`
+
+	// Definitive says whether this probe actually learned the channel's state,
+	// as opposed to failing to ask. A refused connection, a timeout or a body
+	// that does not parse tell us nothing about whether the login is alive, and
+	// the sync must not act on that: writing "disabled" over a transient blip
+	// pulls every Qoder model out of every picker until the next probe happens
+	// to succeed. Only an answer from the sidecar may change stored state.
+	Definitive bool `json:"-"`
 }
 
 // qoderPoolAccount is one sidecar pool row as the card needs it.
@@ -125,8 +133,16 @@ func probeQoderCached(force bool) qoderStatus {
 func probeQoder() qoderStatus {
 	st := qoderStatus{}
 	code, body, err := qoderGet("/health")
-	if err != nil || code != 200 {
+	if err != nil {
+		// Could not ask: a refused connection, a bind race, or a sidecar that is
+		// restarting. Nothing is known about the login, so the sync must not act.
 		st.Detail = "qodercn-gateway 未运行（127.0.0.1:8095）"
+		return st
+	}
+	if code != 200 {
+		// The port answered, so something is listening; it just is not a healthy
+		// sidecar. Still no statement about the credential — keep it indefinite.
+		st.Detail = fmt.Sprintf("127.0.0.1:8095 的响应异常（HTTP %d），可能不是 qodercn-gateway", code)
 		return st
 	}
 	st.Running = true
@@ -142,6 +158,10 @@ func probeQoder() qoderStatus {
 		return st
 	}
 	if code == 401 || strings.Contains(string(body), "TOKEN_EXPIRE") {
+		// The sidecar answered about the credential and the answer is "expired":
+		// this one IS definitive, and the provider should stop advertising models
+		// until the IDE refreshes the login.
+		st.Definitive = true
 		st.Detail = "token 已过期——打开 Qoder IDE 登录一次，网关每个请求都会重读凭据，下一个请求自动恢复"
 		return st
 	}
@@ -156,9 +176,16 @@ func probeQoder() qoderStatus {
 		} `json:"data"`
 	}
 	if json.Unmarshal(body, &listing) != nil {
+		// Something answered 200 but not with a listing we can read (a captive
+		// portal, a proxy error page, a half-written body). That is a read
+		// failure, not a credential verdict, so the stored state stays.
+		st.LoggedIn = false
 		st.Detail = "已登录但模型列表无法解析"
 		return st
 	}
+	// A parsable listing IS the sidecar answering about the credential, empty or
+	// not: from here on the sync may write. Everything below only refines it.
+	st.Definitive = true
 	for _, m := range listing.Data {
 		if id := strings.TrimSpace(m.ID); id != "" {
 			st.ModelIDs = append(st.ModelIDs, id)
@@ -341,10 +368,16 @@ func parseQoderCatalog(body []byte) []lane.ListingMeta {
 }
 
 // ensureQoderProvider syncs the managed provider to the observed state: a
-// logged-in sidecar means enabled with the fresh roster; anything else means
-// disabled with the models hidden from every picker. Models the user unchecked
-// on the 模型 page survive via the hidden set, which is separate from the
-// provider roster.
+// logged-in sidecar means enabled with the fresh roster; a definite "not logged
+// in" means disabled with the models hidden from every picker. Models the user
+// unchecked on the 模型 page survive via the hidden set, which is separate from
+// the provider roster.
+//
+// A probe that could not ask changes nothing. The sidecar is a loopback process
+// that can be mid-restart, and one refused connection used to be written down as
+// "disabled" — the provider then stayed disabled until some later probe happened
+// to succeed, which is why the card flipped between 已打开 and 已关闭 on a
+// 10-second repaint. Observed failure is not observed state.
 func (s *Server) ensureQoderProvider(st qoderStatus) bool {
 	cfg := s.Store.Config()
 	idx := -1
@@ -353,6 +386,11 @@ func (s *Server) ensureQoderProvider(st qoderStatus) bool {
 			idx = i
 			break
 		}
+	}
+	if !st.Definitive {
+		// Keep whatever is stored; report it as-is so the caller's "wired" flag
+		// still means "the provider entry exists and is on".
+		return idx != -1 && cfg.Providers[idx].Enabled
 	}
 	if !st.LoggedIn {
 		// Hide the models while the login is down; nothing to create.

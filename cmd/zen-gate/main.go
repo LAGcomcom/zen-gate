@@ -12,10 +12,10 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"syscall"
 	"path/filepath"
 	"runtime/debug"
 	"strings"
+	"syscall"
 	"time"
 
 	"zen-gate/internal/agents"
@@ -29,9 +29,51 @@ import (
 	"zen-gate/internal/store"
 	"zen-gate/internal/subs"
 	"zen-gate/internal/tray"
+	"zen-gate/internal/unblock"
 	"zen-gate/internal/update"
 	"zen-gate/internal/window"
 )
+
+// zoneNames maps the Attachment Manager zone ids to something readable in a log
+// line. Only 3 matters in practice; the rest are here so a diagnostic never has
+// to be a bare number.
+var zoneNames = map[string]string{
+	"0": "本地计算机",
+	"1": "内网",
+	"2": "受信任站点",
+	"3": "Internet",
+	"4": "受限制站点",
+}
+
+// unblockStartup clears the download zone stream from this executable's folder
+// and reports what it did.
+//
+// Deliberately silent when there is nothing to do: this runs on every launch,
+// and an already-clean install (the overwhelmingly common case) must not write
+// a line to the log each time.
+func unblockStartup(logger *logx.Logger) {
+	res := unblock.Near()
+	if !res.Any() {
+		return
+	}
+	for _, t := range res.Scanned {
+		if t.Err != nil {
+			logger.Debugf("解除锁定失败 %s: %v", filepath.Base(t.Path), t.Err)
+			continue
+		}
+		if !t.Cleared {
+			continue
+		}
+		zone := t.ZoneID
+		if name, ok := zoneNames[zone]; ok {
+			zone = name
+		}
+		if zone == "" {
+			zone = "未知来源"
+		}
+		logger.Infof("已解除下载锁定（%s）：%s ——下次双击不再弹 SmartScreen", zone, filepath.Base(t.Path))
+	}
+}
 
 // mainHwnd is the main window handle, captured at OnReady.
 var mainHwnd uintptr
@@ -90,6 +132,20 @@ func main() {
 	defer logger.Close()
 	logger.SetStdout(*noTray)
 
+	// Strip the "downloaded from the Internet" zone stream off the files that
+	// shipped next to this binary.
+	//
+	// A released build arrives via browser or GitHub, so Windows stamps
+	// ZoneId=3 on it. Explorer reads that stamp through the Attachment Manager
+	// *before* CreateProcess, which routes the next double-click through
+	// SmartScreen; an unsigned or self-signed binary has no cloud reputation
+	// there, so the user gets the "Windows 已保护你的电脑" wall even though the
+	// program itself is fine. The stamp is plain file metadata owned by the
+	// user, so once we are running we can delete it and stop the wall from
+	// coming back on the next launch. Failing to clear it is not fatal — the
+	// gateway must start regardless — so problems stay at debug level.
+	unblockStartup(logger)
+
 	window.SetAppUserModelID("zen-gate.gateway")
 
 	// Headless second instances (dev/test against a separate ZEN_GATE_HOME)
@@ -140,6 +196,9 @@ func main() {
 	// first-token sample ring that the latency strategy ranks by.
 	ln.SetSmartRouting(cfg.SmartRouting)
 	ln.SetStrategy(cfg.RoutingStrategy)
+	// WorkBuddy prompt-cache hint: off unless the user turned it on (live A/B
+	// first). Read at boot and again on every settings save.
+	ln.SetWorkBuddyCacheKey(cfg.WorkBuddyCacheKey)
 	ln.SetTTFTSource(func(model string) int64 {
 		avg, _ := st.TTFTStats(model)
 		return avg
@@ -172,6 +231,27 @@ func main() {
 	ln.SetCodeArtsAccount(cfg.CodeArts)
 	ln.SetCodeArtsPersist(func(a lane.CAAccount) {
 		st.Mutate(func(c *store.Config) { c.CodeArts = a })
+		_ = st.Save()
+	})
+	// ZCode / TRAE 账号渠道: these logins are minted by this gateway itself (a
+	// device-authorization flow and a browser callback respectively), so the
+	// pool here is the only copy — there is nothing to import and nothing to
+	// keep in sync with another app.
+	ln.SetZCodeAccounts(cfg.ZCodeAccounts)
+	ln.SetZCodePersist(func(a lane.ZCodeAccount) {
+		st.UpsertZCodeAccount(a)
+		_ = st.Save()
+	})
+	ln.SetTraeAccounts(cfg.TraeAccounts)
+	ln.SetTraePersist(func(a lane.TraeAccount) {
+		st.UpsertTraeAccount(a)
+		_ = st.Save()
+	})
+	// The six preset channels share one pool: each entry names its own channel,
+	// and the credential is whatever that vendor hands the user.
+	ln.SetExtAccounts(cfg.ExtAccounts)
+	ln.SetExtPersist(func(a lane.ExtAccount) {
+		st.UpsertExtAccount(a)
 		_ = st.Save()
 	})
 	// 订阅轮询:sidecar manager wires into the gateway, the lane rotator and

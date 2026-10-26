@@ -4,6 +4,7 @@ package window
 
 import (
 	"os"
+	"path/filepath"
 
 	"github.com/jchv/go-webview2"
 	"github.com/jchv/go-webview2/webviewloader"
@@ -40,18 +41,7 @@ func Run(o Options) {
 	// flashes a taskbar-less state.
 	startTray(o)
 
-	w := webview2.NewWithOptions(webview2.WebViewOptions{
-		Debug:     false,
-		DataPath:  o.DataPath,
-		AutoFocus: true,
-		WindowOptions: webview2.WindowOptions{
-			Title:  o.Title,
-			Width:  uint(o.Width),
-			Height: uint(o.Height),
-			Center: true,
-			IconId: 2,
-		},
-	})
+	w := newWebviewSafely(o)
 	if w == nil {
 		// The runtime answered the pre-flight but environment creation still
 		// failed; the library keeps the HRESULT to itself, so the reason stays
@@ -90,6 +80,94 @@ func Run(o Options) {
 	w.SetTitle(o.Title)
 	w.Navigate(o.URL)
 	w.Run()
+}
+
+// newWebviewSafely creates the embedded window, converting two failure modes
+// that used to end the process into a nil return the caller degrades on.
+//
+//  1. A data path the WebView2 environment cannot use. On builds where the
+//     profile directory exists but is not writable by this token (Roaming
+//     profiles under AppData on some managed machines), environment creation
+//     invokes the controller callback with a nil controller.
+//  2. That nil controller. go-webview2 dereferences it unconditionally in
+//     CreateCoreWebView2ControllerCompleted, so the failure surfaces as a nil
+//     pointer dereference on the UI thread — no window, no tray, exit code 2.
+//
+// The fallback path is a throwaway profile under %TEMP%; the dashboard only
+// serves the loopback UI, so a fresh profile each launch costs nothing beyond
+// the cookie jar.
+func newWebviewSafely(o Options) (w webview2.WebView) {
+	path, ok := usableDataPath(o.DataPath)
+	if !ok {
+		dlogf("webview 数据目录不可写，改用临时 profile: %s", o.DataPath)
+	}
+	w, reason := createWebview(path, o)
+	if w != nil {
+		return w
+	}
+	if path == o.DataPath {
+		// Retry once on a temp profile: the caller's directory may be fine at
+		// stat time and poison the environment anyway.
+		if alt, altOK := usableDataPath(""); altOK && alt != path {
+			dlogf("webview 创建失败（%s），改用临时 profile 重试: %s", reason, alt)
+			if w, _ := createWebview(alt, o); w != nil {
+				return w
+			}
+		}
+	}
+	dlogf("webview 创建失败: %s", reason)
+	return nil
+}
+
+// createWebview runs NewWithOptions with panic containment. It returns a nil
+// WebView for both the documented nil return and a recovered panic, which is
+// the signal the caller already branches on.
+func createWebview(dataPath string, o Options) (v webview2.WebView, reason string) {
+	defer func() {
+		if p := recover(); p != nil {
+			reason = "内嵌窗口初始化异常（WebView2 控制器为空）"
+			dlogf("webview panic: %v", p)
+			v = nil
+		}
+	}()
+	v = webview2.NewWithOptions(webview2.WebViewOptions{
+		Debug:     false,
+		DataPath:  dataPath,
+		AutoFocus: true,
+		WindowOptions: webview2.WindowOptions{
+			Title:  o.Title,
+			Width:  uint(o.Width),
+			Height: uint(o.Height),
+			Center: true,
+			IconId: 2,
+		},
+	})
+	if v == nil {
+		return nil, "WebView2 环境创建失败"
+	}
+	return v, ""
+}
+
+// usableDataPath reports whether a WebView2 profile directory can actually be
+// written by this process, creating it first when needed. An empty path is the
+// caller asking for the %TEMP% fallback. A write probe is the only reliable
+// test: ACLs can grant the directory while denying child creation, and the
+// WebView2 environment needs both.
+func usableDataPath(dir string) (string, bool) {
+	if dir == "" {
+		dir = filepath.Join(os.TempDir(), "zen-gate-webview")
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return dir, false
+	}
+	probe, err := os.CreateTemp(dir, ".write-probe-*")
+	if err != nil {
+		return dir, false
+	}
+	name := probe.Name()
+	_ = probe.Close()
+	_ = os.Remove(name)
+	return dir, true
 }
 
 // bindWindowControls exposes the custom title bar's actions to JS. The HTML

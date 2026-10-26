@@ -780,7 +780,8 @@ func mapUsage(frame map[string]any) *Usage {
 	if m, ok := frame["usage"].(map[string]any); ok {
 		changed = num(&u.Input, m, "prompt_tokens", "input_tokens") || changed
 		changed = num(&u.Output, m, "completion_tokens", "output_tokens") || changed
-		changed = num(&u.CacheRead, m, "cache_read_input_tokens", "cached_tokens", "cache_read_tokens") || changed
+		changed = num(&u.CacheRead, m, "cache_read_input_tokens", "cached_tokens",
+			"cache_read_tokens", "prompt_cache_hit_tokens") || changed
 		changed = num(&u.CacheWrite, m, "cache_creation_input_tokens", "cache_write_tokens") || changed
 		changed = num(&u.TotalTokens, m, "total_tokens") || changed
 		// OpenAI nests cached_tokens under prompt_tokens_details; read it
@@ -797,23 +798,68 @@ func mapUsage(frame map[string]any) *Usage {
 				changed = true
 			}
 		}
+		// Which family spoke decides whether Input already contains the cache
+		// hits. prompt_tokens (OpenAI, and every OpenAI-compatible vendor) is
+		// the inclusive spelling; a bare input_tokens with a separate
+		// cache_read_input_tokens is Anthropic's exclusive one.
+		u.CacheInclusive = usageInputIsInclusive(m)
 	}
 	// Anthropic message_start carries usage at the top of the message object.
+	//
+	// A frame carrying BOTH the flat usage and message.usage is not something
+	// either protocol does — but a forwarding proxy can produce it, and `num`
+	// ACCUMULATES (that is what makes Merge work). Adding the same input_tokens
+	// twice would double the prompt on every such frame, so each field here is
+	// read only when the flat block left it empty.
 	if msg, ok := frame["message"].(map[string]any); ok {
 		if mm, ok := msg["usage"].(map[string]any); ok {
-			changed = num(&u.Input, mm, "input_tokens") || changed
-			changed = num(&u.Output, mm, "output_tokens") || changed
-			changed = num(&u.CacheRead, mm, "cache_read_input_tokens") || changed
-			changed = num(&u.CacheWrite, mm, "cache_creation_input_tokens") || changed
+			if u.Input == 0 {
+				changed = num(&u.Input, mm, "input_tokens") || changed
+			}
+			if u.Output == 0 {
+				changed = num(&u.Output, mm, "output_tokens") || changed
+			}
+			if u.CacheRead == 0 {
+				changed = num(&u.CacheRead, mm, "cache_read_input_tokens") || changed
+			}
+			if u.CacheWrite == 0 {
+				changed = num(&u.CacheWrite, mm, "cache_creation_input_tokens") || changed
+			}
+			u.CacheInclusive = u.CacheInclusive || usageInputIsInclusive(mm)
 		}
 	}
 	if !changed {
 		return nil
 	}
 	if u.TotalTokens == 0 {
-		u.TotalTokens = u.Input + u.Output
+		// Count the whole prompt, not just the fresh part: an Anthropic
+		// frame omits total_tokens, and input_tokens there excludes the cache
+		// hits, so adding Input alone understated the turn by the hit size.
+		u.TotalTokens = u.InputTotal() + u.Output
 	}
 	return u
+}
+
+// usageInputIsInclusive reports whether this usage block spells its input the
+// OpenAI way — that is, whether Input ALREADY contains whatever cached count
+// sits beside it.
+//
+// prompt_tokens is the tell: its presence means the number is the whole prompt,
+// and Anthropic's input_tokens is the exclusive spelling (its own accounting
+// adds cache_read_input_tokens on top when a total is wanted).
+//
+// The DeepSeek / Tencent family needs the second rule: it reports the hit as
+// prompt_cache_hit_tokens with a matching prompt_cache_miss_tokens, and some
+// gateways in that family omit prompt_tokens entirely. Treating such a frame as
+// exclusive would make InputTotal() = 0 + hit and InputFresh() = 0 — a turn
+// that "sent nothing" while reporting 7808 cached tokens.
+func usageInputIsInclusive(m map[string]any) bool {
+	if _, has := m["prompt_tokens"]; has {
+		return true
+	}
+	_, hit := m["prompt_cache_hit_tokens"]
+	_, miss := m["prompt_cache_miss_tokens"]
+	return hit || miss
 }
 
 func num(dst *int, m map[string]any, keys ...string) bool {
@@ -854,6 +900,10 @@ func (u *Usage) Merge(o *Usage) {
 	u.CacheRead += o.CacheRead
 	u.CacheWrite += o.CacheWrite
 	u.TotalTokens += o.TotalTokens
+	// Summing keeps each side's own convention, so the sum is inclusive only
+	// when both halves were: one exclusive half added to an inclusive one
+	// describes neither shape.
+	u.CacheInclusive = u.CacheInclusive && o.CacheInclusive
 }
 
 // MergeMax folds one usage snapshot into another keeping the larger value per
@@ -885,6 +935,11 @@ func (u *Usage) MergeMax(o *Usage) {
 	if o.TotalTokens > u.TotalTokens {
 		u.TotalTokens = o.TotalTokens
 	}
+	// One frame of a stream sometimes carries the usage block without the
+	// spelling that identifies its family (a terminal-only frame, or one that
+	// omits prompt_tokens on a later snapshot). Let that empty side inherit the
+	// family instead of erasing what the first frame proved.
+	u.CacheInclusive = u.CacheInclusive || o.CacheInclusive
 }
 
 func jsonString(v any) string {

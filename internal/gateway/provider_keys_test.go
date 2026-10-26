@@ -53,8 +53,57 @@ func TestProviderSaveNormalizesKeyCount(t *testing.T) {
 	}
 }
 
-func TestProviderStateMasksBalancedKeys(t *testing.T) {
+// The dashboard's single-key box posts apiKey only — apiKeys is filled only
+// when the user pastes several keys into the multi-key textarea. Deciding
+// "unchanged" from apiKeys alone therefore dropped every single-key save: the
+// provider was created with no credential, and the card read 「Key 未设置」for a
+// key the user had just typed. Both create and update must store it.
+func TestProviderSaveStoresSingleAPIKeyField(t *testing.T) {
 	up := declaredListing()
+	defer up.Close()
+	s := newTestServer(t, up)
+	ts := httptest.NewServer(s.mux)
+	defer ts.Close()
+
+	// Create with apiKey only (no apiKeys field at all).
+	j := postAdmin(t, ts.URL+"/admin/api/providers", `{"name":"NIM","baseUrl":"`+up.URL+`/v1",
+		"apiKey":"sk-single-1","protocol":"openai","enabled":true,"models":["m1"]}`)
+	if !j["ok"].(bool) {
+		t.Fatalf("create failed: %v", j)
+	}
+	p := s.Store.Config().Providers[0]
+	if p.APIKey != "sk-single-1" || len(p.APIKeys) != 0 {
+		t.Fatalf("create stored %q / %v, want the single key in apiKey", p.APIKey, p.APIKeys)
+	}
+
+	// Update the key through the same field.
+	j = postAdmin(t, ts.URL+"/admin/api/providers", `{"id":"`+p.ID+`","name":"NIM","baseUrl":"`+up.URL+`/v1",
+		"apiKey":"sk-single-2","protocol":"openai","enabled":true,"models":["m1"]}`)
+	if !j["ok"].(bool) {
+		t.Fatalf("update failed: %v", j)
+	}
+	p = s.Store.Config().Providers[0]
+	if p.APIKey != "sk-single-2" {
+		t.Fatalf("update stored %q, want the new single key", p.APIKey)
+	}
+
+	// An edit that leaves both key fields blank keeps the stored key — this is
+	// the write-only contract the form depends on.
+	j = postAdmin(t, ts.URL+"/admin/api/providers", `{"id":"`+p.ID+`","name":"NIM2","baseUrl":"`+up.URL+`/v1",
+		"protocol":"openai","enabled":true,"models":["m1"]}`)
+	if !j["ok"].(bool) {
+		t.Fatalf("blank-key update failed: %v", j)
+	}
+	p = s.Store.Config().Providers[0]
+	if p.APIKey != "sk-single-2" {
+		t.Fatalf("a blank key box cleared the stored key: %q", p.APIKey)
+	}
+	if p.Name != "NIM2" {
+		t.Fatalf("the same update failed to change the name: %q", p.Name)
+	}
+}
+
+func TestProviderStateMasksBalancedKeys(t *testing.T) {	up := declaredListing()
 	defer up.Close()
 	s := newTestServer(t, up)
 	ts := httptest.NewServer(s.mux)
