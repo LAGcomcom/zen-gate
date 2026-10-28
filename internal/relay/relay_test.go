@@ -337,6 +337,52 @@ func TestProbeModelVerdicts(t *testing.T) {
 	}
 }
 
+// Some OpenAI-compatible gateways ignore "stream": true and answer with one
+// plain JSON object. The probe must read that as a successful answer instead
+// of "上游流在数据帧之前结束" for a model that is perfectly usable.
+func TestProbeModelPlainJSONAnswer(t *testing.T) {
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("content-type", "application/json")
+		fmt.Fprint(w, `{"id":"x","choices":[{"message":{"role":"assistant","content":"pong"}}]}`)
+	}))
+	defer up.Close()
+	p := &store.Provider{ID: "t", BaseURL: up.URL, APIKey: "sk", Protocol: store.ProtocolOpenAI}
+	r := ProbeModel(context.Background(), p, "m1")
+	if r.State != lane.StateAvailable || r.TTFTMs <= 0 {
+		t.Fatalf("non-SSE probe = %+v", r)
+	}
+}
+
+// A 2xx body carrying a JSON error object (no "data:" frame) must classify
+// through the upstream error, not silently report a dead model or hang.
+func TestProbeModelNonStreamedJSONError(t *testing.T) {
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("content-type", "application/json")
+		fmt.Fprint(w, `{"error":{"message":"rate limit exceeded"}}`)
+	}))
+	defer up.Close()
+	p := &store.Provider{ID: "t", BaseURL: up.URL, APIKey: "sk", Protocol: store.ProtocolOpenAI}
+	r := ProbeModel(context.Background(), p, "m1")
+	if r.State != lane.StateThrottled {
+		t.Fatalf("non-SSE JSON error probe = %+v", r)
+	}
+}
+
+// A front-proxy HTML page at 200 with no data frame is still judged (the
+// classifier names the hop) rather than left as "ended before a data frame".
+func TestProbeModelNonStreamedHTMLPage(t *testing.T) {
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("content-type", "text/html")
+		fmt.Fprint(w, `<html><body>502 Bad Gateway</body></html>`)
+	}))
+	defer up.Close()
+	p := &store.Provider{ID: "t", BaseURL: up.URL, APIKey: "sk", Protocol: store.ProtocolOpenAI}
+	r := ProbeModel(context.Background(), p, "m1")
+	if r.State != lane.StateUnknown {
+		t.Fatalf("non-SSE HTML probe = %+v", r)
+	}
+}
+
 func TestCompleteOpenAIWire(t *testing.T) {
 	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var body map[string]any

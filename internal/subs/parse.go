@@ -251,6 +251,43 @@ func parseUserinfoURI(raw, proto string) (Node, error) {
 	}, nil
 }
 
+// utlsFingerprints is sing-box's accepted uTLS list (uTLSFingerprint in its
+// option schema). Anything outside it makes `sing-box check` refuse the whole
+// config, which is why tlsBlock validates before forwarding: an airport that
+// writes fp=unsafe (some clients accept arbitrary HelloChrome/Xray aliases)
+// used to take every node down with it (#124).
+var utlsFingerprints = map[string]bool{
+	"chrome":       true,
+	"chrome_auto":  true, // Xray alias for the same hello
+	"firefox":      true,
+	"firefox_auto": true,
+	"edge":         true,
+	"edge_auto":    true,
+	"safari":       true,
+	"safari_auto":  true,
+	"360":          true,
+	"360_auto":     true,
+	"qq":           true,
+	"qq_auto":      true,
+	"ios":          true,
+	"ios_auto":     true,
+	"android":      true,
+	"android_auto": true,
+	"random":       true,
+	"randomized":   true,
+}
+
+// normalizeUTLSFingerprint maps a subscription's fp value onto one sing-box
+// accepts, or "" when it must not be forwarded at all. The "*_auto" spellings
+// some clients emit are the same hello, so they normalize to the plain name.
+func normalizeUTLSFingerprint(fp string) string {
+	v := strings.ToLower(strings.TrimSpace(fp))
+	if !utlsFingerprints[v] {
+		return ""
+	}
+	return strings.TrimSuffix(v, "_auto")
+}
+
 // tlsBlock builds the sing-box TLS object from query params. defaultTLS is
 // true for the always-TLS protocols (trojan/hy2/tuic) — security=none turns it
 // off explicitly; for vless/vmess security=tls|reality turns it on.
@@ -277,9 +314,21 @@ func tlsBlock(q url.Values, defaultTLS bool) map[string]any {
 		tb["alpn"] = strings.Split(alpn, ",")
 	}
 	if fp := q.Get("fp"); fp != "" {
-		tb["utls"] = map[string]any{"enabled": true, "fingerprint": fp}
+		// An airport writes its links for whichever client it expects, and those
+		// clients accept a wider uTLS list than sing-box does. sing-box refuses
+		// the ENTIRE generated config over one bad value —
+		// "initialize outbound[N]: unknown uTLS fingerprint: unsafe" — so a single
+		// node silently takes the whole subscription down at check time (#124).
+		// Unknown values are therefore not forwarded: reality needs uTLS, so it
+		// falls back to chrome; everything else keeps Go's own fingerprint.
+		if known := normalizeUTLSFingerprint(fp); known != "" {
+			tb["utls"] = map[string]any{"enabled": true, "fingerprint": known}
+		}
 	}
 	if security == "reality" {
+		if _, has := tb["utls"]; !has {
+			tb["utls"] = map[string]any{"enabled": true, "fingerprint": "chrome"}
+		}
 		tb["reality"] = map[string]any{
 			"enabled":    true,
 			"public_key": q.Get("pbk"),

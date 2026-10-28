@@ -757,12 +757,14 @@ func (l *Lane) ProbeRound(ctx context.Context, manual bool) {
 			break
 		}
 		if m.Channel == ChannelKilo {
+			// 在列即判定可用，但必须每轮重盖时间戳：FreshState 按 At 判过期
+			// (stateTTL=10m)，而轮次间隔默认 15m。旧代码只在"没有条目/State 为空"
+			// 时写入，于是第一轮之后时间戳永远停在那一刻——10 分钟后整批 Kilo
+			// 行一起变成"未探测"、变灰、从总览「可用」里消失，而池子其实一直在
+			// 正常服务 (#123)。
 			l.mu.Lock()
-			prev, had := l.availability[m.ID]
-			if !had || prev.State == "" {
-				l.availability[m.ID] = ProbeResult{Model: m.ID, State: StateAvailable,
-					At: time.Now().UnixMilli(), Detail: "在列（免费池名单即判定）"}
-			}
+			l.availability[m.ID] = ProbeResult{Model: m.ID, State: StateAvailable,
+				At: time.Now().UnixMilli(), Detail: "在列（免费池名单即判定）"}
 			allThrottled = false
 			l.mu.Unlock()
 			continue

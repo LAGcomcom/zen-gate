@@ -586,35 +586,71 @@ func ProbeModel(ctx context.Context, p *store.Provider, model string) (res lane.
 	}
 
 	br := bufio.NewReaderSize(resp.Body, 16*1024)
+	// Not every OpenAI-compatible upstream honours "stream": true. A gateway
+	// that answers with one plain JSON object (or a JSON error body) never
+	// sends a "data:" line, so the old loop read to EOF and reported
+	// "上游流在数据帧之前结束" for a model that had answered fine. Lines that
+	// carry no data frame are therefore accumulated and judged once the body
+	// ends: an error object classifies as before, any other JSON counts as an
+	// answer, and only an empty body stays "ended before a data frame".
+	var plain strings.Builder
+	sawFrame := false
 	for {
 		line, rerr := br.ReadString('\n')
-		if rerr != nil && line == "" {
-			res.Detail = "上游流在数据帧之前结束"
-			break
-		}
-		trimmed := strings.TrimRight(line, "\r\n")
-		if !strings.HasPrefix(trimmed, "data:") {
-			continue
-		}
-		if res.TTFTMs == 0 {
-			res.TTFTMs = elapsedMS(start)
-			lane.EmitProbeStep(ctx, lane.PhaseFirstByte, lane.StepOK, res.TTFTMs, "")
-		}
-		frameText := strings.TrimSpace(strings.TrimPrefix(trimmed, "data:"))
-		if frameText == "" || frameText == "[DONE]" {
-			break
-		}
-		var frame map[string]any
-		if json.Unmarshal([]byte(frameText), &frame) == nil {
-			if e, has := frame["error"]; has {
-				ue := lane.ClassifyFailure(0, jsonString(e), 0)
-				res.State, res.Detail = probeStateFromError(ue)
-				res.LatencyMs = elapsedMS(start)
-				return res
+		if line != "" {
+			if res.TTFTMs == 0 {
+				res.TTFTMs = elapsedMS(start)
+				lane.EmitProbeStep(ctx, lane.PhaseFirstByte, lane.StepOK, res.TTFTMs, "")
 			}
 		}
-		res.State = lane.StateAvailable
-		break
+		trimmed := strings.TrimRight(line, "\r\n")
+		if strings.HasPrefix(trimmed, "data:") {
+			sawFrame = true
+			frameText := strings.TrimSpace(strings.TrimPrefix(trimmed, "data:"))
+			if frameText == "" || frameText == "[DONE]" {
+				break
+			}
+			var frame map[string]any
+			if json.Unmarshal([]byte(frameText), &frame) == nil {
+				if e, has := frame["error"]; has {
+					ue := lane.ClassifyFailure(0, jsonString(e), 0)
+					res.State, res.Detail = probeStateFromError(ue)
+					res.LatencyMs = elapsedMS(start)
+					return res
+				}
+			}
+			res.State = lane.StateAvailable
+			break
+		}
+		if trimmed != "" {
+			plain.WriteString(trimmed)
+			plain.WriteString("\n")
+		}
+		if rerr != nil {
+			if !sawFrame {
+				if body := strings.TrimSpace(plain.String()); body != "" {
+					res.LatencyMs = elapsedMS(start)
+					var frame map[string]any
+					if json.Unmarshal([]byte(body), &frame) == nil {
+						if e, has := frame["error"]; has {
+							ue := lane.ClassifyFailure(0, jsonString(e), 0)
+							res.State, res.Detail = probeStateFromError(ue)
+							return res
+						}
+						res.State = lane.StateAvailable
+						res.Detail = "非流式应答（上游未按 SSE 回帧）"
+						return res
+					}
+					// An HTML page or another non-JSON body: let the
+					// classifier speak — a front-proxy page names its hop.
+					ue := lane.ClassifyFailure(0, body, 0)
+					res.State, res.Detail = probeStateFromError(ue)
+					return res
+				}
+				res.Detail = "上游流在数据帧之前结束"
+			}
+			break
+		}
 	}
 	res.LatencyMs = elapsedMS(start)
 	if res.TTFTMs == 0 {

@@ -111,6 +111,13 @@ type SubsController interface {
 	SetPath(path string) error
 	Healthy() int
 	Status() map[string]any
+	// AsRotator exposes the manager as the lane's per-request egress rotator.
+	// The settings page can switch 上游代理 to 订阅轮询 at runtime, and without
+	// this the mode only ever worked when the process happened to boot that
+	// way: lane.SetProxy("rotate") installs a transport whose dialer asks the
+	// Rotator, and a nil Rotator degrades every dial to a plain one — so the
+	// pool looked enabled while every request left from one IP (#121).
+	AsRotator() lane.Rotator
 }
 
 // SetSubs wires the sidecar manager.
