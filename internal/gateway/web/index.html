@@ -4182,6 +4182,12 @@ function logQuery(){
 }
 
 /* ---- 设置 ---- */
+/* settingsDirty remembers which 设置 fields the user has changed but not yet
+   saved, so the 10-second state refresh cannot put the server's value back over
+   a fresh pick (the dropdown jumping back to 跟随环境变量, #121). */
+const settingsDirty = new Set();
+function clearSettingsDirty(){ settingsDirty.clear(); }
+
 function renderSettings(s){
   const el = $("#page-settings");
   if(!el.dataset.rendered){
@@ -4312,13 +4318,24 @@ function renderSettings(s){
         <div class="muted" style="font-size:11.5px;margin-top:6px">每次启动和每 6 小时自动检查（走更新源 URL）；检测到新版本时总览页出现「一键更新」。</div>
       </div>
       `;
+    const proxyURLInput = el.querySelector("#set-proxy-url");
+    if(proxyURLInput){
+      proxyURLInput.addEventListener("input", ()=>settingsDirty.add("proxyUrl"));
+    }
     el.querySelector("#save").onclick = async ()=>{
       const j = await api("/settings", { proxyMode: el.querySelector("#set-proxy").dataset.value,
       proxyURL: el.querySelector("#set-proxy-url").value.trim(),
       defaultEffort: document.getElementById("set-effort").dataset.value,
       defaultMaxTokens: parseInt($("#set-max").value)||undefined,
       probeIntervalMinutes: parseInt($("#set-probe").value)||undefined });
-      if(j) toast("已保存（代理设置热生效）");
+      if(j){
+        // The gateway explains why a saved 订阅轮询 is not dialing yet (no
+        // sidecar / no healthy node); swallowing that note is how the mode
+        // looked applied while the egress never moved (#121).
+        toast(j.note ? j.note : "已保存（代理设置热生效）");
+        clearSettingsDirty();
+        refresh();
+      }
     };
     el.querySelector("#tg-tray").onclick = async e => {
       const on = !e.target.dataset.on;
@@ -4455,13 +4472,25 @@ function renderSettings(s){
   }
   fill(el.querySelector("#set-max"), s.settings.defaultMaxTokens);
   fill(el.querySelector("#set-probe"), s.settings.probeIntervalMinutes);
+  /* Un-saved picks survive the 10s redraw. The dropdowns' own value is only
+     replaced by the server's when the user has not touched them: without this
+     the state poll put 「跟随环境变量」 back over a freshly chosen 「订阅轮询」,
+     and the save then persisted the value the user never picked (#121). */
+  const pick = (sel, dirtyKey) => {
+    const node = el.querySelector(sel);
+    if(!node) return null;
+    const remembered = settingsDirty.has(dirtyKey) ? node.dataset.value : null;
+    return remembered || null;
+  };
   makeDropdown(el.querySelector("#set-effort"),
     [["light","Light · 精简 (2K)"],["balanced","Balanced · 均衡 (8K)"],["deep","Deep · 深思 (模型上限)"]],
-    s.settings.defaultEffort || "balanced", null);
+    pick("#set-effort", "defaultEffort") || s.settings.defaultEffort || "balanced",
+    ()=>settingsDirty.add("defaultEffort"));
   makeDropdown(el.querySelector("#set-proxy"),
     [["system","跟随系统代理"],["env","跟随环境变量"],["direct","直连"],["custom","自定义 URL"],["rotate","订阅轮询 (sing-box)"]],
-    s.settings.proxyMode || "env", null);
-  fill(el.querySelector("#set-proxy-url"), s.settings.proxyURL);
+    pick("#set-proxy", "proxyMode") || s.settings.proxyMode || "env",
+    ()=>settingsDirty.add("proxyMode"));
+  if(!settingsDirty.has("proxyUrl")) fill(el.querySelector("#set-proxy-url"), s.settings.proxyURL);
   // --- 订阅轮询状态同步（每次刷新重绘节点表） ---
   const sub = s.subscriptions || {items:[], singbox:{}};
   const ta = el.querySelector("#subs-urls");

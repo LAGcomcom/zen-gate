@@ -542,6 +542,11 @@ func (m *Manager) Status() map[string]any {
 	}
 }
 
+// AsRotator exposes the manager to the gateway so a runtime switch to
+// 订阅轮询 installs a real dialer instead of installing the mode with no
+// rotator behind it (#121).
+func (m *Manager) AsRotator() lane.Rotator { return m }
+
 // Healthy implements lane.Rotator.
 func (m *Manager) Healthy() int {
 	m.mu.Lock()

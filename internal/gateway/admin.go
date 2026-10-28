@@ -593,6 +593,10 @@ func (s *Server) adminSettings(w http.ResponseWriter, r *http.Request) {
 	// writes revert each other's fields — toggling notifications in one tab
 	// rolled back a proxy saved in another (issue #32: "GUI 改完过一阵变回默认").
 	dirty := map[string]bool{}
+	// proxyNote carries why 订阅轮询 is saved but not yet dialing (no sidecar /
+	// no healthy node): a save must not report success for an egress that is
+	// not actually rotating.
+	proxyNote := ""
 	if in.Port != nil && *in.Port > 0 && *in.Port < 65536 && *in.Port != cfg.Port {
 		cfg.Port = *in.Port
 		changed = true
@@ -649,7 +653,9 @@ func (s *Server) adminSettings(w http.ResponseWriter, r *http.Request) {
 					cfg.ProxyURL = strings.TrimSpace(*in.ProxyURL)
 					dirty["proxyUrl"] = true
 				}
-				lane.SetProxy(cfg.ProxyMode, cfg.ProxyURL)
+				if note := s.installProxyMode(cfg.ProxyMode, cfg.ProxyURL); note != "" {
+					proxyNote = note
+				}
 				changed = true
 				dirty["proxyMode"] = true
 			}
@@ -662,7 +668,9 @@ func (s *Server) adminSettings(w http.ResponseWriter, r *http.Request) {
 	}
 	if in.ProxyURL != nil && in.ProxyMode == nil {
 		cfg.ProxyURL = strings.TrimSpace(*in.ProxyURL)
-		lane.SetProxy(cfg.ProxyMode, cfg.ProxyURL)
+		if note := s.installProxyMode(cfg.ProxyMode, cfg.ProxyURL); note != "" {
+			proxyNote = note
+		}
 		changed = true
 		dirty["proxyUrl"] = true
 	}
@@ -821,7 +829,11 @@ func (s *Server) adminSettings(w http.ResponseWriter, r *http.Request) {
 		s.logCat(logx.CatLifecycle, "info", "监听地址切换为 %s:%d", s.bindHost(), cfg.Port)
 		return
 	}
-	writeJSON(w, 200, map[string]any{"ok": true, "changed": changed})
+	out := map[string]any{"ok": true, "changed": changed}
+	if proxyNote != "" {
+		out["note"] = proxyNote
+	}
+	writeJSON(w, 200, out)
 }
 
 // commitSettings publishes exactly the fields this request validated (dirty).
@@ -1222,6 +1234,34 @@ func (s *Server) adminProxyTest(w http.ResponseWriter, r *http.Request) {
 
 // --- 订阅轮询 (sing-box sidecar) ---------------------------------------------
 
+// installProxyMode applies a proxy mode at runtime: it swaps the lane's
+// transport AND, for 订阅轮询, installs the rotator that transport dials
+// through. Setting the mode alone was a silent no-op for rotation — the
+// transport asks the Rotator for an exit, a nil Rotator degrades every dial to
+// a plain one, so the panel said 订阅轮询 while every request still left from
+// the machine's own IP, and the next settings write put env back (#121).
+// The mode is always accepted (the user may be switching first and filling in
+// the subscription next); when rotation cannot actually dial yet, the returned
+// note says so instead of the panel silently claiming a working pool.
+func (s *Server) installProxyMode(mode, url string) (note string) {
+	if mode == "rotate" {
+		lane.SetProxy("rotate", "")
+		switch {
+		case s.subs == nil:
+			lane.SetRotator(nil)
+			return "订阅轮询已设为默认模式，但 sing-box 侧车尚未就绪：刷新订阅后自动接管出口"
+		case s.subs.Healthy() == 0:
+			lane.SetRotator(nil)
+			return "订阅轮询已设为默认模式，但当前没有可用节点：刷新订阅后自动接管出口"
+		}
+		lane.SetRotator(s.subs.AsRotator())
+		return ""
+	}
+	lane.SetRotator(nil)
+	lane.SetProxy(mode, url)
+	return ""
+}
+
 // adminSubsSave replaces the subscription list and the feature switch in one
 // call; enabling runs a full refresh cycle (fetch → parse → sidecar restart).
 func (s *Server) adminSubsSave(w http.ResponseWriter, r *http.Request) {
@@ -1277,11 +1317,21 @@ func (s *Server) adminSubsSave(w http.ResponseWriter, r *http.Request) {
 			if s.logger != nil {
 				s.logger.Errorf("订阅刷新失败: %v", err)
 			}
+			// A failed refresh must not move the egress: the previous mode
+			// keeps serving, which is what the panel's "刷新失败不动配置"
+			// promise means (#121).
 			return
 		}
+		// Enabling the pool IS choosing it as the way out: persist rotate and
+		// install the rotator in the same step. Saving the switch without the
+		// mode left cfg.ProxyMode at env, so the next settings write put env
+		// back and the pool stopped rotating (#121).
+		s.Store.Mutate(func(cfg *store.Config) { cfg.ProxyMode = "rotate" })
+		_ = s.Store.Save()
 		lane.SetProxy("rotate", "")
+		lane.SetRotator(s.subs.AsRotator())
 	}()
-	writeJSON(w, 200, map[string]any{"ok": true})
+	writeJSON(w, 200, map[string]any{"ok": true, "proxyMode": "rotate"})
 }
 
 // adminSubsRefresh re-runs the fetch/parse/restart/probe cycle on demand.
@@ -1297,6 +1347,15 @@ func (s *Server) adminSubsRefresh(w http.ResponseWriter, r *http.Request) {
 			if s.logger != nil {
 				s.logger.Errorf("订阅刷新失败: %v", err)
 			}
+			return
+		}
+		// A refresh that finally produced healthy nodes is exactly the moment
+		// the saved rotate mode starts working: the settings save could only
+		// note "侧车未就绪", so take over the egress here instead of leaving
+		// the mode installed with no rotator behind it (#121).
+		if s.Store.Config().ProxyMode == "rotate" && s.subs.Healthy() > 0 {
+			lane.SetProxy("rotate", "")
+			lane.SetRotator(s.subs.AsRotator())
 		}
 	}()
 	writeJSON(w, 200, map[string]any{"ok": true})

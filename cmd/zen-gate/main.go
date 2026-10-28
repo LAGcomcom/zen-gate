@@ -259,13 +259,29 @@ func main() {
 	mgr := subs.NewManager(st, logger.Infof)
 	if cfg.SubsEnabled && len(cfg.Subscriptions) > 0 {
 		go func() {
-			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
-			defer cancel()
-			if err := mgr.Apply(ctx); err != nil {
-				logger.Errorf("订阅轮询启动失败: %v", err)
-				return
+			// A failed first pull used to be final: every later request then
+			// dialed straight out (rotate with no rotator degrades to a plain
+			// dial) and nothing said so. Retry once a minute until it works,
+			// the subscription is switched off, or the process exits (#121).
+			for attempt := 1; ; attempt++ {
+				pullCtx, pullCancel := context.WithTimeout(ctx, 3*time.Minute)
+				err := mgr.Apply(pullCtx)
+				pullCancel()
+				if err == nil {
+					break
+				}
+				logger.Errorf("订阅轮询启动失败(第 %d 次): %v", attempt, err)
+				if !st.Config().SubsEnabled {
+					return
+				}
+				select {
+				case <-time.After(time.Minute):
+				case <-ctx.Done():
+					return
+				}
 			}
-			if cfg.ProxyMode == "rotate" {
+			if st.Config().ProxyMode == "rotate" {
+				lane.SetProxy("rotate", "")
 				lane.SetRotator(mgr)
 				logger.Infof("订阅轮询已启动(%d 个健康节点)", mgr.Healthy())
 			}
