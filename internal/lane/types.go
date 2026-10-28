@@ -270,6 +270,11 @@ type UpstreamError struct {
 	// Unavailable marks a gateway refusal that names the model specifically.
 	Unavailable bool
 	RetryAfter  int // seconds, when the gateway supplied one
+	// HTTPStatus is the response status the classification came from, 0 when
+	// the failure was read out of a stream frame or a transport fault. Callers
+	// that must tell "the model refused this request" (400/422) apart from
+	// "nothing by that name exists" (404) read it.
+	HTTPStatus int
 	// Exhausted marks that the lane had no further failover candidate left —
 	// the gateway may offer this failure to user-added providers instead.
 	Exhausted bool
