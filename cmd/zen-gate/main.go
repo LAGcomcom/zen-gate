@@ -171,7 +171,14 @@ func main() {
 		logger.Infof("已按推荐列表精简 %d 个自定义供应商的模型（旧版保存了整个目录）", n)
 	}
 	update.CleanupBackup() // remove the previous binary left by 一键更新
-	logger.Infof("zen-gate %s 启动 (port %d, proxy %s)", gateway.Version, cfg.Port, cfg.ProxyMode)
+	// Which binary this is matters in a container: a GUI build has no tray to
+	// fail without, but a headless one silently has no window at all, so the log
+	// line names the flavour instead of leaving an operator to guess.
+	if headlessBuild {
+		logger.Infof("zen-gate %s 启动 (无头构建, port %d, proxy %s)", gateway.Version, cfg.Port, cfg.ProxyMode)
+	} else {
+		logger.Infof("zen-gate %s 启动 (port %d, proxy %s)", gateway.Version, cfg.Port, cfg.ProxyMode)
+	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

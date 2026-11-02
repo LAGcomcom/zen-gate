@@ -1,4 +1,4 @@
-//go:build linux
+//go:build linux && !headless
 
 // Package window's Linux host: there is no dedicated native webview in this
 // port, so the dashboard is served by the local gateway and opened in the
