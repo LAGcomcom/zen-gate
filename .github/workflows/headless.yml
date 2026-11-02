@@ -1,0 +1,49 @@
+name: headless
+
+# A GUI-free build has to be provable, not just claimed: the tags strip the
+# tray/WebView packages, so a plain CGO_ENABLED=0 cross-compile that succeeds
+# is the evidence that the binary can ship in a scratch image (issue #79).
+# The GUI build stays in release.yml; this workflow only guards the headless
+# matrix and the tag wiring.
+on:
+  push:
+    branches: [master]
+    paths:
+      - "cmd/zen-gate/**"
+      - "internal/window/**"
+      - "internal/tray/**"
+      - "Dockerfile"
+      - ".github/workflows/headless.yml"
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  cross-compile:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+
+      - name: Vet the headless tags
+        run: go vet -tags headless ./internal/window/ ./internal/tray/ ./cmd/zen-gate/
+
+      - name: Cross-compile the headless matrix
+        run: |
+          set -eu
+          for target in linux/amd64 linux/arm64 darwin/arm64 darwin/amd64 windows/amd64; do
+            goos="${target%%/*}"
+            goarch="${target##*/}"
+            out="dist/zen-gate-${goos}-${goarch}"
+            [ "$goos" = "windows" ] && out="${out}.exe"
+            echo "::group::$target"
+            CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" \
+              go build -tags headless -trimpath -o "$out" ./cmd/zen-gate
+            echo "::endgroup::"
+          done
+          ls -la dist
+
+      - name: Build the container image
+        run: docker build -t zen-gate:ci .

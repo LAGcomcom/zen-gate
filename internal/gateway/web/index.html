@@ -1692,7 +1692,7 @@ function renderModels(s){
   const el = $("#page-models");
   // 任何输入没变就不重画：任务运行时的 1s 轮询只动数字的话，整页 innerHTML
   // 重建会闪、还会丢滚动位置。
-  const sig = JSON.stringify([mf, mview, [...foldedChans], s.probingModel, s.channels,
+  const sig = JSON.stringify([mf, mview, [...foldedChans], s.probingModel, s.probeDone, s.probeTotal, s.channels,
     s.settings.defaultModel, s.models.map(m => [m.id, m.state, m.hidden, m.ttftMs, m.ttftMedMs,
       m.quotaUsed, m.quotaEstimate, m.throttledAt, m.task && m.task.status, m.detail])]);
   if(el.dataset.sig === sig) return;
@@ -1785,8 +1785,9 @@ function renderModels(s){
       <span class="spacer"></span>
       <button class="ghost" id="hide-dead" title="把探测为不可用 / 地区受限的模型从 Agent 选择器隐藏；探到可用会自动解除">隐藏全部不可用</button>
       <button class="ghost" id="show-all" title="恢复全部隐藏的模型${hiddenCount?`（当前 ${hiddenCount} 个）`:""}">恢复显示</button>
-      <button class="ghost" id="reprobe">重新探测</button>
+      <button class="ghost" id="reprobe">${s.probeTotal ? "探测中…" : "重新探测"}</button>
       <span class="muted" id="m-count" style="font-size:11.5px"></span>
+      ${s.probeTotal ? `<span class="muted" id="m-progress" style="font-size:11.5px">已探测 <b>${s.probeDone}/${s.probeTotal}</b>${s.probingModel?` · 正在测 <code class="k">${esc(s.probingModel)}</code>`:""}</span>` : ""}
       ${active?`<span class="mchip on" id="m-clear" style="cursor:pointer">✕ 清除</span>`:""}
       <span class="vtoggle" title="卡片看细节，列表快扫全量">
         <button data-view="grid" class="${mview==="grid"?"on":""}">卡片</button>
@@ -1841,6 +1842,7 @@ function renderModels(s){
         <td style="text-align:right;white-space:nowrap">
           <button class="starbtn ${s.settings.defaultModel===m.id?"on":""}" data-primary="${esc(m.id)}" title="设为主用（默认模型）">★</button>
           <button class="vpill ${m.hidden?"":"on"}" data-vis="${esc(m.id)}">${m.hidden?"＋选用":"✓ 已选用"}</button>
+          <button class="ghost" data-copy="${esc(m.id)}" title="复制模型 id">复制 id</button>
           <button class="ghost mtest" data-m="${esc(m.id)}">测试</button>
         </td>
       </tr>`;
@@ -1945,6 +1947,7 @@ function renderModels(s){
           <div class="mfoot">
             <button class="vpill ${m.hidden?"":"on"}" data-vis="${esc(m.id)}" title="出现在 Agent 的模型选择器里；关掉只是不展示，点名调用仍可用">${m.hidden?"＋ 选用":"✓ 已选用"}</button>
             <span>
+              <button class="ghost mcopy" data-copy="${esc(m.id)}" title="复制模型 id —— 面板探不到但手动调用能用的模型，直接把它粘进其他 Agent">复制 id</button>
               <button class="ghost mtest" data-m="${esc(m.id)}" ${probeBusy?"disabled":""} title="${m.custom?"向该供应商发一个最小请求，实测可用性与首字延迟":"单独探测这个模型的可用性"}">${probeBusy?"测试中…":"测试"}</button>
               ${m.custom?`<button class="ghost capstest" data-m="${esc(m.id)}" ${capsBusy?"disabled":""} title="用你的 Key 发最小图像 / 音频 / PDF 请求，实测该模型真正支持的输入模态（结果最优先）">${capsBusy?"实测中…":"能力实测"}</button>`:""}
             </span>
@@ -2225,7 +2228,10 @@ function pollQoderLogin(state){
 }
 
 function bindQoderCard(){
-  const card = $("#qoder-card");
+  // 账号卡已搬进渠道弹窗（.chan-pane[data-chan="qoder"]），旧的卡片 id 早就不在了，
+  // 拿它当守卫会让整块永远不会绑定（按钮渲染出来但点了没反应，issue #126）。
+  // 守卫改为看真实存在的账号池容器：它随弹窗常驻，绑定只需一次。
+  const card = $("#qoder-pool");
   if(!card || card.dataset.bound) return;
   card.dataset.bound = "1";
   const lg = $("#qoder-login");
@@ -2295,7 +2301,7 @@ async function renderCodeartsCard(){
     (st.canRefresh ? '' : '<br><span style="color:#c88">缺少可续期凭据，重新授权一次</span>');
 }
 function bindCodeartsCard(){
-  const card = $("#ca-card");
+  const card = $("#ca-body");
   if(!card || card.dataset.bound) return;
   card.dataset.bound = "1";
   $("#ca-login").onclick = async () => {
@@ -3480,7 +3486,7 @@ function wbRenderAccounts(st){
 }
 
 function bindWorkBuddyCard(){
-  const card = $("#wb-card");
+  const card = $("#wb-accounts");
   if(!card || card.dataset.bound) return;
   card.dataset.bound = "1";
   // 登录版本是个二选一：分段控件一眼能看见两个选项，比收起来的下拉少一次点击。
@@ -4276,8 +4282,8 @@ function renderSettings(s){
         <h3>订阅轮询 <span class="muted" style="font-size:11px">sing-box 侧车 · 每请求换出口 IP</span></h3>
         <div class="row" style="align-items:center; gap:10px; flex-wrap:wrap">
           <span id="subs-status"></span>
-          <label class="dim" style="display:inline-flex; align-items:center; gap:6px">sing-box.exe 路径
-            <input type="text" id="subs-path" placeholder="留空用自动下载的官方版" style="background:var(--panel-2);border:1px solid var(--hairline);color:var(--ink);border-radius:6px;padding:6px 9px;width:250px;font-family:var(--mono)">
+          <label class="dim" style="display:inline-flex; align-items:center; gap:6px">sing-box 路径
+            <input type="text" id="subs-path" placeholder="留空用自动下载的官方版（macOS 也可填本机已装的可执行文件）" style="background:var(--panel-2);border:1px solid var(--hairline);color:var(--ink);border-radius:6px;padding:6px 9px;width:250px;font-family:var(--mono)">
           </label>
           <button class="ghost" id="btn-subs-path">保存路径</button>
           <button class="ghost" id="btn-subs-download">下载 sing-box</button>
