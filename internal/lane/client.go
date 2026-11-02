@@ -182,6 +182,13 @@ type Lane struct {
 	nextProbeAfter  time.Time
 	quotaWallActive bool
 	probingModel    string
+	// probeDone / probeTotal are this round's progress: a whole round is many
+	// upstream calls that can take minutes, and until they existed the panel
+	// could only spin a button — the user could not tell "running" from
+	// "stuck" (issue #117). Counting starts after the round's model list is
+	// fixed, so the denominator does not drift mid-round.
+	probeDone  int
+	probeTotal int
 
 	// OnCall receives one record per physical upstream request.
 	OnCall func(CallRecord)
@@ -406,6 +413,15 @@ func (l *Lane) ProbingModel() string {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
 	return l.probingModel
+}
+
+// ProbeProgress returns (done, total) for the running round. total is 0 when
+// no round is running. The dashboard prints "已探测 12/35 · 正在测 xxx" from
+// these two numbers plus ProbingModel.
+func (l *Lane) ProbeProgress() (int, int) {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	return l.probeDone, l.probeTotal
 }
 
 // Snapshot returns the current catalog + availability + egress.
@@ -741,8 +757,23 @@ func (l *Lane) ProbeRound(ctx context.Context, manual bool) {
 			cat = append(cat, m)
 		}
 	}
+	// The denominator is fixed here, together with the list it counts: Kilo
+	// rows resolve without an upstream call, so they count as done immediately
+	// rather than inflating a total the round will never reach.
+	l.probeDone, l.probeTotal = 0, 0
+	for _, m := range cat {
+		if m.Channel != ChannelKilo {
+			l.probeTotal++
+		}
+	}
 	l.mu.Unlock()
-	defer l.probing.Set(false)
+	defer func() {
+		l.probing.Set(false)
+		l.mu.Lock()
+		l.probeDone, l.probeTotal = 0, 0
+		l.mu.Unlock()
+		l.notify()
+	}()
 
 	// 逐个探测：一次只测一个模型，测完一个立刻生效并广播——
 	// 用户看到的是模型一个接一个亮起来，而不是全轮结束后一起翻转。
@@ -776,6 +807,9 @@ func (l *Lane) ProbeRound(ctx context.Context, manual bool) {
 
 		r := recheckNegative(ctx, m, l.probeModelFor(ctx, m), l.probeModelFor)
 		probed++
+		l.mu.Lock()
+		l.probeDone++
+		l.mu.Unlock()
 
 		effective, _ := l.applyVerdict(m.ID, r)
 		if effective.State != StateThrottled {

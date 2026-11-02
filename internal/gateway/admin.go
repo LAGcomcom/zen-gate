@@ -258,6 +258,7 @@ func adminAllowed(w http.ResponseWriter, r *http.Request, mutating bool) bool {
 func (s *Server) adminState(w http.ResponseWriter) {
 	cfg := s.Store.Config()
 	cat, av, egress := s.Lane.Snapshot()
+	probeDone, probeTotal := s.currentProbeProgress()
 	type modelRow struct {
 		ID            string             `json:"id"`
 		Name          string             `json:"name"`
@@ -492,6 +493,8 @@ func (s *Server) adminState(w http.ResponseWriter) {
 		"stats":               map[string]any{"days": days, "recent": recent},
 		"settings":            settings,
 		"probingModel":        s.currentProbingModel(),
+		"probeDone":           probeDone,
+		"probeTotal":          probeTotal,
 		"providers":           s.providerViews(),
 		"channels":            s.Store.ChannelViews(),
 		"modelPrefs":          s.Store.Config().ModelPrefs,
@@ -1955,6 +1958,13 @@ func (s *Server) currentProbingModel() string {
 		return v
 	}
 	return s.Lane.ProbingModel()
+}
+
+// currentProbeProgress reports the running free-lane round as (done, total).
+// A custom-provider bulk round has its own per-card tasks and no single
+// counter, so it reports 0/0 here.
+func (s *Server) currentProbeProgress() (int, int) {
+	return s.Lane.ProbeProgress()
 }
 
 // setCustomProbe records one custom model's probe verdict for /state.

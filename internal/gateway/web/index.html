@@ -1692,7 +1692,7 @@ function renderModels(s){
   const el = $("#page-models");
   // 任何输入没变就不重画：任务运行时的 1s 轮询只动数字的话，整页 innerHTML
   // 重建会闪、还会丢滚动位置。
-  const sig = JSON.stringify([mf, mview, [...foldedChans], s.probingModel, s.channels,
+  const sig = JSON.stringify([mf, mview, [...foldedChans], s.probingModel, s.probeDone, s.probeTotal, s.channels,
     s.settings.defaultModel, s.models.map(m => [m.id, m.state, m.hidden, m.ttftMs, m.ttftMedMs,
       m.quotaUsed, m.quotaEstimate, m.throttledAt, m.task && m.task.status, m.detail])]);
   if(el.dataset.sig === sig) return;
@@ -1785,8 +1785,9 @@ function renderModels(s){
       <span class="spacer"></span>
       <button class="ghost" id="hide-dead" title="把探测为不可用 / 地区受限的模型从 Agent 选择器隐藏；探到可用会自动解除">隐藏全部不可用</button>
       <button class="ghost" id="show-all" title="恢复全部隐藏的模型${hiddenCount?`（当前 ${hiddenCount} 个）`:""}">恢复显示</button>
-      <button class="ghost" id="reprobe">重新探测</button>
+      <button class="ghost" id="reprobe">${s.probeTotal ? "探测中…" : "重新探测"}</button>
       <span class="muted" id="m-count" style="font-size:11.5px"></span>
+      ${s.probeTotal ? `<span class="muted" id="m-progress" style="font-size:11.5px">已探测 <b>${s.probeDone}/${s.probeTotal}</b>${s.probingModel?` · 正在测 <code class="k">${esc(s.probingModel)}</code>`:""}</span>` : ""}
       ${active?`<span class="mchip on" id="m-clear" style="cursor:pointer">✕ 清除</span>`:""}
       <span class="vtoggle" title="卡片看细节，列表快扫全量">
         <button data-view="grid" class="${mview==="grid"?"on":""}">卡片</button>
