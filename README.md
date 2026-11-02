@@ -156,6 +156,32 @@ Actions 里的 `build-macos` job 负责每次构建验证，产物作为 workflo
 macOS 的发行物是整个 `.app`，覆盖包内二进制会破坏签名，所以总览页只给「发布页 →
 」链接，由用户自行下载替换。
 
+## Docker 与无头部署
+
+仓库带了 `headless` 构建标签：窗口与托盘整块编译出去，二进制不再链 GTK /
+WebView2 / appindicator，因此 `CGO_ENABLED=0` 也能交叉编译，容器与 NAS 里直接
+跑得起来（issue #79）。
+
+```bash
+docker compose up -d        # 或 docker build -t zen-gate .
+```
+
+* 端口 `8787`，数据落在 `/data` 卷（`ZEN_GATE_HOME`）；`ZEN_GATE_HEADLESS=1`
+  等价于 `-no-tray`
+* 镜像自带 `HEALTHCHECK`，打的是 `/healthz`（`/health` 的 supervisor 拼法）
+* 面板仍**只**监听 loopback：容器里用 SSH 隧道或同机反代访问，端口映射出去的是
+  `/v1` 这层 OpenAI / Anthropic 端点，不是管理页
+
+不用 Docker、只要一个无界面二进制：
+
+```bash
+CGO_ENABLED=0 go build -tags headless -trimpath -o zen-gate ./cmd/zen-gate
+```
+
+`.github/workflows/headless.yml` 会在每次 PR 上跑这套交叉编译矩阵
+（linux amd64/arm64、darwin amd64/arm64、windows amd64）并 `docker build` 一次，
+GUI 构建仍留在 `release.yml`。
+
 ## 平台差异
 
 三个平台的实现按文件后缀拆分（`*_windows.go` / `*_darwin.go` / `*_linux.go`），
