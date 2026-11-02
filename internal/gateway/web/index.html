@@ -1842,6 +1842,7 @@ function renderModels(s){
         <td style="text-align:right;white-space:nowrap">
           <button class="starbtn ${s.settings.defaultModel===m.id?"on":""}" data-primary="${esc(m.id)}" title="设为主用（默认模型）">★</button>
           <button class="vpill ${m.hidden?"":"on"}" data-vis="${esc(m.id)}">${m.hidden?"＋选用":"✓ 已选用"}</button>
+          <button class="ghost" data-copy="${esc(m.id)}" title="复制模型 id">复制 id</button>
           <button class="ghost mtest" data-m="${esc(m.id)}">测试</button>
         </td>
       </tr>`;
@@ -1946,6 +1947,7 @@ function renderModels(s){
           <div class="mfoot">
             <button class="vpill ${m.hidden?"":"on"}" data-vis="${esc(m.id)}" title="出现在 Agent 的模型选择器里；关掉只是不展示，点名调用仍可用">${m.hidden?"＋ 选用":"✓ 已选用"}</button>
             <span>
+              <button class="ghost mcopy" data-copy="${esc(m.id)}" title="复制模型 id —— 面板探不到但手动调用能用的模型，直接把它粘进其他 Agent">复制 id</button>
               <button class="ghost mtest" data-m="${esc(m.id)}" ${probeBusy?"disabled":""} title="${m.custom?"向该供应商发一个最小请求，实测可用性与首字延迟":"单独探测这个模型的可用性"}">${probeBusy?"测试中…":"测试"}</button>
               ${m.custom?`<button class="ghost capstest" data-m="${esc(m.id)}" ${capsBusy?"disabled":""} title="用你的 Key 发最小图像 / 音频 / PDF 请求，实测该模型真正支持的输入模态（结果最优先）">${capsBusy?"实测中…":"能力实测"}</button>`:""}
             </span>
