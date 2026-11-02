@@ -1,8 +1,6 @@
 package subs
 
 import (
-	"archive/zip"
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -112,14 +110,18 @@ func NewManager(st *store.Store, log func(string, ...any)) *Manager {
 }
 
 // BinaryPath resolves the sing-box executable: the user-configured path wins,
-// then the auto-downloaded copy under <home>/bin/sing-box.exe.
+// then the auto-downloaded copy under <home>/bin/. The file name follows the
+// platform (only Windows carries .exe), so a macOS install manages itself
+// instead of reporting "not installed" over a name the runtime never creates
+// (issue #127).
 func (m *Manager) BinaryPath() string {
 	if p := strings.TrimSpace(m.st.Config().SingBoxPath); p != "" {
 		if _, err := os.Stat(p); err == nil {
 			return p
 		}
 	}
-	p := filepath.Join(store.Home(), "bin", "sing-box.exe")
+	goos, _ := singBoxPlatform()
+	p := filepath.Join(store.Home(), "bin", singBoxExeName(goos))
 	if _, err := os.Stat(p); err == nil {
 		return p
 	}
@@ -153,16 +155,20 @@ func (m *Manager) Download(ctx context.Context) (string, error) {
 	if err := json.Unmarshal(data, &rel); err != nil {
 		return "", err
 	}
-	assetURL := ""
+	// Which asset this build wants is decided by its own platform; asking for
+	// windows-amd64.zip on macOS was the whole reason the install never worked
+	// there (issue #127).
+	goos, goarch := singBoxPlatform()
+	want := singBoxAssetSuffix(goos, goarch)
+	assetURL, assetName := "", ""
 	for _, a := range rel.Assets {
-		n := strings.ToLower(a.Name)
-		if strings.Contains(n, "windows-amd64") && strings.HasSuffix(n, ".zip") {
-			assetURL = a.URL
+		if strings.HasSuffix(strings.ToLower(a.Name), want) {
+			assetURL, assetName = a.URL, a.Name
 			break
 		}
 	}
 	if assetURL == "" {
-		return "", fmt.Errorf("发布 %s 中没有 windows-amd64.zip 资产", rel.TagName)
+		return "", fmt.Errorf("发布 %s 中没有 %s 资产", rel.TagName, want)
 	}
 	m.log("下载 sing-box %s …", rel.TagName)
 	req, err = http.NewRequestWithContext(ctx, http.MethodGet, assetURL, nil)
@@ -181,42 +187,16 @@ func (m *Manager) Download(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	zr, err := zip.NewReader(bytes.NewReader(zbuf), int64(len(zbuf)))
-	if err != nil {
-		return "", fmt.Errorf("解压 sing-box 失败: %w", err)
-	}
 	binDir := filepath.Join(store.Home(), "bin")
 	if err := os.MkdirAll(binDir, 0o700); err != nil {
 		return "", err
 	}
-	out := filepath.Join(binDir, "sing-box.exe")
-	for _, f := range zr.File {
-		base := strings.ToLower(filepath.Base(f.Name))
-		if base != "sing-box.exe" {
-			continue
-		}
-		src, err := f.Open()
-		if err != nil {
-			return "", err
-		}
-		dst, err := os.OpenFile(out+".tmp", os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o755)
-		if err != nil {
-			src.Close()
-			return "", err
-		}
-		_, cerr := io.Copy(dst, src)
-		src.Close()
-		dst.Close()
-		if cerr != nil {
-			return "", cerr
-		}
-		if err := os.Rename(out+".tmp", out); err != nil {
-			return "", err
-		}
-		m.log("sing-box 已就绪: %s", out)
-		return out, nil
+	out := filepath.Join(binDir, singBoxExeName(goos))
+	if err := extractSingBoxBinary(zbuf, assetName, singBoxExeName(goos), out); err != nil {
+		return "", err
 	}
-	return "", fmt.Errorf("压缩包里没有 sing-box.exe")
+	m.log("sing-box 已就绪: %s", out)
+	return out, nil
 }
 
 // Refresh is the full cycle: fetch + parse every enabled subscription, write
