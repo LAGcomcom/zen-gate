@@ -2225,7 +2225,10 @@ function pollQoderLogin(state){
 }
 
 function bindQoderCard(){
-  const card = $("#qoder-card");
+  // 账号卡已搬进渠道弹窗（.chan-pane[data-chan="qoder"]），旧的卡片 id 早就不在了，
+  // 拿它当守卫会让整块永远不会绑定（按钮渲染出来但点了没反应，issue #126）。
+  // 守卫改为看真实存在的账号池容器：它随弹窗常驻，绑定只需一次。
+  const card = $("#qoder-pool");
   if(!card || card.dataset.bound) return;
   card.dataset.bound = "1";
   const lg = $("#qoder-login");
@@ -2295,7 +2298,7 @@ async function renderCodeartsCard(){
     (st.canRefresh ? '' : '<br><span style="color:#c88">缺少可续期凭据，重新授权一次</span>');
 }
 function bindCodeartsCard(){
-  const card = $("#ca-card");
+  const card = $("#ca-body");
   if(!card || card.dataset.bound) return;
   card.dataset.bound = "1";
   $("#ca-login").onclick = async () => {
@@ -3480,7 +3483,7 @@ function wbRenderAccounts(st){
 }
 
 function bindWorkBuddyCard(){
-  const card = $("#wb-card");
+  const card = $("#wb-accounts");
   if(!card || card.dataset.bound) return;
   card.dataset.bound = "1";
   // 登录版本是个二选一：分段控件一眼能看见两个选项，比收起来的下拉少一次点击。
