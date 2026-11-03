@@ -73,29 +73,62 @@ func (m *Manager) probeNodes(ctx context.Context, nodes []NodeHealth) {
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
-			eg, lat := m.probeOnce(ctx, h.Port)
+			eg, lat, reachable := m.probeOnce(ctx, h.Port)
 			m.mu.Lock()
 			defer m.mu.Unlock()
-			if cur := m.health[h.ID]; cur != nil {
-				cur.LastCheck = time.Now().UnixMilli()
-				if eg.IP == "" {
-					cur.Alive = false
-					cur.LatencyMs = 0
-					cur.IP, cur.Country = "", ""
-				} else {
-					m.reviveNode(cur, eg, lat)
-				}
+			cur := m.health[h.ID]
+			if cur == nil {
+				return
 			}
+			cur.LastCheck = time.Now().UnixMilli()
+			m.applyProbeVerdict(cur, eg, lat, reachable)
 		}(h)
 	}
 	wg.Wait()
+}
+
+// applyProbeVerdict folds one probe round into a node's health. Split out of
+// probeNodes so the three-way decision is testable without a live socks port.
+// Caller holds m.mu.
+func (m *Manager) applyProbeVerdict(cur *NodeHealth, eg lane.Egress, lat int, reachable bool) {
+	switch {
+	case !reachable:
+		// The node itself could not carry a connection: that is death, and it
+		// is the only case that clears the known exit.
+		cur.Alive = false
+		cur.LatencyMs = 0
+		cur.EgressStale = false
+		cur.IP, cur.Country = "", ""
+	case eg.IP == "":
+		// The node carried a connection but no echo service answered. Unknown
+		// exit, not a dead node: keep it in rotation with its last known
+		// identity rather than emptying the pool.
+		cur.Alive = true
+		cur.CoolUntil = 0
+		cur.EgressStale = true
+	default:
+		m.reviveNode(cur, eg, lat)
+	}
 }
 
 // reviveNode marks a node alive after a successful probe and clears every
 // failure counter, so it rejoins rotation with a clean slate. Caller holds
 // m.mu.
 func (m *Manager) reviveNode(cur *NodeHealth, eg lane.Egress, lat int) {
+	// An exit that changed IP is a different exit as far as an upstream is
+	// concerned: everything it learned about the previous address (session
+	// affinity, rate-limit state, risk score) does not carry over. Two things
+	// must follow from that — the drift is recorded, and any conversation
+	// still pinned here is unpinned so it re-picks instead of silently
+	// continuing from another country.
+	if cur.IP != "" && eg.IP != "" && cur.IP != eg.IP {
+		cur.DriftFrom = cur.IP
+		cur.DriftAt = time.Now().UnixMilli()
+		cur.Drifts++
+		m.dropSticky(cur.ID)
+	}
 	cur.Alive = true
+	cur.EgressStale = false
 	cur.IP, cur.Country = eg.IP, eg.Country
 	cur.LatencyMs = lat
 	cur.CoolUntil = 0 // a live egress is proof enough to rejoin rotation now
@@ -108,9 +141,33 @@ func (m *Manager) reviveNode(cur *NodeHealth, eg lane.Egress, lat int) {
 	delete(m.nodeFailAt, cur.ID)
 }
 
+// dropSticky unpins every conversation bound to one node. Caller holds m.mu.
+func (m *Manager) dropSticky(nodeID string) {
+	for seed, id := range m.sticky {
+		if id == nodeID {
+			delete(m.sticky, seed)
+			delete(m.stickyAt, seed)
+		}
+	}
+}
+
+// reachTimeout bounds the "can this node carry a TCP connection at all" check.
+const reachTimeout = 8 * time.Second
+
+// reachHost is the neutral address used to tell a dead node from an
+// unreachable echo service. It is deliberately NOT one of the echo hosts: if
+// it were, an echo outage would look exactly like a dead node, which is the
+// confusion this check exists to remove.
+const reachHost = "1.1.1.1:443"
+
 // probeOnce dials out through one node's socks inbound, re-trying the whole
 // round-trip before it reports an empty egress.
-func (m *Manager) probeOnce(ctx context.Context, port int) (lane.Egress, int) {
+//
+// reachable is the part that must not be lost: false means the node could not
+// carry a connection at all, true with an empty Egress means the node carried
+// one but no echo service answered. Callers treat the first as death and the
+// second as unknown — an echo outage must not empty the pool.
+func (m *Manager) probeOnce(ctx context.Context, port int) (lane.Egress, int, bool) {
 	var eg lane.Egress
 	var lat int
 	for try := 0; try < probeNodeRoundtrips; try++ {
@@ -121,16 +178,38 @@ func (m *Manager) probeOnce(ctx context.Context, port int) (lane.Egress, int) {
 		lat = int(time.Since(start).Milliseconds())
 		cancel()
 		if eg.IP != "" {
-			return eg, lat
+			return eg, lat, true
 		}
 		if ctx.Err() != nil {
-			return eg, lat
+			return eg, lat, false
 		}
 		if try+1 < probeNodeRoundtrips {
 			time.Sleep(500 * time.Millisecond)
 		}
 	}
-	return eg, lat
+	rctx, cancel := context.WithTimeout(ctx, reachTimeout)
+	defer cancel()
+	return eg, lat, dialThroughNode(rctx, port)
+}
+
+// dialThroughNode asks the node to CONNECT to a neutral public address. A
+// working node answers; a dead one does not. No payload is sent — the TCP
+// handshake through the socks proxy is the whole question.
+func dialThroughNode(ctx context.Context, port int) bool {
+	d, err := proxy.SOCKS5("tcp", fmt.Sprintf("127.0.0.1:%d", port), nil, proxy.Direct)
+	if err != nil {
+		return false
+	}
+	cd, ok := d.(proxy.ContextDialer)
+	if !ok {
+		return false
+	}
+	conn, err := cd.DialContext(ctx, "tcp", reachHost)
+	if err != nil {
+		return false
+	}
+	_ = conn.Close()
+	return true
 }
 
 // nodeClient builds an HTTP client whose egress is one node's local socks

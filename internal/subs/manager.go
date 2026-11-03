@@ -88,6 +88,23 @@ type NodeHealth struct {
 	// request is proof, so this is what clears a cooldown / a ban.
 	LastOKMs  int64 `json:"lastOkMs,omitempty"`
 	CoolUntil int64 `json:"-"`
+
+	// EgressStale marks "the node carries traffic but this round could not
+	// read its exit". It is deliberately NOT the same as dead: every IP-echo
+	// service can be unreachable from one region while the nodes behind them
+	// are perfectly healthy, and collapsing that into "dead" empties the whole
+	// pool and silently degrades to direct dial. IP/Country keep their last
+	// known values while this is set.
+	EgressStale bool `json:"egressStale,omitempty"`
+	// DriftFrom / DriftAt record the previous exit IP when a node came back
+	// on a different one. An airport re-balances its own egress all the time;
+	// a session pinned to that node then continues from another country,
+	// which is exactly the signal a provider scores as account takeover.
+	DriftFrom string `json:"driftFrom,omitempty"`
+	DriftAt   int64  `json:"driftAt,omitempty"`
+	// Drifts counts how many times this node changed exit IP since the
+	// process started. A node that drifts every round is not one exit.
+	Drifts int `json:"drifts,omitempty"`
 }
 
 // NewManager builds the manager; logging goes through log (may be nil).
