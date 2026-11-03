@@ -160,6 +160,10 @@ type Config struct {
 	SingBoxPath     string         `json:"singBoxPath,omitempty"`
 	FailoverEnabled bool           `json:"failoverEnabled"`
 	FailoverMax     int            `json:"failoverMax"`
+	// ModelFallbackChain is the user-authored ordered list of model ids that
+	// catch a turn refused on the requested model (quota/region/free-tier/
+	// server error). Issue #25. Empty = the lane falls back to its own pick.
+	ModelFallbackChain []string `json:"modelFallbackChain,omitempty"`
 	// SmartRouting is the multimodal-routing master switch: on = failover
 	// candidates are filtered by the request's modalities and ordered by the
 	// routing strategy; off = the exact pre-routing behaviour (catalog order,

@@ -281,6 +281,10 @@ func (s *Server) adminState(w http.ResponseWriter) {
 		QuotaEstimate int   `json:"quotaEstimate,omitempty"`
 		ThrottledAt   int64 `json:"throttledAt,omitempty"`
 		RecoverEta    int64 `json:"recoverEta,omitempty"`
+		// QuotaResetAt is the unix second a throttled model's free window
+		// reopens (parsed from the 429 reset clock). Separates a quota wall
+		// from a connectivity fault in the UI.
+		QuotaResetAt int64 `json:"quotaResetAt,omitempty"`
 		// Median of the persisted first-token ring (survives restarts).
 		TTFTMedMs int64 `json:"ttftMedMs,omitempty"`
 		TTFTCount int   `json:"ttftCount,omitempty"`
@@ -355,7 +359,7 @@ func (s *Server) adminState(w http.ResponseWriter) {
 			continue
 		}
 		row := modelRow{
-			ID: m.ID, Name: m.Name, Blurb: m.Blurb, State: stateOrDefault(p), Detail: p.Detail,
+			ID: m.ID, Name: m.Name, Blurb: m.Blurb, State: stateOrDefault(p), Detail: p.Detail, QuotaResetAt: p.QuotaResetAt,
 			TTFTMs: p.TTFTMs, LatencyMs: p.LatencyMs,
 			Vision: m.Vision, AudioInput: m.AudioInput, FileInput: m.FileInput,
 			Reasoning:     m.Reasoning,
@@ -474,6 +478,7 @@ func (s *Server) adminState(w http.ResponseWriter) {
 		"autostart":               s.autostartState(),
 		"failoverEnabled":         cfg.FailoverEnabled,
 		"failoverMax":             cfg.FailoverMax,
+		"modelFallbackChain":      cfg.ModelFallbackChain,
 		"smartRouting":            cfg.SmartRouting,
 		"routingStrategy":         cfg.RoutingStrategy,
 		"laneFallbackToProviders": cfg.LaneFallbackToProviders,
@@ -505,6 +510,7 @@ func (s *Server) adminState(w http.ResponseWriter) {
 		"channels":            s.Store.ChannelViews(),
 		"modelPrefs":          s.Store.Config().ModelPrefs,
 		"providerPresets":     relay.Presets,
+		"smallwebPresets":     relay.SmallwebPresets(),
 		"subscriptions":       s.subsState(),
 		"announcements":       activeAnnouncements,
 		"announcementArchive": endedAnnouncements,
@@ -572,6 +578,7 @@ func (s *Server) adminSettings(w http.ResponseWriter, r *http.Request) {
 		StatsServerURL          *string          `json:"statsServerUrl"`
 		FailoverEnabled         *bool            `json:"failoverEnabled"`
 		FailoverMax             *int             `json:"failoverMax"`
+		ModelFallbackChain      []string        `json:"modelFallbackChain"`
 		SmartRouting            *bool            `json:"smartRouting"`
 		RoutingStrategy         *string          `json:"routingStrategy"`
 		LaneFallbackToProviders *bool            `json:"laneFallbackToProviders"`
@@ -715,6 +722,12 @@ func (s *Server) adminSettings(w http.ResponseWriter, r *http.Request) {
 		s.Lane.SetFailover(cfg.FailoverEnabled, cfg.FailoverMax)
 		changed = true
 		dirty["failoverMax"] = true
+	}
+	if in.ModelFallbackChain != nil {
+		cfg.ModelFallbackChain = in.ModelFallbackChain
+		s.Lane.SetModelFallbackChain(cfg.ModelFallbackChain)
+		changed = true
+		dirty["modelFallbackChain"] = true
 	}
 	if in.SmartRouting != nil {
 		cfg.SmartRouting = *in.SmartRouting
@@ -898,6 +911,9 @@ func (s *Server) commitSettings(next *store.Config, dirty map[string]bool) {
 		}
 		if dirty["failoverMax"] {
 			c.FailoverMax = next.FailoverMax
+		}
+		if dirty["modelFallbackChain"] {
+			c.ModelFallbackChain = next.ModelFallbackChain
 		}
 		if dirty["smartRouting"] {
 			c.SmartRouting = next.SmartRouting

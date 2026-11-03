@@ -199,6 +199,7 @@ func main() {
 	}
 	ln.SetExposeRegion(cfg.ExposeRegion)
 	ln.SetFailover(cfg.FailoverEnabled, cfg.FailoverMax)
+	ln.SetModelFallbackChain(cfg.ModelFallbackChain)
 	// Smart routing: master switch + failover ordering strategy + the runtime
 	// first-token sample ring that the latency strategy ranks by.
 	ln.SetSmartRouting(cfg.SmartRouting)
@@ -274,18 +275,35 @@ func main() {
 				pullCtx, pullCancel := context.WithTimeout(ctx, 3*time.Minute)
 				err := mgr.Apply(pullCtx)
 				pullCancel()
-				if err == nil {
-					break
+			if err == nil {
+				break
+			}
+			// 第一次失败用 ERROR（用户需要看到），之后退避并降级为 WARN，
+			// 避免「代理端口配错」这类持久失败每 60 秒刷一条 ERROR、把仪表盘
+			// 永远钉在「订阅轮询失败 / 网关有问题」的状态（#121 后续）。
+			backoff := time.Minute
+			if attempt > 1 {
+				// 1m → 2m → 4m → 8m → 封顶 15m
+				b := 1 << uint(attempt-1)
+				if b > 15 {
+					b = 15
 				}
-				logger.Errorf("订阅轮询启动失败(第 %d 次): %v", attempt, err)
-				if !st.Config().SubsEnabled {
-					return
-				}
-				select {
-				case <-time.After(time.Minute):
-				case <-ctx.Done():
-					return
-				}
+				backoff = time.Duration(b) * time.Minute
+			}
+			msg := fmt.Sprintf("订阅轮询启动失败(第 %d 次): %v", attempt, err)
+			if attempt == 1 {
+				logger.Errorf("%s", msg)
+			} else {
+				logger.Warnf("%s（退避 %v 后重试）", msg, backoff)
+			}
+			if !st.Config().SubsEnabled {
+				return
+			}
+			select {
+			case <-time.After(backoff):
+			case <-ctx.Done():
+				return
+			}
 			}
 			if st.Config().ProxyMode == "rotate" {
 				lane.SetProxy("rotate", "")

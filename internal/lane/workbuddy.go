@@ -615,58 +615,9 @@ func PostWorkBuddyStreamed(ctx context.Context, body map[string]any, acct WBAcco
 	return usage, err2
 }
 
-// wbFingerprintRewrites are the marker strings the WAF pattern-matches inside
-// the request text: each maps to a neutral stand-in. The list follows the
-// upstream's evolving rules and is the one place to update when 11140/11128
-// starts hitting again.
-//
-// Exact rules come first, catch-alls last. The catch-alls exist because the
-// client does not introduce itself once — it names the product in its opening
-// line, in the runtime-context epilogue, in the three per-turn context lines and
-// in the skill catalogue. Patching the opening line alone (the original state of
-// this table) left a dozen occurrences in place, so the "sanitized" retry
-// carried nearly the same fingerprint as the request that had just been refused.
-var wbFingerprintRewrites = []struct {
-	re *regexp.Regexp
-	to string
-}{
-	// Other clients' tell-tales.
-	{regexp.MustCompile(`(?i)x-anthropic-billing-header[^\n"]*`), ""},
-	{regexp.MustCompile(`(?i)\bcc_[a-z_]+=[^\s"']*`), ""},
-	{regexp.MustCompile(`You are Claude Code`), "You are a CLI tool for Claude"},
-	{regexp.MustCompile(`Main branch \(you will usually use this for PRs\)`), "Default branch (you will usually use this for PRs)"},
-	{regexp.MustCompile(`(?i)OhMyOpenCode`), "OpenCode"},
-	{regexp.MustCompile(`11128`), "11-128"},
-
-	// DeepSeek Harness, opening self-description.
-	{regexp.MustCompile(`(?i)You are an AI agent powered by DeepSeek Harness\.?`), "You are an AI agent."},
-	{regexp.MustCompile(`(?i)You are a coding agent powered by the [\w.\-]+ model\.?`), "You are a coding agent."},
-
-	// DeepSeek Harness, runtime-context epilogue.
-	{regexp.MustCompile(`(?i)The runtime context names the DeepSeek Harness implementation checkout\.?`), ""},
-	{regexp.MustCompile(`(?i)Use this checkout only to inspect or extend DSH itself\.?`), ""},
-	{regexp.MustCompile(`(?i)You are interacting with the user through the DeepSeek Harness Web GUI`), "You are interacting with the user through a web GUI"},
-	{regexp.MustCompile(`(?i)because only dsh web injects window\.__DSH_BOOT__`), "because only the web client injects window.__BOOT__"},
-
-	// DeepSeek Harness, per-turn runtime-context lines.
-	{regexp.MustCompile(`(?i)Current DSH file policy:`), "Current file policy:"},
-	{regexp.MustCompile(`(?i)Current DeepSeek Harness implementation checkout:`), "Current implementation checkout:"},
-	{regexp.MustCompile(`(?i)Current DeepSeek Harness Web GUI URL:`), "Current Web GUI URL:"},
-
-	// Skill catalogue lines carry the acronym too.
-	{regexp.MustCompile(`(?i)unexpected DSH sandbox access denials`), "unexpected sandbox access denials"},
-
-	// Catch-alls. Anything the exact rules missed still has to leave the body
-	// clean; the product name and its acronym are what the gate matches, and the
-	// cost of over-rewriting here is a cosmetic one, while the cost of leaving a
-	// single copy is a refused turn.
-	{regexp.MustCompile(`(?i)__DSH_BOOT__`), "__BOOT__"},
-	{regexp.MustCompile(`(?i)DeepSeek Harness`), "the harness"},
-	{regexp.MustCompile(`\bDSH\b`), "CLI"},
-	{regexp.MustCompile(`(?i)\bdsh web\b`), "the web client"},
-	{regexp.MustCompile(`(?i)([\\/])dsh([\\/])`), "${1}cli${2}"},
-	{regexp.MustCompile(`(?i)\bdsh\b`), "cli"},
-}
+// wbFingerprintRewrites used to live here as 22 hard-coded regexes. They are now
+// loaded from fingerprints.json (embedded, overridable via ZENGATE_FP_RULES) so an
+// upstream harness change is a dropped file, not a recompile. See fp_rules.go.
 
 // wbSanitizeFingerprints rewrites the known client fingerprints out of every
 // string a request body carries — not just messages.
@@ -716,13 +667,6 @@ func wbRewriteValue(v any) any {
 	default:
 		return v
 	}
-}
-
-func wbRewriteText(text string) string {
-	for _, r := range wbFingerprintRewrites {
-		text = r.re.ReplaceAllString(text, r.to)
-	}
-	return text
 }
 
 // Classify codes this source carries beyond the shared vocabulary.

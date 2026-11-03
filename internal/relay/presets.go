@@ -17,76 +17,88 @@ type Preset struct {
 	Name     string `json:"name"`
 	BaseURL  string `json:"baseUrl"`
 	Protocol string `json:"protocol"`
-	Note     string `json:"note"`   // free-tier shape, shown under the chip
-	KeyURL   string `json:"keyUrl"` // where to apply for the key
+	Note     string `json:"note"` // free-tier shape, shown under the chip
+	KeyURL   string `json:"keyUrl,omitempty"`
+	// Tier groups suppliers so the dashboard can lead with niche / locally
+	// discovered sources instead of burying the user under big-name APIs.
+	//   niche   = small / regional free lanes worth trying first
+	//   common  = well-known vendors needing a pasted key (shown secondary)
+	//   smallweb= discovered from the local crawler, unverified until probed
+	Tier string `json:"tier,omitempty"`
 }
 
-// Presets is the catalog the dashboard renders. NVIDIA NIM leads (the user's
-// ask); AMD is absent on purpose — AMD ships $100 Developer Cloud GPU credits
-// rather than a hosted free API, so there is no endpoint to point at.
+// Presets is the catalog the dashboard renders. Order + Tier follow the
+// owner's rule (2026-11): 别挂大众，挂小众 —— niche (small / regional free
+// lanes) lead and get tried first; common (well-known vendors needing a pasted
+// key) are demoted to a secondary group. A third, unverified group
+// (relay.SmallwebPresets) is loaded live from the local crawler and sits on top
+// but is marked 待验证 until the user probes it. AMD is absent on purpose —
+// it ships $100 Developer Cloud GPU credits, not a hosted free API.
 var Presets = []Preset{
-	{ID: "nvidia-nim", Name: "NVIDIA NIM", BaseURL: "https://integrate.api.nvidia.com/v1",
-		Protocol: store.ProtocolOpenAI,
-		Note:     "注册即送免费额度（约 40 次/分钟），几百个开源模型：deepseek-ai/、qwen/、meta/、nvidia/ 前缀",
-		KeyURL:   "https://build.nvidia.com"},
-	{ID: "gemini", Name: "Google AI Studio (Gemini)", BaseURL: "https://generativelanguage.googleapis.com/v1beta/openai",
-		Protocol: store.ProtocolOpenAI,
-		Note:     "免费档，按模型限速；gemini-2.5-flash 等日常够用",
-		KeyURL:   "https://aistudio.google.com/apikey"},
-	{ID: "github-models", Name: "GitHub Models", BaseURL: "https://models.github.ai/inference",
-		Protocol: store.ProtocolOpenAI,
-		Note:     "GitHub PAT 就是 Key，免费按模型限速；模型 ID 形如 openai/gpt-4.1-mini",
-		KeyURL:   "https://github.com/settings/tokens"},
-	{ID: "groq", Name: "Groq", BaseURL: "https://api.groq.com/openai/v1",
-		Protocol: store.ProtocolOpenAI,
-		Note:     "免费档速度极快（LPU），llama-3.3-70b 等开源模型",
-		KeyURL:   "https://console.groq.com/keys"},
-	{ID: "cerebras", Name: "Cerebras", BaseURL: "https://api.cerebras.ai/v1",
-		Protocol: store.ProtocolOpenAI,
-		Note:     "免费档， waive-scale 推理速度，llama/qwen 开源模型",
-		KeyURL:   "https://cloud.cerebras.ai"},
-	{ID: "mistral", Name: "Mistral", BaseURL: "https://api.mistral.ai/v1",
-		Protocol: store.ProtocolOpenAI,
-		Note:     "免费实验档（1 req/s），mistral-large / codestral",
-		KeyURL:   "https://console.mistral.ai/api-keys"},
-	{ID: "openrouter", Name: "OpenRouter", BaseURL: "https://openrouter.ai/api/v1",
-		Protocol: store.ProtocolOpenAI,
-		Note:     "聚合网关，模型 ID 带 :free 后缀的免费（如 deepseek/deepseek-r1:free）",
-		KeyURL:   "https://openrouter.ai/keys"},
-	{ID: "huggingface", Name: "HuggingFace Router", BaseURL: "https://router.huggingface.co/v1",
-		Protocol: store.ProtocolOpenAI,
-		Note:     "每月赠送推理额度，路由到各家托管开源模型",
-		KeyURL:   "https://huggingface.co/settings/tokens"},
+	// —— niche：小众 / 国产免费优先，挂这些，不挂大众 ——
 	{ID: "siliconflow", Name: "硅基流动 SiliconFlow", BaseURL: "https://api.siliconflow.cn/v1",
-		Protocol: store.ProtocolOpenAI,
+		Protocol: store.ProtocolOpenAI, Tier: "niche",
 		Note:     "国内直连，Qwen 小杯、GLM-4-9B 等常驻免费",
 		KeyURL:   "https://cloud.siliconflow.cn/account/ak"},
 	{ID: "modelscope", Name: "魔搭 ModelScope", BaseURL: "https://api-inference.modelscope.cn/v1",
-		Protocol: store.ProtocolOpenAI,
+		Protocol: store.ProtocolOpenAI, Tier: "niche",
 		Note:     "国内直连，每日 2000 次免费推理，开源全家桶",
 		KeyURL:   "https://modelscope.cn/my/myaccesstoken"},
 	{ID: "intern-ai", Name: "书生·端砚 Intern", BaseURL: "https://discovery-api.intern-ai.org.cn/v1",
-		Protocol: store.ProtocolOpenAI,
+		Protocol: store.ProtocolOpenAI, Tier: "niche",
 		Note:     "上海人工智能实验室开放平台，国内直连免费车道：DeepSeek-V4、GLM-5.3、Kimi-K2.6、书生-S2 等十来个开源旗舰，支持视觉与工具调用",
 		KeyURL:   "https://discovery.intern-ai.org.cn"},
 	{ID: "zhipu", Name: "智谱 BigModel", BaseURL: "https://open.bigmodel.cn/api/paas/v4",
-		Protocol: store.ProtocolOpenAI,
+		Protocol: store.ProtocolOpenAI, Tier: "niche",
 		Note:     "国内直连，GLM-4.5-Flash 等 Flash 系免费",
 		KeyURL:   "https://open.bigmodel.cn/usercenter/apikeys"},
 	{ID: "longcat", Name: "LongCat（美团）", BaseURL: "https://api.longcat.chat/openai/v1",
-		Protocol: store.ProtocolOpenAI,
+		Protocol: store.ProtocolOpenAI, Tier: "niche",
 		Note:     "注册即用，LongCat-Flash 系列，1M 上下文",
 		KeyURL:   "https://longcat.chat"},
 	{ID: "longcat-anthropic", Name: "LongCat（Anthropic 协议）", BaseURL: "https://api.longcat.chat/anthropic",
-		Protocol: store.ProtocolAnthropic,
+		Protocol: store.ProtocolAnthropic, Tier: "niche",
 		Note:     "同一家，走 Anthropic /messages 协议，可喂给 Claude Code 类客户端",
 		KeyURL:   "https://longcat.chat"},
+	// —— common：全球知名大厂，需自带 Key，降级展示 ——
+	{ID: "nvidia-nim", Name: "NVIDIA NIM", BaseURL: "https://integrate.api.nvidia.com/v1",
+		Protocol: store.ProtocolOpenAI, Tier: "common",
+		Note:     "注册即送免费额度（约 40 次/分钟），几百个开源模型：deepseek-ai/、qwen/、meta/、nvidia/ 前缀",
+		KeyURL:   "https://build.nvidia.com"},
+	{ID: "gemini", Name: "Google AI Studio (Gemini)", BaseURL: "https://generativelanguage.googleapis.com/v1beta/openai",
+		Protocol: store.ProtocolOpenAI, Tier: "common",
+		Note:     "免费档，按模型限速；gemini-2.5-flash 等日常够用",
+		KeyURL:   "https://aistudio.google.com/apikey"},
+	{ID: "github-models", Name: "GitHub Models", BaseURL: "https://models.github.ai/inference",
+		Protocol: store.ProtocolOpenAI, Tier: "common",
+		Note:     "GitHub PAT 就是 Key，免费按模型限速；模型 ID 形如 openai/gpt-4.1-mini",
+		KeyURL:   "https://github.com/settings/tokens"},
+	{ID: "groq", Name: "Groq", BaseURL: "https://api.groq.com/openai/v1",
+		Protocol: store.ProtocolOpenAI, Tier: "common",
+		Note:     "免费档速度极快（LPU），llama-3.3-70b 等开源模型",
+		KeyURL:   "https://console.groq.com/keys"},
+	{ID: "cerebras", Name: "Cerebras", BaseURL: "https://api.cerebras.ai/v1",
+		Protocol: store.ProtocolOpenAI, Tier: "common",
+		Note:     "免费档，waive-scale 推理速度，llama/qwen 开源模型",
+		KeyURL:   "https://cloud.cerebras.ai"},
+	{ID: "mistral", Name: "Mistral", BaseURL: "https://api.mistral.ai/v1",
+		Protocol: store.ProtocolOpenAI, Tier: "common",
+		Note:     "免费实验档（1 req/s），mistral-large / codestral",
+		KeyURL:   "https://console.mistral.ai/api-keys"},
+	{ID: "openrouter", Name: "OpenRouter", BaseURL: "https://openrouter.ai/api/v1",
+		Protocol: store.ProtocolOpenAI, Tier: "common",
+		Note:     "聚合网关，模型 ID 带 :free 后缀的免费（如 deepseek/deepseek-r1:free）",
+		KeyURL:   "https://openrouter.ai/keys"},
+	{ID: "huggingface", Name: "HuggingFace Router", BaseURL: "https://router.huggingface.co/v1",
+		Protocol: store.ProtocolOpenAI, Tier: "common",
+		Note:     "每月赠送推理额度，路由到各家托管开源模型",
+		KeyURL:   "https://huggingface.co/settings/tokens"},
 	{ID: "anthropic", Name: "Anthropic 官方", BaseURL: "https://api.anthropic.com/v1",
-		Protocol: store.ProtocolAnthropic,
+		Protocol: store.ProtocolAnthropic, Tier: "common",
 		Note:     "付费（演示 Anthropic 协议接法），claude-opus-4-6 等",
 		KeyURL:   "https://console.anthropic.com/settings/keys"},
 	{ID: "opencode-go", Name: "OpenCode Go", BaseURL: "https://opencode.ai/inference/go/v1",
-		Protocol: store.ProtocolOpenAI,
+		Protocol: store.ProtocolOpenAI, Tier: "common",
 		Note:     "OpenCode 官方付费档（月度订阅，需在 OpenCode 控制台取 Key）；网关会自动补上它要求的会话头，Claude Code / Codex 等客户端可直连",
 		KeyURL:   "https://opencode.ai/docs/go/"},
 }

@@ -2,6 +2,7 @@ package lane
 
 import (
 	"context"
+	"strings"
 	"sync"
 	"time"
 )
@@ -116,7 +117,13 @@ type Lane struct {
 	exposeRegion     bool
 	failoverEnabled  bool
 	failoverMax      int
-	smartRouting     bool
+	// modelFallbackChain is the user-authored ordered list of model ids that
+	// catch a turn when the requested model is refused (quota/region/free-tier/
+	// server error). It sits BETWEEN nextSameModel (same model, different
+	// channel) and nextCandidate (lane's own pick): an explicit user chain
+	// beats the lane's guess, but never overrides a same-model twin. Issue #25.
+	modelFallbackChain []string
+	smartRouting       bool
 	strategy         string
 	ttft             TTFTSource
 	throttle         *ThrottleBook
@@ -300,6 +307,20 @@ func (l *Lane) SetFailover(enabled bool, max int) {
 		max = 5
 	}
 	l.failoverMax = max
+	l.mu.Unlock()
+}
+
+// SetModelFallbackChain installs the user-authored catch chain (issue #25).
+// Blank entries are dropped; order is preserved as the caller ranked it.
+func (l *Lane) SetModelFallbackChain(chain []string) {
+	clean := make([]string, 0, len(chain))
+	for _, c := range chain {
+		if c = strings.TrimSpace(c); c != "" {
+			clean = append(clean, c)
+		}
+	}
+	l.mu.Lock()
+	l.modelFallbackChain = clean
 	l.mu.Unlock()
 }
 
@@ -1080,9 +1101,14 @@ func (l *Lane) Complete(ctx context.Context, req Request, emit func(Chunk)) (Out
 		}
 		next := l.nextSameModel(req.Needs, model, tried, req.Needs.PromptTokens)
 		if next == "" {
-			// No same-model channel left: fall back to the old behaviour of
-			// switching to whatever model can answer. That changes the model
-			// the user asked for, so it stays the second choice.
+			// User-authored catch chain (issue #25): an explicit ranking beats
+			// the lane's own pick, but only after a same-model twin is ruled out.
+			next = l.nextChainModel(req.Needs, tried)
+		}
+		if next == "" {
+			// No same-model channel and no user chain hit: fall back to the old
+			// behaviour of switching to whatever model can answer. That changes
+			// the model the user asked for, so it stays the last choice.
 			next = l.nextCandidate(req.Needs, tried)
 		}
 		if next == "" {
@@ -1242,6 +1268,58 @@ func (l *Lane) modelByID(id string) (ModelInfo, bool) {
 // that cannot carry the request's modalities are hard-filtered and the
 // selected strategy (latency) orders inside the availability band; with it
 // off, or with the catalog strategy, ties keep catalog order.
+// nextChainModel walks the user-authored fallback chain (issue #25) and returns
+// the first id that is untried, not throttled, not region-blocked/unavailable,
+// and (under smart routing) capable of answering the request. It preserves the
+// caller's ranking: chain order wins over the lane's catalog ordering. A blank
+// or exhausted chain returns "".
+func (l *Lane) nextChainModel(needs Needs, tried map[string]bool) string {
+	l.mu.RLock()
+	chain := l.modelFallbackChain
+	byID := make(map[string]ModelInfo, len(l.catalog))
+	for _, m := range l.catalog {
+		byID[m.ID] = m
+	}
+	av := make(map[string]ProbeResult, len(l.availability))
+	for k, v := range l.availability {
+		av[k] = v
+	}
+	smart := l.smartRouting
+	hidden := l.hidden
+	l.mu.RUnlock()
+
+	for _, id := range chain {
+		if tried[id] || hidden[id] || l.throttle.Throttled(id) {
+			continue
+		}
+		if _, ok := byID[id]; !ok {
+			// Not in the catalog: never route a turn at a phantom model the
+			// upstream has no row for. A typo'd chain entry is silently skipped.
+			continue
+		}
+		switch FreshState(av[id]) {
+		case StateUnavailable, StateRegionBlock:
+			continue
+		}
+		if smart {
+			m, ok := byID[id]
+			if !ok {
+				continue
+			}
+			if !satisfiesNeeds(m, needs) {
+				continue
+			}
+			if m.ContextWindow > 0 && needs.PromptTokens > 0 {
+				if window := applyHeadroom(m.ContextWindow); window > 0 && needs.PromptTokens > window {
+					continue
+				}
+			}
+		}
+		return id
+	}
+	return ""
+}
+
 func (l *Lane) nextCandidate(needs Needs, tried map[string]bool) string {
 	l.mu.RLock()
 	cat := make([]ModelInfo, 0, len(l.catalog))

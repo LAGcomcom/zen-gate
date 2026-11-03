@@ -30,6 +30,11 @@ type ProbeResult struct {
 	TTFTMs    int64  `json:"ttftMs,omitempty"`
 	LatencyMs int64  `json:"latencyMs"`
 	At        int64  `json:"at"`
+	// QuotaResetAt is the unix second at which a throttled (429) model's free
+	// window reopens. Zero means "unknown — just retry later". It lets the UI
+	// separate a quota wall ("额度用尽，X 点重置") from a real connectivity
+	// fault (node dead / proxy refused), which should never be shown as quota.
+	QuotaResetAt int64 `json:"quotaResetAt,omitempty"`
 }
 
 // stateTTL bounds how long one sampled verdict speaks for the model. Free
@@ -141,6 +146,7 @@ func probeModelInner(ctx context.Context, m ModelInfo) ProbeResult {
 			res.State = StateRegionBlock
 		case CodeQuota:
 			res.State = StateThrottled
+			res.QuotaResetAt = quotaResetAt(ue)
 		case CodeServer:
 			if ue.Unavailable {
 				res.State = StateUnavailable
@@ -164,7 +170,55 @@ func probeModelInner(ctx context.Context, m ModelInfo) ProbeResult {
 var (
 	inBandUnavailableRe = regexp.MustCompile(`(?i)model is unavailable|not supported|does not exist|invalid model`)
 	inBandRegionRe      = regexp.MustCompile(`(?i)not available in your country|region`)
+	// resetAtRe catches the upstream free-window reset clock carried in a 429
+	// body, e.g. WorkBuddy 6004 "your usage will reset at 2099-01-01 00:00:00
+	// UTC+8" or a FreeUsageLimitError with the same tail. Empty zone means the
+	// timestamp is already local wall-clock.
+	resetAtRe = regexp.MustCompile(`(?i)reset at\s+(\d{4}[-/]\d{2}[-/]\d{2}[ T]\d{2}:\d{2}(?::\d{2})?)\s*(UTC\+?0?8|GMT\+?0?8|UTC|GMT|Z)?`)
 )
+
+// quotaResetAt turns a 429 verdict into the unix second its free window reopens.
+// It prefers the explicit Retry-After the gateway already parsed, then falls
+// back to a reset-clock string in the body. A zero result means "unknown — just
+// retry later"; it must never be treated as a connectivity fault.
+func quotaResetAt(ue *UpstreamError) int64 {
+	if ue == nil {
+		return 0
+	}
+	if ue.RetryAfter > 0 {
+		return time.Now().Add(time.Duration(ue.RetryAfter) * time.Second).Unix()
+	}
+	m := resetAtRe.FindStringSubmatch(ue.Message)
+	if m == nil {
+		return 0
+	}
+	layouts := []string{"2006-01-02 15:04:05", "2006-01-02 15:04", "2006/01/02 15:04:05", "2006/01/02 15:04"}
+	var t time.Time
+	var err error
+	for _, lay := range layouts {
+		t, err = time.ParseInLocation(lay, m[1], time.Local)
+		if err == nil {
+			break
+		}
+	}
+	if err != nil {
+		return 0
+	}
+	zone := strings.ToUpper(m[2])
+	switch {
+	case strings.HasPrefix(zone, "UTC+08") || strings.HasPrefix(zone, "GMT+08") || zone == "UTC+8" || zone == "GMT+8":
+		_, offset := time.Now().Zone()
+		if offset != 8*3600 {
+			t = t.Add(time.Duration(8*3600-offset) * time.Second)
+		}
+	case zone == "UTC" || zone == "GMT" || zone == "Z":
+		_, offset := time.Now().Zone()
+		if offset != 0 {
+			t = t.Add(time.Duration(0-offset) * time.Second)
+		}
+	}
+	return t.Unix()
+}
 
 func inBandRefusal(payload string) (state, detail string) {
 	var m map[string]any
@@ -232,6 +286,7 @@ func probeSystemOne(ctx context.Context, m ModelInfo, res ProbeResult) ProbeResu
 			res.State = StateRegionBlock
 		case CodeQuota:
 			res.State = StateThrottled
+			res.QuotaResetAt = quotaResetAt(ue)
 		case CodeServer:
 			if ue.Unavailable {
 				res.State = StateUnavailable

@@ -1058,8 +1058,8 @@ async function withButtonBusy(button, busyLabel, task){
   }
 }
 function statePill(st){ const c={available:"ok",unknown:"unknown","region-blocked":"region",throttled:"warn",unavailable:"bad",custom:"custom"}[st]||"unknown";
-  const t={available:"可用",unknown:"未探测","region-blocked":"地区受限",throttled:"限流中",unavailable:"不可用",custom:"自定义"}[st]||st;
-  const tip=st==="throttled"?" title=\"暂时限流，过一会儿可重试\"":"";
+  const t={available:"可用",unknown:"未探测","region-blocked":"地区受限",throttled:"额度用尽",unavailable:"不可用",custom:"自定义"}[st]||st;
+  const tip=st==="throttled"?" title=\"免费额度用尽（不是网关故障）—— 等窗口刷新或切其他模型\"":"";
   return `<span class="pill ${c}"${tip}>${t}</span>`; }
 const cssVar = (n,f) => (getComputedStyle(document.documentElement).getPropertyValue(n)||f).trim();
 
@@ -1667,17 +1667,39 @@ const CHAN_ICONS = {
 
 
 // 上游原始错误 → 一句人话；原文收进 title，不再把 JSON 印在卡片上。
+// fmtReset 把后端下发的重置时间戳转成「今天 09:10 / 明天 09:10」这类人话。
+function fmtReset(ts){
+  if(!ts) return "";
+  const d = new Date(ts*1000), now = new Date();
+  const pad = n => String(n).padStart(2,"0");
+  const hhmm = pad(d.getHours())+":"+pad(d.getMinutes());
+  if(d.toDateString()===now.toDateString()) return "今天 "+hhmm;
+  const tom = new Date(now); tom.setDate(now.getDate()+1);
+  if(d.toDateString()===tom.toDateString()) return "明天 "+hhmm;
+  return (d.getMonth()+1)+"/"+d.getDate()+" "+hhmm;
+}
+// 上游原始错误 → 一句人话；配额故障与连接故障在此明确分道扬镳：
+// 额度类（429 / 6004 / 窗口用尽）→ 橙色「额度用尽，X 点重置 · 建议切其他模型」
+// 连接类（节点死 / 代理拒 / 传输错）→ 红色「不可用」，由 statePill 红字承托。
 function humanDetail(m){
   const d = String(m.detail || "");
+  const rt = fmtReset(m.quotaResetAt);
+  const quotaTip = rt
+    ? `额度用尽，${rt} 重置 · 建议切其他模型`
+    : `额度用尽，等限额窗口刷新或换出口再试 · 建议切其他模型`;
+  if(d || rt){
+    const map = [
+      [/FreeUsageLimitError/i, quotaTip],
+      [/FreeTierError/i,       "上游客户端门拦下了这次请求"],
+      [/RegionError/i,         "当前出口被上游地区门拦下（海外出口可用）"],
+      [/\b6?00?4\b|60A4|window exceeded|窗口用尽/i, quotaTip],
+      [/quota|rate.?limit|额度|限流|频率|too many requests/i, quotaTip],
+      [/实时限额（等待恢复）/,   "暂时限流，等它恢复或手动重测"],
+      [/在列（免费池名单即判定）/, ""],
+    ];
+    for(const [re, msg] of map) if(re.test(d)) return msg;
+  }
   if(!d) return "";
-  const map = [
-    [/FreeUsageLimitError/i, "本出口的免费额度已用完，等限额窗口刷新或换出口再试"],
-    [/FreeTierError/i,       "上游客户端门拦下了这次请求"],
-    [/RegionError/i,         "当前出口被上游地区门拦下（海外出口可用）"],
-    [/实时限额（等待恢复）/,   "暂时限流，等它恢复或手动重测"],
-    [/在列（免费池名单即判定）/, ""],
-  ];
-  for(const [re, msg] of map) if(re.test(d)) return msg;
   if(d.trim().startsWith("{")){
     const t = (d.match(/"type"\s*:\s*"([A-Za-z]+(?:Error|Exception))"/) || [])[1];
     return t ? "上游返回 " + t + " · 悬浮看原文" : "上游返回了非预期响应 · 悬浮看原文";
@@ -2143,7 +2165,7 @@ function renderModels(state){
         const r = j.result;
         const sec = r.ttftMs ? "首字 " + (r.ttftMs/1000).toFixed(1) + "s" : "";
         if(r.state==="available") toast("✓ 可用" + (sec?" · "+sec:""));
-        else if(r.state==="throttled") toast("暂时限流·可重试 —— 请求在生成前就被拒绝，没有首字数据" + (r.detail?" · "+humanDetail({detail:r.detail}):""));
+        else if(r.state==="throttled") toast("额度用尽·可重试或切其他模型 —— 免费额度窗口已满，不是网关故障" + (r.quotaResetAt?(" · "+fmtReset(r.quotaResetAt)+" 重置"):(r.detail?" · "+humanDetail({detail:r.detail}):"")));
         else if(r.state==="unavailable") toast("不可用 · " + (r.detail||""));
         else toast("探测未成功 · " + (r.detail||"上游无响应，稍后再试"));
       }
@@ -2179,8 +2201,9 @@ let pvSelected = new Set();  // 勾选要入库的模型
 let pvEditSaved = [];        // 编辑前的已保存模型（用于预勾选）
 /* 预设区状态：常用/全部 + 搜索。16 个预设不再同时全铺，
    10 秒轮询重绘 chips 时靠这两个变量保持用户眼前的视图。 */
-let pvTab = "fav";
+let pvTab = "discover";   // 本地发现优先：挂小众、不挂大众
 let pvQ = "";
+let pvSmallwebAll = [];   // 本地爬取发现的小众候选（待验证）
 let pvPresetsAll = [];
 let pvPresetsSig = "";
 const PV_FAVS = ["nvidia-nim", "gemini", "github-models", "groq", "siliconflow", "modelscope"];
@@ -2461,7 +2484,8 @@ function renderProviders(s){
         <div class="row" style="row-gap:8px">
           <input class="msearch" id="pv-psearch" placeholder="搜索预设名称 / 域名…">
           <div class="seg" id="pv-ptab">
-            <button data-v="fav" class="on">常用</button>
+            <button data-v="discover" class="on">本地发现</button>
+            <button data-v="fav">常用</button>
             <button data-v="all">全部</button>
           </div>
           <span class="muted" style="font-size:12px" id="pv-pcount"></span>
@@ -2754,6 +2778,7 @@ function renderProviders(s){
   }
   // 预设（后端下发，前端不写死）：归「供应商预设」节，搜索 / 常用切换见 pvRenderPresets
   pvPresetsAll = s.providerPresets || [];
+  pvSmallwebAll = s.smallwebPresets || [];
   pvRenderPresets();
   renderProviderList(s);
   renderWorkBuddyCard();
@@ -3400,25 +3425,38 @@ function paintLanePane(key){
 function pvRenderPresets(){
   const el = $("#page-providers"); if(!el) return;
   const box = el.querySelector("#pv-presets"); if(!box) return;
-  const presets = pvPresetsAll;
   const q = pvQ.trim().toLowerCase();
+  const isDiscover = (pvTab === "discover");
+  const presets = isDiscover ? pvSmallwebAll : pvPresetsAll;
   const list = q
     ? presets.filter(p => (p.name + " " + p.id + " " + hostOf(p.baseUrl)).toLowerCase().includes(q))
     : (pvTab === "fav" ? presets.filter(p => PV_FAVS.includes(p.id)) : presets);
   const sig = pvTab + "|" + q + "|" + presets.map(p=>p.id).join(",");
   if(sig !== pvPresetsSig){
     pvPresetsSig = sig;
-    box.innerHTML = list.map(p=>`
-      <div class="pchip" data-pid="${esc(p.id)}" title="点击填充表单 · ${esc(p.note||"")}">
+    const badge = (txt,col)=>`<span style="font-size:10px;color:${col};border:1px solid ${col};border-radius:4px;padding:0 4px;margin-left:4px">${txt}</span>`;
+    box.innerHTML = list.map(p=>{
+      if(isDiscover){
+        const conf = p.confidence || "low";
+        const col = conf==="high"?"var(--ok)":conf==="medium"?"var(--warn)":"var(--ink-mute)";
+        return `<div class="pchip" data-pid="${esc(p.id)}" title="本地爬取发现 · 可用性未验证 · 添加后先点「探测」确认">
+          <span class="pn">${esc(p.name)}</span><span class="pu">${esc(hostOf(p.baseUrl))}</span>
+          ${badge("待验证·"+conf, col)}</div>`;
+      }
+      const tTxt = p.tier==="niche"?"小众":p.tier==="common"?"常见":"";
+      const tCol = p.tier==="niche"?"var(--ok)":"var(--ink-mute)";
+      return `<div class="pchip" data-pid="${esc(p.id)}" title="点击填充表单 · ${esc(p.note||"")}">
         <span class="pn">${esc(p.name)}</span><span class="pu">${esc(hostOf(p.baseUrl))}</span>
+        ${tTxt?badge(tTxt,tCol):""}
         ${p.note?`<span class="pnote">${esc(p.note)}</span>`:""}
-      </div>`).join("")
-      || `<div class="muted" style="font-size:12.5px">${q ? "没有匹配的预设——换个词试试，或直接在上方表单填 Base URL" : "这一组暂时没有预设"}</div>`;
+      </div>`;
+    }).join("")
+      || `<div class="muted" style="font-size:12.5px">${q ? "没有匹配的预设——换个词试试，或直接在上方表单填 Base URL" : isDiscover ? "本地爬取暂未发现疑似小众 AI 源——netforce 在持续爬，过一会儿刷新就有" : "这一组暂时没有预设"}</div>`;
     box.querySelectorAll(".pchip").forEach(c=>{
       c.onclick = ()=>{
-        const p = presets.find(x=>x.id===c.dataset.pid); if(!p) return;
+        const p = (isDiscover?pvSmallwebAll:pvPresetsAll).find(x=>x.id===c.dataset.pid); if(!p) return;
         pvEditing = ""; pvFetched = []; pvCatalog = []; pvSelected = new Set(); pvEditSaved = [];
-        el.querySelector("#pv-form-title").textContent = "添加供应商";
+        el.querySelector("#pv-form-title").textContent = "添加供应商" + (isDiscover?"（本地发现·待验证）":"");
         el.querySelector("#pv-name").value = p.name;
         el.querySelector("#pv-url").value = p.baseUrl;
         el.querySelector("#pv-key").value = "";
@@ -3427,7 +3465,8 @@ function pvRenderPresets(){
           [["openai","OpenAI 兼容"],["anthropic","Anthropic 兼容"]], p.protocol||"openai", null);
         el.querySelector("#pv-preset-hint").innerHTML =
           esc(p.name) + "：" + esc(p.note||"") +
-          (p.keyUrl ? ` · <a href="${esc(safeHref(p.keyUrl))}" target="_blank" style="color:var(--accent)">申请 Key →</a>` : "");
+          (p.keyUrl ? ` · <a href="${esc(safeHref(p.keyUrl))}" target="_blank" style="color:var(--accent)">申请 Key →</a>` : "") +
+          (isDiscover ? ` · <span style="color:var(--warn)">本地发现，添加后先点「探测」验证</span>` : "");
         pvRenderPicker();
         pvSetFormOpen(true);
       };
@@ -3435,7 +3474,7 @@ function pvRenderPresets(){
   }
   el.querySelectorAll("#pv-ptab button").forEach(b=>b.classList.toggle("on", b.dataset.v===pvTab));
   const cnt = el.querySelector("#pv-pcount");
-  if(cnt) cnt.textContent = q ? `${list.length}/${presets.length} 个匹配` : `${list.length} 个预设`;
+  if(cnt) cnt.textContent = q ? `${list.length}/${presets.length} 个匹配` : `${list.length} 个` + (isDiscover?" 个发现":" 个预设");
 }
 
 /* WorkBuddy 账号渠道卡：状态读 /admin/api/workbuddy/status，登录走 state 轮询
@@ -4321,6 +4360,9 @@ function renderSettings(s){
         <h3>模型切换</h3>
         <div class="switch"><div><span class="nm">限流自动切换</span><div class="ds">请求的模型被限流或拒绝时，自动换下一个可用模型接住本次请求（最多再试 <span id="fo-max-label">2</span> 次）；实际服务的模型通过响应头 x-zen-gate-served-by 和最终 usage chunk 标注</div></div>
           <button class="act off" id="tg-failover">关闭</button></div>
+        <div class="switch"><div><span class="nm">模型兜底链（限流/拒绝时按序接住）</span><div class="ds">请求的模型被限流/拒绝/区域屏蔽/服务端错误时，按你排列的顺序依次尝试接住本次请求。排在「同模型换通道」之后、「车道自动选」之前。每行一个模型 id，或逗号分隔；写错/不存在/被隐藏的 id 会被自动跳过。留空则回落到车道默认候选</div></div></div>
+        <textarea id="fo-chain" rows="3" placeholder="claude-sonnet-4-6&#10;gpt-5&#10;gemini-3-pro" style="width:100%;background:var(--panel-2);border:1px solid var(--hairline);color:var(--ink);border-radius:6px;padding:8px 10px;font-family:var(--mono);font-size:12px;resize:vertical"></textarea>
+        <div style="margin-top:8px"><button class="ghost" id="btn-fo-chain">保存兜底链</button><span class="muted" id="fo-chain-result" style="font-size:12px;margin-left:8px"></span></div>
       </div>
 
       <div class="card" id="set-route">
@@ -4658,6 +4700,24 @@ function renderSettings(s){
       setToggle("#tg-failover", on);
       toast(on ? "限流自动切换已开启" : "限流自动切换已关闭");
       refresh();
+    };
+  }
+  // 模型兜底链（issue #25）：初次渲染填入，保存后回填，不覆盖用户正在编辑的内容
+  const chainEl = el.querySelector("#fo-chain");
+  if (chainEl && !chainEl.dataset.bound) {
+    chainEl.value = (s.settings.modelFallbackChain || []).join("\n");
+    chainEl.dataset.bound = "1";
+    const chainBtn = el.querySelector("#btn-fo-chain");
+    chainBtn.onclick = async () => {
+      const raw = chainEl.value || "";
+      const arr = raw.split(/[\n,]/).map(x => x.trim()).filter(x => x.length > 0);
+      const j = await api("/settings", { modelFallbackChain: arr });
+      if (j) {
+        const saved = (j.modelFallbackChain && j.modelFallbackChain.length) ? j.modelFallbackChain : arr;
+        chainEl.value = saved.join("\n");
+        el.querySelector("#fo-chain-result").textContent = "已保存 " + saved.length + " 个模型";
+        toast("模型兜底链已保存（限流/拒绝时按此顺序接住）");
+      }
     };
   }
   setToggle("#tg-smart", s.settings.smartRouting);
