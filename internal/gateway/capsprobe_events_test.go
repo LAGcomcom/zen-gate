@@ -114,6 +114,32 @@ func TestCapabilityProbeKeepsAnInconclusiveModalityUnknown(t *testing.T) {
 	}
 }
 
+// A 404 on every modality means the model id (or the route) does not exist,
+// not that the model rejected the modality. It must stay "unknown" and never
+// be recorded as a capability verdict — recording it as "no" used to write a
+// plain-text tag over a multimodal model the probe never actually asked about.
+func TestCapabilityProbeDoesNotTagOnModelNotFound(t *testing.T) {
+	gate := fakeUpstream(t, nil)
+	defer gate.Close()
+	s := newTestServer(t, gate)
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		fmt.Fprint(w, `{"error":{"message":"model m3 does not exist"}}`)
+	}))
+	defer up.Close()
+
+	var steps []lane.ProbeStep
+	ctx := lane.WithProbeSink(context.Background(), func(st lane.ProbeStep) { steps = append(steps, st) })
+	p := &store.Provider{ID: "p1", Name: "P1", BaseURL: up.URL, APIKey: "sk", Protocol: store.ProtocolOpenAI, Enabled: true}
+	verdicts := s.probeCapabilities(ctx, p, "m3")
+	if verdicts["vision"] != verdictUnknown || verdicts["audio"] != verdictUnknown || verdicts["file"] != verdictUnknown {
+		t.Fatalf("verdicts = %v, a 404 must stay unknown", verdicts)
+	}
+	if _, ok := s.Store.ModelTagOf("m3"); ok {
+		t.Fatal("a 404 must not write a capability tag")
+	}
+}
+
 func stepNames(steps []lane.ProbeStep) []string {
 	out := make([]string, len(steps))
 	for i, st := range steps {
