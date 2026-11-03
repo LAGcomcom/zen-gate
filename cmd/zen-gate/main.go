@@ -200,6 +200,7 @@ func main() {
 	ln.SetExposeRegion(cfg.ExposeRegion)
 	ln.SetFailover(cfg.FailoverEnabled, cfg.FailoverMax)
 	ln.SetModelFallbackChain(cfg.ModelFallbackChain)
+	ln.SetRouteWall(cfg.RouteWall)
 	// Smart routing: master switch + failover ordering strategy + the runtime
 	// first-token sample ring that the latency strategy ranks by.
 	ln.SetSmartRouting(cfg.SmartRouting)

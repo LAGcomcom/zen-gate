@@ -17,20 +17,20 @@ func TestModelFallbackChainPicksUserRank(t *testing.T) {
 	l.hidden = map[string]bool{"hidden-m": true}
 	l.SetModelFallbackChain([]string{"alt-a", "hidden-m", "alt-b", "ghost"})
 
-	if got := l.nextChainModel(Needs{}, map[string]bool{}); got != "alt-a" {
+	if got := l.nextChainModel(Needs{}, map[string]bool{}, nil, nil); got != "alt-a" {
 		t.Fatalf("first pick should follow chain: want alt-a, got %q", got)
 	}
 	// alt-a already tried -> alt-b (hidden model + unknown ghost skipped)
-	if got := l.nextChainModel(Needs{}, map[string]bool{"alt-a": true}); got != "alt-b" {
+	if got := l.nextChainModel(Needs{}, map[string]bool{"alt-a": true}, nil, nil); got != "alt-b" {
 		t.Fatalf("after alt-a tried, want alt-b, got %q", got)
 	}
 	// everything tried/blocked -> empty
-	if got := l.nextChainModel(Needs{}, map[string]bool{"alt-a": true, "alt-b": true}); got != "" {
+	if got := l.nextChainModel(Needs{}, map[string]bool{"alt-a": true, "alt-b": true}, nil, nil); got != "" {
 		t.Fatalf("exhausted chain should return empty, got %q", got)
 	}
 	// a throttled chain member is skipped on a fresh pass
 	l.MarkThrottled("alt-a", 0)
-	if got := l.nextChainModel(Needs{}, map[string]bool{}); got != "alt-b" {
+	if got := l.nextChainModel(Needs{}, map[string]bool{}, nil, nil); got != "alt-b" {
 		t.Fatalf("throttled alt-a should be skipped, want alt-b, got %q", got)
 	}
 }
@@ -40,7 +40,7 @@ func TestModelFallbackChainBlankWhenUnset(t *testing.T) {
 	l.smartRouting = false
 	l.catalog = []ModelInfo{{ID: "main"}, {ID: "alt-a"}}
 	l.availability = map[string]ProbeResult{"main": {}, "alt-a": {}}
-	if got := l.nextChainModel(Needs{}, map[string]bool{}); got != "" {
+	if got := l.nextChainModel(Needs{}, map[string]bool{}, nil, nil); got != "" {
 		t.Fatalf("unset chain must return empty so requestModel falls through to nextCandidate, got %q", got)
 	}
 }

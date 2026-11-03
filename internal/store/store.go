@@ -249,6 +249,12 @@ type Config struct {
 	// modelscope). One list serves all six: Kind says which one an entry
 	// belongs to, and each channel keeps its own enable flag.
 	ExtAccounts []lane.ExtAccount `json:"extAccounts,omitempty"`
+	// RouteWall is the user-authored channel routing rules (the 渠道墙 /
+	// selectable route-wall feature). Each enabled rule matches a request — by
+	// model name or globally — and constrains which channels (supplier buckets)
+	// the lane may route that request through. The lane applies the union of
+	// every matching rule's allow/deny sets while picking a failover target.
+	RouteWall []lane.RouteRule `json:"routeWall,omitempty"`
 	Window   WindowState    `json:"window"`
 }
 

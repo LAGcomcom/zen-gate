@@ -16,13 +16,13 @@ func TestNextSameModelPrefersChannelTwin(t *testing.T) {
 	})
 	l.SetSmartRouting(false)
 
-	got := l.nextSameModel(Needs{}, "deepseek-v4.1-flash-free", map[string]bool{}, 1000)
+	got := l.nextSameModel(Needs{}, "deepseek-v4.1-flash-free", map[string]bool{}, 1000, nil, nil)
 	if got != "deepseek-v4.1-flash" {
 		t.Fatalf("nextSameModel = %q, want deepseek-v4.1-flash", got)
 	}
 
 	// A model with no twin returns "": the caller falls back to nextCandidate.
-	if got := l.nextSameModel(Needs{}, "some-other-model", map[string]bool{}, 1000); got != "" {
+	if got := l.nextSameModel(Needs{}, "some-other-model", map[string]bool{}, 1000, nil, nil); got != "" {
 		t.Fatalf("nextSameModel(no twin) = %q, want empty", got)
 	}
 }
@@ -38,7 +38,7 @@ func TestNextSameModelSkipsThrottledTwin(t *testing.T) {
 	l.SetSmartRouting(false)
 	l.MarkThrottled("deepseek-v4.1-flash", 60)
 
-	if got := l.nextSameModel(Needs{}, "deepseek-v4.1-flash-free", map[string]bool{}, 1000); got != "" {
+	if got := l.nextSameModel(Needs{}, "deepseek-v4.1-flash-free", map[string]bool{}, 1000, nil, nil); got != "" {
 		t.Fatalf("nextSameModel = %q, want empty (twin throttled)", got)
 	}
 }
@@ -53,7 +53,7 @@ func TestNextSameModelRespectsWindow(t *testing.T) {
 	})
 	l.SetSmartRouting(false)
 
-	if got := l.nextSameModel(Needs{}, "deepseek-v4.1-flash-free", map[string]bool{}, 5000000); got != "" {
+	if got := l.nextSameModel(Needs{}, "deepseek-v4.1-flash-free", map[string]bool{}, 5000000, nil, nil); got != "" {
 		t.Fatalf("nextSameModel = %q, want empty (prompt over window)", got)
 	}
 }
@@ -67,7 +67,7 @@ func TestNextSameModelRefusesLightningPair(t *testing.T) {
 	})
 	l.SetSmartRouting(false)
 
-	if got := l.nextSameModel(Needs{}, "nemotron-3.5-lightning-free", map[string]bool{}, 1000); got != "" {
+	if got := l.nextSameModel(Needs{}, "nemotron-3.5-lightning-free", map[string]bool{}, 1000, nil, nil); got != "" {
 		t.Fatalf("nextSameModel = %q, want empty (different models, 7.8x window gap)", got)
 	}
 }
@@ -82,11 +82,11 @@ func TestNextSameModelHonoursModality(t *testing.T) {
 	})
 	l.SetSmartRouting(true)
 
-	if got := l.nextSameModel(Needs{Image: true}, "deepseek-v4.1-flash-free", map[string]bool{}, 1000); got != "" {
+	if got := l.nextSameModel(Needs{Image: true}, "deepseek-v4.1-flash-free", map[string]bool{}, 1000, nil, nil); got != "" {
 		t.Fatalf("nextSameModel = %q, want empty (twin has no vision)", got)
 	}
 	// Without the image need the twin is fine again.
-	if got := l.nextSameModel(Needs{}, "deepseek-v4.1-flash-free", map[string]bool{}, 1000); got != "deepseek-v4.1-flash" {
+	if got := l.nextSameModel(Needs{}, "deepseek-v4.1-flash-free", map[string]bool{}, 1000, nil, nil); got != "deepseek-v4.1-flash" {
 		t.Fatalf("nextSameModel = %q, want deepseek-v4.1-flash", got)
 	}
 }

@@ -4365,6 +4365,18 @@ function renderSettings(s){
         <div style="margin-top:8px"><button class="ghost" id="btn-fo-chain">保存兜底链</button><span class="muted" id="fo-chain-result" style="font-size:12px;margin-left:8px"></span></div>
       </div>
 
+      <div class="card" id="set-routewall">
+        <h3>选路规则墙（渠道墙）</h3>
+        <div class="muted" style="font-size:12px;margin-bottom:8px">按规则约束每个请求能走哪些供应商通道（渠道）。规则按优先级从高到低匹配，命中规则的「允许/禁止通道」合并生效，<b>禁止优先于允许</b>。匹配类型=全局 对全部请求生效；=按模型 仅对模型名含匹配词的请求生效。每条规则一行编辑，多个通道用逗号分隔。</div>
+        <div class="muted" style="font-size:11.5px;margin-bottom:8px">可用通道：<code id="rw-chans"></code></div>
+        <div id="rw-rules"></div>
+        <div style="margin-top:10px;display:flex;gap:8px;align-items:center">
+          <button class="ghost" id="btn-rw-add">+ 添加规则</button>
+          <button class="act" id="btn-rw-save">保存规则墙</button>
+          <span class="muted" id="rw-result" style="font-size:12px"></span>
+        </div>
+      </div>
+
       <div class="card" id="set-route">
         <h3>智能路由 <span class="muted" style="font-size:11px">多模态感知 + 候选排序</span></h3>
         <div class="switch"><div><span class="nm">智能路由总开关</span><div class="ds">开启后：限流切换只挑支持本次请求模态（图像 / 音频 / 文件）的模型，并按下方策略排序候选；关闭则完全回到旧行为（目录顺序，不带能力过滤）。你指定的模型永远是第一选择，策略只影响切换</div></div>
@@ -4717,6 +4729,84 @@ function renderSettings(s){
         chainEl.value = saved.join("\n");
         el.querySelector("#fo-chain-result").textContent = "已保存 " + saved.length + " 个模型";
         toast("模型兜底链已保存（限流/拒绝时按此顺序接住）");
+      }
+    };
+  }
+  // 选路规则墙（渠道墙）：初次渲染填入 state，编辑存本地 dataset，不覆盖正在编辑的内容
+  const rwChans = el.querySelector("#rw-chans");
+  if (rwChans) rwChans.textContent = (s.routeChannels || []).join(", ");
+  const rwRules = el.querySelector("#rw-rules");
+  if (rwRules && !rwRules.dataset.bound) {
+    rwRules.dataset.bound = "1";
+    const chans = (s.routeChannels || []);
+    function renderRW() {
+      const rules = JSON.parse(rwRules.dataset.rules || "null") || s.settings.routeWall || [];
+      rwRules.dataset.rules = JSON.stringify(rules);
+      if (!rules.length) {
+        rwRules.innerHTML = `<div class="muted" style="font-size:12px">暂无规则——点「添加规则」开始编排。例如：把 claude 系列强制走 kilo 通道、或把 gemini 禁止走代理通道。</div>`;
+        return;
+      }
+      rwRules.innerHTML = rules.map((r, i) => {
+        const allow = (r.allowChannels || []).join(",");
+        const deny = (r.denyChannels || []).join(",");
+        return `<div class="rw-rule" style="border:1px solid var(--hairline);border-radius:8px;padding:10px;margin-bottom:8px">
+          <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+            <input data-i="${i}" data-f="name" value="${r.name || ""}" placeholder="规则名" style="width:110px;background:var(--panel-2);border:1px solid var(--hairline);color:var(--ink);border-radius:6px;padding:5px 8px;font-size:12px">
+            <select data-i="${i}" data-f="matchType" style="background:var(--panel-2);border:1px solid var(--hairline);color:var(--ink);border-radius:6px;padding:5px 8px;font-size:12px">
+              <option value="any" ${r.matchType === "any" ? "selected" : ""}>全局</option>
+              <option value="model" ${r.matchType === "model" ? "selected" : ""}>按模型名</option>
+            </select>
+            <input data-i="${i}" data-f="match" value="${r.match || ""}" placeholder="模型名含…" style="width:120px;background:var(--panel-2);border:1px solid var(--hairline);color:var(--ink);border-radius:6px;padding:5px 8px;font-size:12px">
+            <label style="display:inline-flex;gap:4px;align-items:center;font-size:12px"><input type="checkbox" data-i="${i}" data-f="enabled" ${r.enabled ? "checked" : ""}>启用</label>
+            <button class="ghost" data-del="${i}" style="margin-left:auto">删除</button>
+          </div>
+          <div style="display:flex;gap:8px;margin-top:6px;flex-wrap:wrap;align-items:center">
+            <span class="dim" style="font-size:12px">允许通道</span>
+            <input data-i="${i}" data-f="allowChannels" value="${allow}" placeholder="逗号分隔，留空=不限" style="flex:1;min-width:150px;background:var(--panel-2);border:1px solid var(--hairline);color:var(--ink);border-radius:6px;padding:5px 8px;font-size:12px">
+            <span class="dim" style="font-size:12px">禁止通道</span>
+            <input data-i="${i}" data-f="denyChannels" value="${deny}" placeholder="逗号分隔" style="flex:1;min-width:150px;background:var(--panel-2);border:1px solid var(--hairline);color:var(--ink);border-radius:6px;padding:5px 8px;font-size:12px">
+          </div>
+        </div>`;
+      }).join("");
+      rwRules.querySelectorAll("input,select").forEach(inp => {
+        inp.oninput = () => {
+          const i = +inp.dataset.i, f = inp.dataset.f;
+          const rules = JSON.parse(rwRules.dataset.rules);
+          rules[i][f] = inp.type === "checkbox" ? inp.checked : inp.value;
+          rwRules.dataset.rules = JSON.stringify(rules);
+        };
+      });
+      rwRules.querySelectorAll("[data-del]").forEach(b => {
+        b.onclick = () => {
+          const rules = JSON.parse(rwRules.dataset.rules);
+          rules.splice(+b.dataset.del, 1);
+          rwRules.dataset.rules = JSON.stringify(rules);
+          renderRW();
+        };
+      });
+    }
+    renderRW();
+    el.querySelector("#btn-rw-add").onclick = () => {
+      const rules = JSON.parse(rwRules.dataset.rules);
+      rules.push({ enabled: true, name: "", matchType: "any", match: "", allowChannels: [], denyChannels: [], priority: rules.length });
+      rwRules.dataset.rules = JSON.stringify(rules);
+      renderRW();
+    };
+    el.querySelector("#btn-rw-save").onclick = async () => {
+      const rules = JSON.parse(rwRules.dataset.rules).map((r, i) => ({
+        enabled: !!r.enabled,
+        name: r.name || "",
+        matchType: r.matchType === "model" ? "model" : "any",
+        match: r.match || "",
+        allowChannels: (r.allowChannels || "").split(",").map(x => x.trim()).filter(x => x.length),
+        denyChannels: (r.denyChannels || "").split(",").map(x => x.trim()).filter(x => x.length),
+        priority: (rules.length - 1 - i)
+      }));
+      const j = await api("/settings", { routeWall: rules });
+      if (j) {
+        el.querySelector("#rw-result").textContent = "已保存 " + rules.length + " 条规则";
+        toast("选路规则墙已保存");
+        refresh();
       }
     };
   }

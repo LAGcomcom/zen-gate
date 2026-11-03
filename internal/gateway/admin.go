@@ -479,6 +479,8 @@ func (s *Server) adminState(w http.ResponseWriter) {
 		"failoverEnabled":         cfg.FailoverEnabled,
 		"failoverMax":             cfg.FailoverMax,
 		"modelFallbackChain":      cfg.ModelFallbackChain,
+		"routeWall":               cfg.RouteWall,
+		"routeChannels":           lane.Channels(),
 		"smartRouting":            cfg.SmartRouting,
 		"routingStrategy":         cfg.RoutingStrategy,
 		"laneFallbackToProviders": cfg.LaneFallbackToProviders,
@@ -579,6 +581,7 @@ func (s *Server) adminSettings(w http.ResponseWriter, r *http.Request) {
 		FailoverEnabled         *bool            `json:"failoverEnabled"`
 		FailoverMax             *int             `json:"failoverMax"`
 		ModelFallbackChain      []string        `json:"modelFallbackChain"`
+		RouteWall               []lane.RouteRule `json:"routeWall"`
 		SmartRouting            *bool            `json:"smartRouting"`
 		RoutingStrategy         *string          `json:"routingStrategy"`
 		LaneFallbackToProviders *bool            `json:"laneFallbackToProviders"`
@@ -728,6 +731,12 @@ func (s *Server) adminSettings(w http.ResponseWriter, r *http.Request) {
 		s.Lane.SetModelFallbackChain(cfg.ModelFallbackChain)
 		changed = true
 		dirty["modelFallbackChain"] = true
+	}
+	if in.RouteWall != nil {
+		cfg.RouteWall = in.RouteWall
+		s.Lane.SetRouteWall(cfg.RouteWall)
+		changed = true
+		dirty["routeWall"] = true
 	}
 	if in.SmartRouting != nil {
 		cfg.SmartRouting = *in.SmartRouting
@@ -914,6 +923,9 @@ func (s *Server) commitSettings(next *store.Config, dirty map[string]bool) {
 		}
 		if dirty["modelFallbackChain"] {
 			c.ModelFallbackChain = next.ModelFallbackChain
+		}
+		if dirty["routeWall"] {
+			c.RouteWall = next.RouteWall
 		}
 		if dirty["smartRouting"] {
 			c.SmartRouting = next.SmartRouting

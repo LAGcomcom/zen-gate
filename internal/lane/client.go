@@ -2,6 +2,7 @@ package lane
 
 import (
 	"context"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -92,6 +93,20 @@ type CallRecord struct {
 }
 
 // Lane orchestrates the free lane: catalog, availability, and completion calls.
+// RouteRule is one entry in the routing wall (渠道墙 / selectable route-wall).
+// A request is tested against every enabled rule, highest Priority first; the
+// matching rules' allow/deny channel sets are unioned and the lane applies the
+// result while picking a failover target. Deny wins over allow on conflict.
+type RouteRule struct {
+	Enabled       bool     `json:"enabled"`
+	Name          string   `json:"name"`
+	MatchType     string   `json:"matchType"`     // "any" | "model"
+	Match         string   `json:"match"`         // model-name prefix/regex; ignored when MatchType=="any"
+	AllowChannels []string `json:"allowChannels"` // channels the matched request MAY use (empty = no allow-constraint)
+	DenyChannels  []string `json:"denyChannels"`  // channels the matched request must NOT use
+	Priority      int      `json:"priority"`      // higher = applied first
+}
+
 type Lane struct {
 	mu           sync.RWMutex
 	catalog      []ModelInfo
@@ -123,6 +138,11 @@ type Lane struct {
 	// channel) and nextCandidate (lane's own pick): an explicit user chain
 	// beats the lane's guess, but never overrides a same-model twin. Issue #25.
 	modelFallbackChain []string
+	// routeWall is the user-authored channel routing rules (渠道墙). Each
+	// enabled rule that matches a request constrains which channels the lane may
+	// route that request through; the lane unions every match's allow/deny sets
+	// while picking a failover target. SetRouteWall replaces the whole slice.
+	routeWall []RouteRule
 	smartRouting       bool
 	strategy         string
 	ttft             TTFTSource
@@ -322,6 +342,69 @@ func (l *Lane) SetModelFallbackChain(chain []string) {
 	l.mu.Lock()
 	l.modelFallbackChain = clean
 	l.mu.Unlock()
+}
+
+// SetRouteWall replaces the routing-wall rules. The lane snapshots the slice
+// under mu, so callers must not edit the passed slice in place afterwards.
+// Order is irrelevant here: applyRouteWall re-sorts by Priority at request time.
+func (l *Lane) SetRouteWall(rules []RouteRule) {
+	cp := make([]RouteRule, len(rules))
+	copy(cp, rules)
+	l.mu.Lock()
+	l.routeWall = cp
+	l.mu.Unlock()
+}
+
+// routeAllowDeny computes the channel allow/deny sets for one request by
+// testing it against every enabled rule, highest Priority first, and unioning
+// the matches. An empty allow set means "no allow-constraint"; a non-empty one
+// means the request may only use those channels. Deny always wins on conflict.
+func (l *Lane) routeAllowDeny(reqModel string) (allow, deny map[string]bool) {
+	l.mu.RLock()
+	rules := l.routeWall
+	l.mu.RUnlock()
+
+	// Highest priority first; the first enabled rule that matches the request
+	// wins (firewall-style short-circuit). Later rules are not consulted — that
+	// is what Priority orders. An empty allow set on the winning rule means "no
+	// allow-constraint": the request may use any channel not in deny.
+	idx := make([]int, len(rules))
+	for i := range idx {
+		idx[i] = i
+	}
+	sort.SliceStable(idx, func(a, b int) bool {
+		return rules[idx[a]].Priority > rules[idx[b]].Priority
+	})
+	for _, i := range idx {
+		r := rules[i]
+		if !r.Enabled {
+			continue
+		}
+		if r.MatchType == "model" && r.Match != "" {
+			if !strings.Contains(strings.ToLower(reqModel), strings.ToLower(r.Match)) {
+				continue
+			}
+		}
+		allowSet := map[string]bool{}
+		denySet := map[string]bool{}
+		for _, c := range r.AllowChannels {
+			if c = strings.TrimSpace(c); c != "" {
+				allowSet[c] = true
+			}
+		}
+		for _, c := range r.DenyChannels {
+			if c = strings.TrimSpace(c); c != "" {
+				denySet[c] = true
+			}
+		}
+		if len(allowSet) == 0 {
+			allow = nil
+		} else {
+			allow = allowSet
+		}
+		return allow, denySet
+	}
+	return nil, nil
 }
 
 // SetThrottleUpdate wires the throttle ledger's persistence callback.
@@ -1099,17 +1182,18 @@ func (l *Lane) Complete(ctx context.Context, req Request, emit func(Chunk)) (Out
 		if !failover || sawAny || !switchableFailure(uerr) {
 			return out, uerr
 		}
-		next := l.nextSameModel(req.Needs, model, tried, req.Needs.PromptTokens)
+		allow, deny := l.routeAllowDeny(model)
+		next := l.nextSameModel(req.Needs, model, tried, req.Needs.PromptTokens, allow, deny)
 		if next == "" {
 			// User-authored catch chain (issue #25): an explicit ranking beats
 			// the lane's own pick, but only after a same-model twin is ruled out.
-			next = l.nextChainModel(req.Needs, tried)
+			next = l.nextChainModel(req.Needs, tried, allow, deny)
 		}
 		if next == "" {
 			// No same-model channel and no user chain hit: fall back to the old
 			// behaviour of switching to whatever model can answer. That changes
 			// the model the user asked for, so it stays the last choice.
-			next = l.nextCandidate(req.Needs, tried)
+			next = l.nextCandidate(req.Needs, tried, allow, deny)
 		}
 		if next == "" {
 			// The lane has nothing left to offer this request — tell the
@@ -1186,7 +1270,7 @@ func (l *Lane) Candidates(needs Needs, exclude string, n int) []string {
 	tried := map[string]bool{exclude: true}
 	out := []string{}
 	for len(out) < n {
-		c := l.nextCandidate(needs, tried)
+		c := l.nextCandidate(needs, tried, nil, nil)
 		if c == "" {
 			break
 		}
@@ -1209,7 +1293,20 @@ func (l *Lane) Candidates(needs Needs, exclude string, n int) []string {
 // ⚠️ The group is keyed on the *served* id, not the requested one: a failover
 // already moved to another model, and looking up the original id would let a
 // two-hop chain bounce between models.
-func (l *Lane) nextSameModel(needs Needs, servedModel string, tried map[string]bool, promptTokens int) string {
+// channelAllowed reports whether a model on the given channel may serve a
+// request under the route wall's allow/deny sets. A nil allow set means no
+// allow-constraint; deny always wins on conflict.
+func channelAllowed(ch string, allow, deny map[string]bool) bool {
+	if deny[ch] {
+		return false
+	}
+	if allow != nil && !allow[ch] {
+		return false
+	}
+	return true
+}
+
+func (l *Lane) nextSameModel(needs Needs, servedModel string, tried map[string]bool, promptTokens int, allow, deny map[string]bool) string {
 	l.mu.RLock()
 	groups := AggregateGroups(l.catalog)
 	throttle := l.throttle
@@ -1245,6 +1342,11 @@ func (l *Lane) nextSameModel(needs Needs, servedModel string, tried map[string]b
 				}
 			}
 		}
+		if m, ok := l.modelByID(id); ok {
+			if !channelAllowed(m.Channel, allow, deny) {
+				continue
+			}
+		}
 		return id
 	}
 	return ""
@@ -1273,7 +1375,7 @@ func (l *Lane) modelByID(id string) (ModelInfo, bool) {
 // and (under smart routing) capable of answering the request. It preserves the
 // caller's ranking: chain order wins over the lane's catalog ordering. A blank
 // or exhausted chain returns "".
-func (l *Lane) nextChainModel(needs Needs, tried map[string]bool) string {
+func (l *Lane) nextChainModel(needs Needs, tried map[string]bool, allow, deny map[string]bool) string {
 	l.mu.RLock()
 	chain := l.modelFallbackChain
 	byID := make(map[string]ModelInfo, len(l.catalog))
@@ -1295,6 +1397,9 @@ func (l *Lane) nextChainModel(needs Needs, tried map[string]bool) string {
 		if _, ok := byID[id]; !ok {
 			// Not in the catalog: never route a turn at a phantom model the
 			// upstream has no row for. A typo'd chain entry is silently skipped.
+			continue
+		}
+		if !channelAllowed(byID[id].Channel, allow, deny) {
 			continue
 		}
 		switch FreshState(av[id]) {
@@ -1320,7 +1425,7 @@ func (l *Lane) nextChainModel(needs Needs, tried map[string]bool) string {
 	return ""
 }
 
-func (l *Lane) nextCandidate(needs Needs, tried map[string]bool) string {
+func (l *Lane) nextCandidate(needs Needs, tried map[string]bool, allow, deny map[string]bool) string {
 	l.mu.RLock()
 	cat := make([]ModelInfo, 0, len(l.catalog))
 	for _, m := range l.catalog {
@@ -1347,6 +1452,9 @@ func (l *Lane) nextCandidate(needs Needs, tried map[string]bool) string {
 			continue
 		}
 		if tried[m.ID] || l.throttle.Throttled(m.ID) {
+			continue
+		}
+		if !channelAllowed(m.Channel, allow, deny) {
 			continue
 		}
 		switch FreshState(av[m.ID]) {

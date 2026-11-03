@@ -21,7 +21,7 @@ func TestNextCandidateSkipsHidden(t *testing.T) {
 	// Unchecked models stay probed-available here: the filter under test is
 	// the hidden set, not the probe verdict.
 	l.SetHidden(map[string]bool{"mimo-v2.6-flash-free": true})
-	if got := l.nextCandidate(Needs{}, map[string]bool{}); got != "space-bunny-free" {
+	if got := l.nextCandidate(Needs{}, map[string]bool{}, nil, nil); got != "space-bunny-free" {
 		t.Fatalf("next = %q, want space-bunny-free (hidden mimo must be skipped)", got)
 	}
 
@@ -29,7 +29,7 @@ func TestNextCandidateSkipsHidden(t *testing.T) {
 		"mimo-v2.6-flash-free": true,
 		"space-bunny-free":     true,
 	})
-	if got := l.nextCandidate(Needs{}, map[string]bool{}); got != "" {
+	if got := l.nextCandidate(Needs{}, map[string]bool{}, nil, nil); got != "" {
 		t.Fatalf("next = %q, want empty when every model is hidden", got)
 	}
 	// The 429 hint body lists candidates through Candidates(); it must not
@@ -40,7 +40,7 @@ func TestNextCandidateSkipsHidden(t *testing.T) {
 
 	// Re-showing a model restores it immediately — the set swap is atomic.
 	l.SetHidden(nil)
-	if got := l.nextCandidate(Needs{}, map[string]bool{}); got != "mimo-v2.6-flash-free" {
+	if got := l.nextCandidate(Needs{}, map[string]bool{}, nil, nil); got != "mimo-v2.6-flash-free" {
 		t.Fatalf("next = %q after clearing the hidden set, want mimo-v2.6-flash-free", got)
 	}
 }
