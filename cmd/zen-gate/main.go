@@ -62,6 +62,9 @@ func main() {
 	port := flag.Int("port", 0, "override listen port")
 	showVersion := flag.Bool("version", false, "print version and exit")
 	flag.Parse()
+	if os.Getenv("ZEN_GATE_HEADLESS") != "" {
+		*noTray = true
+	}
 	if *showVersion {
 		fmt.Println("zen-gate", gateway.Version)
 		return

@@ -1,0 +1,14 @@
+version: "3.8"
+services:
+  zen-gate:
+    build: .
+    ports:
+      - "8787:8787"
+    volumes:
+      - zen-gate-data:/data
+    environment:
+      - ZEN_GATE_HEADLESS=1
+      - ZEN_GATE_HOME=/data
+    restart: unless-stopped
+volumes:
+  zen-gate-data:
