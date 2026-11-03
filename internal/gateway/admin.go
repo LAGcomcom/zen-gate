@@ -96,6 +96,8 @@ func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request, rest string
 		s.adminTasks(w, r)
 	case strings.HasPrefix(rest, "probe/") && r.Method == http.MethodPost:
 		s.adminProbeOne(w, strings.TrimPrefix(rest, "probe/"))
+	case strings.HasPrefix(rest, "channel/") && r.Method == http.MethodPost:
+		s.adminChannelToggle(w, r, strings.TrimPrefix(rest, "channel/"))
 	case rest == "autostart" && r.Method == http.MethodPost:
 		var in struct {
 			Enabled bool `json:"enabled"`
@@ -144,6 +146,36 @@ func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request, rest string
 		s.adminCodeartsLoginPoll(w, r)
 	case rest == "codearts/logout" && r.Method == http.MethodPost:
 		s.adminCodeartsLogout(w)
+	case rest == "zcode/status" && r.Method == http.MethodGet:
+		s.adminZCodeStatus(w)
+	case rest == "zcode/login/start" && r.Method == http.MethodPost:
+		s.adminZCodeLoginStart(w, r)
+	case rest == "zcode/login/poll" && r.Method == http.MethodGet:
+		s.adminZCodeLoginPoll(w)
+	case rest == "zcode/logout" && r.Method == http.MethodPost:
+		s.adminZCodeLogout(w, r)
+	case rest == "zcode/account/toggle" && r.Method == http.MethodPost:
+		s.adminZCodeAccountToggle(w, r)
+	case rest == "trae/status" && r.Method == http.MethodGet:
+		s.adminTraeStatus(w)
+	case rest == "trae/login/start" && r.Method == http.MethodPost:
+		s.adminTraeLoginStart(w)
+	case rest == "trae/login/poll" && r.Method == http.MethodGet:
+		s.adminTraeLoginPoll(w)
+	case rest == "trae/logout" && r.Method == http.MethodPost:
+		s.adminTraeLogout(w, r)
+	case rest == "trae/account/toggle" && r.Method == http.MethodPost:
+		s.adminTraeAccountToggle(w, r)
+	case rest == "ext/status" && r.Method == http.MethodGet:
+		s.adminExtStatus(w)
+	case rest == "ext/add" && r.Method == http.MethodPost:
+		s.adminExtAdd(w, r)
+	case rest == "ext/remove" && r.Method == http.MethodPost:
+		s.adminExtRemove(w, r)
+	case rest == "ext/account/toggle" && r.Method == http.MethodPost:
+		s.adminExtToggle(w, r)
+	case rest == "channel/wall" && r.Method == http.MethodGet:
+		s.adminChannelWall(w)
 	case rest == "providers" && r.Method == http.MethodPost:
 		s.adminProviderSave(w, r)
 	case rest == "providers/delete" && r.Method == http.MethodPost:
@@ -152,6 +184,8 @@ func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request, rest string
 		s.adminProviderModels(w, r)
 	case rest == "models/visibility" && r.Method == http.MethodPost:
 		s.adminModelVisibility(w, r)
+	case rest == "models/pref" && r.Method == http.MethodPost:
+		s.adminModelPref(w, r)
 	case rest == "tags/retag" && r.Method == http.MethodPost:
 		s.adminRetag(w)
 	case rest == "tags/probe" && r.Method == http.MethodPost:
@@ -224,6 +258,7 @@ func adminAllowed(w http.ResponseWriter, r *http.Request, mutating bool) bool {
 func (s *Server) adminState(w http.ResponseWriter) {
 	cfg := s.Store.Config()
 	cat, av, egress := s.Lane.Snapshot()
+	probeDone, probeTotal := s.currentProbeProgress()
 	type modelRow struct {
 		ID            string             `json:"id"`
 		Name          string             `json:"name"`
@@ -252,20 +287,69 @@ func (s *Server) adminState(w http.ResponseWriter) {
 		// Custom marks a user-added provider's model (no lane probe, no quota).
 		Custom     bool   `json:"custom,omitempty"`
 		ProviderID string `json:"providerId,omitempty"`
+		// Channel names the free-lane source serving this id ("zen" for the
+		// empty-channel lane). Two channels may carry the same id; this is the
+		// attribution the merged list cannot show.
+		Channel string `json:"channel,omitempty"`
 		// Hidden marks a model the user unchecked: servable but not advertised
 		// to agent pickers.
 		Hidden bool `json:"hidden,omitempty"`
 		// Task is the run the card shows progress for: the in-flight 测试 /
 		// 能力实测, or the most recent one.
 		Task *ProbeTask `json:"task,omitempty"`
+		// Channels lists every free-lane bucket publishing this id — a
+		// rotation can mirror ids between the Zen lane and the Kilo pool, and
+		// the card must say so instead of showing two cards that fight over
+		// one hidden checkbox.
+		Channels []string `json:"channels,omitempty"`
+	}
+	// copyRank mirrors lane.channelCopyRank closely enough to pick a merged
+	// card's primary channel: the copy a request would actually ride —
+	// probe-usable first, then unprobed, then throttled/region-gated.
+	copyRank := func(state string) int {
+		switch state {
+		case lane.StateAvailable:
+			return 0
+		case lane.StateUnknown, "":
+			return 1
+		case lane.StateThrottled:
+			return 2
+		case lane.StateRegionBlock:
+			return 3
+		}
+		return 4
 	}
 	days, recent := s.Store.SnapshotStats()
 	notes := s.Lane.ThrottleNotes()
 	hidden := s.hiddenSet()
 	models := []modelRow{}
+	byID := map[string]int{}
 	for _, m := range cat {
+		ch := m.Channel
+		if ch == "" {
+			ch = "zen"
+		}
 		p := av[m.ID]
 		note := notes[m.ID]
+		// Same-id mirror from another bucket: merge into the existing card,
+		// and let a healthier copy take over the primary channel.
+		if idx, ok := byID[m.ID]; ok {
+			row := &models[idx]
+			seen := false
+			for _, c := range row.Channels {
+				if c == ch {
+					seen = true
+					break
+				}
+			}
+			if !seen {
+				row.Channels = append(row.Channels, ch)
+			}
+			if copyRank(stateOrDefault(p)) < copyRank(row.State) {
+				row.Channel = ch
+			}
+			continue
+		}
 		row := modelRow{
 			ID: m.ID, Name: m.Name, Blurb: m.Blurb, State: stateOrDefault(p), Detail: p.Detail,
 			TTFTMs: p.TTFTMs, LatencyMs: p.LatencyMs,
@@ -273,11 +357,21 @@ func (s *Server) adminState(w http.ResponseWriter) {
 			Reasoning:     m.Reasoning,
 			SystemOne:     m.SystemOne,
 			ContextWindow: m.ContextWindow, MaxOutput: m.MaxOutput,
-			Efforts: lane.EffortsFor(m, 0, cfg.DefaultMaxTokens, cfg.DefaultEffort),
+			// The same ladder /v1/models advertises (vendor-declared rungs win
+			// over the generic light/balanced/deep): the card and the picker
+			// must never disagree about what the model offers.
+			Efforts: func() []lane.LevelBudget {
+				lv, _ := effortLadder(m, s.modalityCapsOf(m.ID), cfg)
+				return lv
+			}(),
 			Hidden:  hidden[m.ID],
+			Channel: ch,
+			Channels: []string{ch},
 		}
 		if tag, ok := s.Store.ModelTagOf(m.ID); ok {
 			row.TagSource = tag.Source
+		} else if lane.CapabilityMatched(m.ID) {
+			row.TagSource = store.TagSourceHeuris
 		} else {
 			row.TagSource = store.TagSourceUnknown
 		}
@@ -296,6 +390,7 @@ func (s *Server) adminState(w http.ResponseWriter) {
 			}
 		}
 		row.Task = s.probeTasks.latest(m.ID)
+		byID[m.ID] = len(models)
 		models = append(models, row)
 	}
 	// Custom-provider models follow the free-lane ones so the 模型 page shows
@@ -354,6 +449,7 @@ func (s *Server) adminState(w http.ResponseWriter) {
 	settings := map[string]any{
 		"defaultMaxTokens":     cfg.DefaultMaxTokens,
 		"defaultEffort":        cfg.DefaultEffort,
+		"defaultModel":         cfg.DefaultModel,
 		"probeIntervalMinutes": cfg.ProbeIntervalMinutes,
 		"exposeRegion":         cfg.ExposeRegion,
 		"closeToTray":          cfg.CloseToTray,
@@ -375,7 +471,9 @@ func (s *Server) adminState(w http.ResponseWriter) {
 		"smartRouting":            cfg.SmartRouting,
 		"routingStrategy":         cfg.RoutingStrategy,
 		"laneFallbackToProviders": cfg.LaneFallbackToProviders,
+		"workBuddyCacheKey":       cfg.WorkBuddyCacheKey,
 		"autoTagEnabled":          cfg.AutoTagEnabled,
+		"openRefEnabled":          cfg.OpenRefEnabled,
 		"workBuddyEnabled":        cfg.WorkBuddyEnabled(),
 		"codeArtsEnabled":         cfg.CodeArts.Enabled,
 		"allowLan":                cfg.AllowLan,
@@ -395,7 +493,11 @@ func (s *Server) adminState(w http.ResponseWriter) {
 		"stats":               map[string]any{"days": days, "recent": recent},
 		"settings":            settings,
 		"probingModel":        s.currentProbingModel(),
+		"probeDone":           probeDone,
+		"probeTotal":          probeTotal,
 		"providers":           s.providerViews(),
+		"channels":            s.Store.ChannelViews(),
+		"modelPrefs":          s.Store.Config().ModelPrefs,
 		"providerPresets":     relay.Presets,
 		"subscriptions":       s.subsState(),
 		"announcements":       activeAnnouncements,
@@ -452,6 +554,7 @@ func (s *Server) adminSettings(w http.ResponseWriter, r *http.Request) {
 		Port                    *int             `json:"port"`
 		DefaultMaxTokens        *int             `json:"defaultMaxTokens"`
 		DefaultEffort           *string          `json:"defaultEffort"`
+		DefaultModel            *string          `json:"defaultModel"`
 		ProbeIntervalMinutes    *int             `json:"probeIntervalMinutes"`
 		ExposeRegion            *bool            `json:"exposeRegion"`
 		CloseToTray             *bool            `json:"closeToTray"`
@@ -466,7 +569,9 @@ func (s *Server) adminSettings(w http.ResponseWriter, r *http.Request) {
 		SmartRouting            *bool            `json:"smartRouting"`
 		RoutingStrategy         *string          `json:"routingStrategy"`
 		LaneFallbackToProviders *bool            `json:"laneFallbackToProviders"`
+		WorkBuddyCacheKey       *bool            `json:"workBuddyCacheKey"`
 		AutoTagEnabled          *bool            `json:"autoTagEnabled"`
+		OpenRefEnabled          *bool            `json:"openRefEnabled"`
 		WorkBuddyEnabled        *bool            `json:"workBuddyEnabled"`
 		CodeArtsEnabled         *bool            `json:"codeArtsEnabled"`
 		AllowLan                *bool            `json:"allowLan"`
@@ -491,6 +596,10 @@ func (s *Server) adminSettings(w http.ResponseWriter, r *http.Request) {
 	// writes revert each other's fields — toggling notifications in one tab
 	// rolled back a proxy saved in another (issue #32: "GUI 改完过一阵变回默认").
 	dirty := map[string]bool{}
+	// proxyNote carries why 订阅轮询 is saved but not yet dialing (no sidecar /
+	// no healthy node): a save must not report success for an egress that is
+	// not actually rotating.
+	proxyNote := ""
 	if in.Port != nil && *in.Port > 0 && *in.Port < 65536 && *in.Port != cfg.Port {
 		cfg.Port = *in.Port
 		changed = true
@@ -509,6 +618,14 @@ func (s *Server) adminSettings(w http.ResponseWriter, r *http.Request) {
 			changed = true
 			dirty["defaultEffort"] = true
 		}
+	}
+	// The default model is validated loosely here (non-empty string): the
+	// registry only honors it when the roster actually carries the id, so a
+	// stale pick cannot inject a dead default.
+	if in.DefaultModel != nil && strings.TrimSpace(*in.DefaultModel) != cfg.DefaultModel {
+		cfg.DefaultModel = strings.TrimSpace(*in.DefaultModel)
+		changed = true
+		dirty["defaultModel"] = true
 	}
 	if in.ProbeIntervalMinutes != nil && *in.ProbeIntervalMinutes > 0 {
 		cfg.ProbeIntervalMinutes = *in.ProbeIntervalMinutes
@@ -539,7 +656,9 @@ func (s *Server) adminSettings(w http.ResponseWriter, r *http.Request) {
 					cfg.ProxyURL = strings.TrimSpace(*in.ProxyURL)
 					dirty["proxyUrl"] = true
 				}
-				lane.SetProxy(cfg.ProxyMode, cfg.ProxyURL)
+				if note := s.installProxyMode(cfg.ProxyMode, cfg.ProxyURL); note != "" {
+					proxyNote = note
+				}
 				changed = true
 				dirty["proxyMode"] = true
 			}
@@ -552,7 +671,9 @@ func (s *Server) adminSettings(w http.ResponseWriter, r *http.Request) {
 	}
 	if in.ProxyURL != nil && in.ProxyMode == nil {
 		cfg.ProxyURL = strings.TrimSpace(*in.ProxyURL)
-		lane.SetProxy(cfg.ProxyMode, cfg.ProxyURL)
+		if note := s.installProxyMode(cfg.ProxyMode, cfg.ProxyURL); note != "" {
+			proxyNote = note
+		}
 		changed = true
 		dirty["proxyUrl"] = true
 	}
@@ -606,6 +727,12 @@ func (s *Server) adminSettings(w http.ResponseWriter, r *http.Request) {
 		changed = true
 		dirty["laneFallbackToProviders"] = true
 	}
+	if in.WorkBuddyCacheKey != nil {
+		cfg.WorkBuddyCacheKey = *in.WorkBuddyCacheKey
+		s.Lane.SetWorkBuddyCacheKey(cfg.WorkBuddyCacheKey)
+		changed = true
+		dirty["workBuddyCacheKey"] = true
+	}
 	if in.AutoTagEnabled != nil {
 		cfg.AutoTagEnabled = *in.AutoTagEnabled
 		if s.tagger != nil {
@@ -613,6 +740,13 @@ func (s *Server) adminSettings(w http.ResponseWriter, r *http.Request) {
 		}
 		changed = true
 		dirty["autoTagEnabled"] = true
+	}
+	openRefOn := false
+	if in.OpenRefEnabled != nil {
+		cfg.OpenRefEnabled = *in.OpenRefEnabled
+		openRefOn = *in.OpenRefEnabled
+		changed = true
+		dirty["openRefEnabled"] = true
 	}
 	if in.WorkBuddyEnabled != nil {
 		// The channel has no switch of its own: it serves when any account is
@@ -678,6 +812,12 @@ func (s *Server) adminSettings(w http.ResponseWriter, r *http.Request) {
 		s.Lane.SetCodeArtsAccount(cfg.CodeArts)
 		go s.Lane.RefreshCatalog(context.Background())
 	}
+	if openRefOn {
+		// Turning the reference on should fill capacities now, not when the
+		// 6-hour loop next fires — one detached pull after the commit, so it
+		// reads the just-published setting.
+		go s.OpenRefPull(context.Background())
+	}
 	if lanChanged {
 		// The reply must leave before the switchover: Rebind closes the very
 		// listener serving this request, which would truncate the response.
@@ -692,7 +832,11 @@ func (s *Server) adminSettings(w http.ResponseWriter, r *http.Request) {
 		s.logCat(logx.CatLifecycle, "info", "监听地址切换为 %s:%d", s.bindHost(), cfg.Port)
 		return
 	}
-	writeJSON(w, 200, map[string]any{"ok": true, "changed": changed})
+	out := map[string]any{"ok": true, "changed": changed}
+	if proxyNote != "" {
+		out["note"] = proxyNote
+	}
+	writeJSON(w, 200, out)
 }
 
 // commitSettings publishes exactly the fields this request validated (dirty).
@@ -712,6 +856,9 @@ func (s *Server) commitSettings(next *store.Config, dirty map[string]bool) {
 		}
 		if dirty["defaultEffort"] {
 			c.DefaultEffort = next.DefaultEffort
+		}
+		if dirty["defaultModel"] {
+			c.DefaultModel = next.DefaultModel
 		}
 		if dirty["probeIntervalMinutes"] {
 			c.ProbeIntervalMinutes = next.ProbeIntervalMinutes
@@ -755,8 +902,18 @@ func (s *Server) commitSettings(next *store.Config, dirty map[string]bool) {
 		if dirty["laneFallbackToProviders"] {
 			c.LaneFallbackToProviders = next.LaneFallbackToProviders
 		}
+		// Without this branch the WorkBuddy cache toggle was a phantom: the
+		// handler set the lane flag, answered {"changed":true}, and the next
+		// boot read the old false back. Exactly the failure the note above
+		// about workBuddyEnabled records, one field over.
+		if dirty["workBuddyCacheKey"] {
+			c.WorkBuddyCacheKey = next.WorkBuddyCacheKey
+		}
 		if dirty["autoTagEnabled"] {
 			c.AutoTagEnabled = next.AutoTagEnabled
+		}
+		if dirty["openRefEnabled"] {
+			c.OpenRefEnabled = next.OpenRefEnabled
 		}
 		// The WorkBuddy switch is a whole-pool flag: the handler sets Enabled on
 		// every account and marks the field dirty, so without this branch the
@@ -800,6 +957,10 @@ func (s *Server) adminModelVisibility(w http.ResponseWriter, r *http.Request) {
 		ID     string   `json:"id"`
 		IDs    []string `json:"ids"`
 		Hidden bool     `json:"hidden"`
+		// Auto marks a batch opinion about the CURRENT probe verdict (the
+		// 隐藏全部不可用 button) rather than a standing user choice: these
+		// entries self-clear when a later probe says available.
+		Auto bool `json:"auto"`
 	}
 	if err := decodeBody(r, &in); err != nil {
 		writeJSON(w, 400, map[string]any{"ok": false, "error": err.Error()})
@@ -818,6 +979,16 @@ func (s *Server) adminModelVisibility(w http.ResponseWriter, r *http.Request) {
 	for _, h := range cur.HiddenModels {
 		set[h] = true
 	}
+	// The auto list only participates when the request is itself an auto-hide
+	// or an unhide: a manual uncheck clears both (a standing opinion beats a
+	// batch one), a manual hide never lands in the expiring list.
+	manual := set
+	if in.Auto {
+		set = map[string]bool{}
+		for _, h := range cur.HiddenAuto {
+			set[h] = true
+		}
+	}
 	changed := 0
 	for _, id := range ids {
 		id = strings.TrimSpace(id)
@@ -834,14 +1005,60 @@ func (s *Server) adminModelVisibility(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if changed > 0 {
-		out := make([]string, 0, len(set))
-		for _, h := range cur.HiddenModels {
-			if set[h] {
+		if in.Auto {
+			out := make([]string, 0, len(set))
+			for h := range set {
 				out = append(out, h)
-				delete(set, h)
+			}
+			s.Store.Mutate(func(cfg *store.Config) { cfg.HiddenAuto = out })
+			if err := s.Store.Save(); err != nil {
+				writeJSON(w, 500, map[string]any{"ok": false, "error": err.Error()})
+				return
+			}
+			s.Lane.SetHidden(s.hiddenSet())
+			if s.logger != nil {
+				s.logger.Infof("模型可见性(自动): 隐藏 %v", ids)
+			}
+			if s.registry != nil {
+				time.AfterFunc(1500*time.Millisecond, func() {
+					if s.modelsSync != nil {
+						s.modelsSync()
+					}
+					if n := s.registry.ResyncEnabled(); n > 0 && s.logger != nil {
+						s.logger.Infof("可见性变化，已重新注入 %d 个已开启 Agent 的配置", n)
+					}
+				})
+			}
+			writeJSON(w, 200, map[string]any{"ok": true, "changed": changed})
+			return
+		}
+		if !in.Hidden {
+			// A manual uncheck is a standing opinion: also clear any batch
+			// auto-hide on the same ids so the model actually reappears.
+			dead := map[string]bool{}
+			for _, id := range ids {
+				id = strings.TrimSpace(id)
+				if id != "" {
+					dead[id] = true
+				}
+			}
+			keptAuto := cur.HiddenAuto[:0]
+			for _, h := range cur.HiddenAuto {
+				if dead[h] {
+					continue
+				}
+				keptAuto = append(keptAuto, h)
+			}
+			s.Store.Mutate(func(cfg *store.Config) { cfg.HiddenAuto = keptAuto })
+		}
+		out := make([]string, 0, len(manual))
+		for _, h := range cur.HiddenModels {
+			if manual[h] {
+				out = append(out, h)
+				delete(manual, h)
 			}
 		}
-		for h := range set {
+		for h := range manual {
 			out = append(out, h)
 		}
 		s.Store.Mutate(func(cfg *store.Config) { cfg.HiddenModels = out })
@@ -849,11 +1066,9 @@ func (s *Server) adminModelVisibility(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, 500, map[string]any{"ok": false, "error": err.Error()})
 			return
 		}
-		// Keep the lane's probe + failover filters in sync: a newly hidden
-		// model must stop being probed and must not be auto-picked as a
-		// failover/rate-limit-switch target (issue #103). An explicit request
-		// naming it still reaches the model.
-		s.Lane.SetHidden(out)
+		// The lane filters probes and failover candidates by its own copy of
+		// the set; push the new one now or the change waits for a reboot.
+		s.Lane.SetHidden(s.hiddenSet())
 		if s.logger != nil {
 			action := "恢复显示"
 			if in.Hidden {
@@ -992,17 +1207,16 @@ func (s *Server) adminProxyTest(w http.ResponseWriter, r *http.Request) {
 	client := &http.Client{Timeout: 10 * time.Second, Transport: transport}
 
 	t0 := time.Now()
-	// The probe rides the Kilo listing: it is the keyless source the gateway
-	// actually serves free models from, so "can this proxy reach upstream"
-	// means reaching that host. The retired Zen endpoint answered 200 here
-	// long after it stopped serving inference, which made the button lie.
 	req, err := http.NewRequestWithContext(r.Context(), http.MethodGet,
-		lane.KiloBase+"/models", nil)
+		lane.UpstreamBase+"/zen/v1/models", nil)
 	if err != nil {
 		writeJSON(w, 500, map[string]any{"ok": false, "error": err.Error()})
 		return
 	}
-	req.Header.Set("accept", "application/json")
+	for k, v := range lane.GatewayHeaders(lane.SessionForConversation("proxy-test"),
+		lane.MintRequestId(0), false, "application/json") {
+		req.Header.Set(k, v)
+	}
 	resp, err := client.Do(req)
 	latency := time.Since(t0).Milliseconds()
 	if err != nil {
@@ -1022,6 +1236,34 @@ func (s *Server) adminProxyTest(w http.ResponseWriter, r *http.Request) {
 }
 
 // --- 订阅轮询 (sing-box sidecar) ---------------------------------------------
+
+// installProxyMode applies a proxy mode at runtime: it swaps the lane's
+// transport AND, for 订阅轮询, installs the rotator that transport dials
+// through. Setting the mode alone was a silent no-op for rotation — the
+// transport asks the Rotator for an exit, a nil Rotator degrades every dial to
+// a plain one, so the panel said 订阅轮询 while every request still left from
+// the machine's own IP, and the next settings write put env back (#121).
+// The mode is always accepted (the user may be switching first and filling in
+// the subscription next); when rotation cannot actually dial yet, the returned
+// note says so instead of the panel silently claiming a working pool.
+func (s *Server) installProxyMode(mode, url string) (note string) {
+	if mode == "rotate" {
+		lane.SetProxy("rotate", "")
+		switch {
+		case s.subs == nil:
+			lane.SetRotator(nil)
+			return "订阅轮询已设为默认模式，但 sing-box 侧车尚未就绪：刷新订阅后自动接管出口"
+		case s.subs.Healthy() == 0:
+			lane.SetRotator(nil)
+			return "订阅轮询已设为默认模式，但当前没有可用节点：刷新订阅后自动接管出口"
+		}
+		lane.SetRotator(s.subs.AsRotator())
+		return ""
+	}
+	lane.SetRotator(nil)
+	lane.SetProxy(mode, url)
+	return ""
+}
 
 // adminSubsSave replaces the subscription list and the feature switch in one
 // call; enabling runs a full refresh cycle (fetch → parse → sidecar restart).
@@ -1078,11 +1320,21 @@ func (s *Server) adminSubsSave(w http.ResponseWriter, r *http.Request) {
 			if s.logger != nil {
 				s.logger.Errorf("订阅刷新失败: %v", err)
 			}
+			// A failed refresh must not move the egress: the previous mode
+			// keeps serving, which is what the panel's "刷新失败不动配置"
+			// promise means (#121).
 			return
 		}
+		// Enabling the pool IS choosing it as the way out: persist rotate and
+		// install the rotator in the same step. Saving the switch without the
+		// mode left cfg.ProxyMode at env, so the next settings write put env
+		// back and the pool stopped rotating (#121).
+		s.Store.Mutate(func(cfg *store.Config) { cfg.ProxyMode = "rotate" })
+		_ = s.Store.Save()
 		lane.SetProxy("rotate", "")
+		lane.SetRotator(s.subs.AsRotator())
 	}()
-	writeJSON(w, 200, map[string]any{"ok": true})
+	writeJSON(w, 200, map[string]any{"ok": true, "proxyMode": "rotate"})
 }
 
 // adminSubsRefresh re-runs the fetch/parse/restart/probe cycle on demand.
@@ -1098,6 +1350,15 @@ func (s *Server) adminSubsRefresh(w http.ResponseWriter, r *http.Request) {
 			if s.logger != nil {
 				s.logger.Errorf("订阅刷新失败: %v", err)
 			}
+			return
+		}
+		// A refresh that finally produced healthy nodes is exactly the moment
+		// the saved rotate mode starts working: the settings save could only
+		// note "侧车未就绪", so take over the egress here instead of leaving
+		// the mode installed with no rotator behind it (#121).
+		if s.Store.Config().ProxyMode == "rotate" && s.subs.Healthy() > 0 {
+			lane.SetProxy("rotate", "")
+			lane.SetRotator(s.subs.AsRotator())
 		}
 	}()
 	writeJSON(w, 200, map[string]any{"ok": true})
@@ -1249,7 +1510,10 @@ func (s *Server) adminUsageCSV(w http.ResponseWriter, r *http.Request) {
 	}
 	sort.Strings(modelList)
 	cw := csv.NewWriter(w)
-	_ = cw.Write(append([]string{"date", "requests", "failed", "input", "output"}, modelList...))
+	// cacheRead / cacheWrite sit next to input on purpose: "input" is every
+	// prompt token sent and cacheRead is the part of it the upstream already
+	// had, so the hit rate is a division on one row instead of a join.
+	_ = cw.Write(append([]string{"date", "requests", "failed", "input", "cacheRead", "cacheWrite", "output"}, modelList...))
 	dayKeys := make([]string, 0, len(days))
 	for k := range days {
 		dayKeys = append(dayKeys, k)
@@ -1258,7 +1522,8 @@ func (s *Server) adminUsageCSV(w http.ResponseWriter, r *http.Request) {
 	for _, day := range dayKeys {
 		d := days[day]
 		row := []string{day, strconv.Itoa(d.Requests), strconv.Itoa(d.Failed),
-			strconv.Itoa(d.Input), strconv.Itoa(d.Output)}
+			strconv.Itoa(d.Input), strconv.Itoa(d.CacheRead), strconv.Itoa(d.CacheWrite),
+			strconv.Itoa(d.Output)}
 		for _, m := range modelList {
 			row = append(row, strconv.Itoa(d.Models[m]))
 		}
@@ -1317,16 +1582,12 @@ func (s *Server) adminImport(w http.ResponseWriter, r *http.Request) {
 		if incoming.Providers[i].APIKey == store.MaskedValue {
 			incoming.Providers[i].APIKey = ""
 		}
-		// A masked multi-key export must not land its placeholders as keys;
-		// drop each masked entry and keep the real ones.
-		if len(incoming.Providers[i].APIKeys) > 0 {
-			kept := incoming.Providers[i].APIKeys[:0]
-			for _, k := range incoming.Providers[i].APIKeys {
-				if k != store.MaskedValue {
-					kept = append(kept, k)
-				}
+		// A masked export lists every balanced key as a placeholder; dropping
+		// them leaves an empty (harmless) entry rather than a fake credential.
+		for j, k := range incoming.Providers[i].APIKeys {
+			if k == store.MaskedValue {
+				incoming.Providers[i].APIKeys[j] = ""
 			}
-			incoming.Providers[i].APIKeys = kept
 		}
 	}
 	for i := range incoming.Subscriptions {
@@ -1369,6 +1630,9 @@ func (s *Server) adminImport(w http.ResponseWriter, r *http.Request) {
 	// Push the imported pool into the lane now: without this the imported
 	// accounts only took effect on the next boot.
 	s.Lane.SetWorkBuddyAccounts(incoming.WorkBuddyAccounts)
+	// Same for the hidden set: the lane's probe and failover filters read
+	// their own copy.
+	s.Lane.SetHidden(s.hiddenSet())
 	wbBumpPoolGen()
 	go s.Lane.RefreshCatalog(context.Background())
 	if s.logger != nil {
@@ -1440,6 +1704,93 @@ func (s *Server) adminTasks(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, 200, map[string]any{"model": model, "runs": s.probeTasks.history(model)})
+}
+
+// adminModelPref records (or, with an empty effort, clears) one model's
+// preferred thinking level — the rung the model page card stars. The value
+// is normalized here: the store only ever holds light/balanced/deep, and an
+// unknown spelling answers 400 instead of silently never applying.
+func (s *Server) adminModelPref(w http.ResponseWriter, r *http.Request) {
+	var in struct {
+		ID     string `json:"id"`
+		Effort string `json:"effort"`
+	}
+	if err := decodeBody(r, &in); err != nil {
+		writeJSON(w, 400, map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
+	in.ID = strings.TrimSpace(lane.BaseModelId(in.ID))
+	if in.ID == "" {
+		writeJSON(w, 400, map[string]any{"ok": false, "error": "missing id"})
+		return
+	}
+	level := ""
+	if strings.TrimSpace(in.Effort) != "" {
+		level = normalizeEffortParam(in.Effort)
+		if level == "" {
+			writeJSON(w, 400, map[string]any{"ok": false, "error": "未知档位: " + in.Effort + "（light / balanced / deep）"})
+			return
+		}
+	}
+	s.Store.Mutate(func(cfg *store.Config) {
+		if level == "" {
+			delete(cfg.ModelPrefs, in.ID)
+			if len(cfg.ModelPrefs) == 0 {
+				cfg.ModelPrefs = nil
+			}
+			return
+		}
+		if cfg.ModelPrefs == nil {
+			cfg.ModelPrefs = map[string]string{}
+		}
+		cfg.ModelPrefs[in.ID] = level
+	})
+	if err := s.Store.Save(); err != nil {
+		writeJSON(w, 500, map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
+	if s.logger != nil && level != "" {
+		s.logger.Infof("模型 %s 默认思考档 → %s", in.ID, level)
+	}
+	writeJSON(w, 200, map[string]any{"ok": true, "id": in.ID, "effort": level})
+}
+
+// adminChannelToggle flips one free-lane channel's enable flag (the
+// channels/<id>.json file) and rebuilds the catalog so its models leave or
+// rejoin the pickers immediately. Body: {"enabled": true|false}.
+func (s *Server) adminChannelToggle(w http.ResponseWriter, r *http.Request, rest string) {
+	id := strings.TrimSuffix(rest, "/enabled")
+	known := false
+	for _, c := range store.ChannelIDs {
+		if c == id {
+			known = true
+			break
+		}
+	}
+	if !known {
+		writeJSON(w, 404, map[string]any{"ok": false, "error": "未知渠道: " + id})
+		return
+	}
+	var in struct {
+		Enabled *bool `json:"enabled"`
+	}
+	if err := decodeBody(r, &in); err != nil || in.Enabled == nil {
+		writeJSON(w, 400, map[string]any{"ok": false, "error": "需要 enabled 字段"})
+		return
+	}
+	if err := s.Store.SetChannelEnabled(id, *in.Enabled); err != nil {
+		writeJSON(w, 500, map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
+	if s.logger != nil {
+		action := "启用"
+		if !*in.Enabled {
+			action = "停用"
+		}
+		s.logger.Infof("渠道 %s 已%s", id, action)
+	}
+	go s.Lane.RefreshCatalog(context.Background())
+	writeJSON(w, 200, map[string]any{"ok": true, "channel": id, "enabled": *in.Enabled})
 }
 
 // adminProbeOne re-tests a single model on demand and returns its fresh
@@ -1607,6 +1958,13 @@ func (s *Server) currentProbingModel() string {
 		return v
 	}
 	return s.Lane.ProbingModel()
+}
+
+// currentProbeProgress reports the running free-lane round as (done, total).
+// A custom-provider bulk round has its own per-card tasks and no single
+// counter, so it reports 0/0 here.
+func (s *Server) currentProbeProgress() (int, int) {
+	return s.Lane.ProbeProgress()
 }
 
 // setCustomProbe records one custom model's probe verdict for /state.

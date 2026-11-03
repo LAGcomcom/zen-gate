@@ -10,20 +10,23 @@ import (
 	"time"
 )
 
-// RefreshCatalog rebuilds the catalog from the source listings, which drops
-// every tag-patched verdict — the reload hook must fire synchronously before
-// the async notify broadcast, so readers woken by the change (the dashboard,
-// agent injection, the capability filter) never observe the raw rebuild
-// without its replayed verdicts.
+// RefreshCatalog rebuilds the catalog from the curated table + listing, which
+// drops every tag-patched verdict — the reload hook must fire synchronously
+// before the async notify broadcast, so readers woken by the change (the
+// dashboard, agent injection, the capability filter) never observe the raw
+// rebuild without its replayed verdicts.
 func TestRefreshCatalogFiresReloadHookBeforeBroadcast(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{
-			"data": []any{map[string]any{"id": "poolside/laguna-s-2.1:free", "isFree": true}},
+			"data": []any{map[string]any{"id": "brand-new-free", "owned_by": "opencode"}},
 		})
 	}))
 	defer srv.Close()
+	old := UpstreamBase
+	UpstreamBase = srv.URL
+	defer func() { UpstreamBase = old }()
 	oldKilo := KiloBase
-	KiloBase = srv.URL
+	KiloBase = srv.URL + "/kilo" // rows lack isFree: the kilo slice comes up empty
 	defer func() { KiloBase = oldKilo }()
 
 	l := NewLane()

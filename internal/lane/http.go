@@ -2,6 +2,7 @@ package lane
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -11,6 +12,7 @@ import (
 	"net/http"
 	neturl "net/url"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -135,12 +137,12 @@ type Rotator interface {
 	// Report books one failure against an (exit, model) pair. The ledger is
 	// only ever used to skip a combination known to be bad.
 	Report(nodeID, model, class string)
-	// ReportDead records that a real request through nodeID failed at the
-	// transport layer — the egress tunnel is broken though the node's local
-	// socks inbound still answers ("能连接但不能用"). Two consecutive hits
-	// downgrade the node to Alive=false so the rotation drops it and the
-	// dead-node recheck re-probes it, instead of letting every request hang
-	// for up to responseHeaderTimeout.
+	// ReportDead books one tunnel-level failure against a node: a transport
+	// reset / timeout / dead tunnel says the node itself is dying, which is
+	// node state — the (exit, model) ledger cannot express it, and probes
+	// cannot see it because the tunnel still connects. Two strikes inside the
+	// fail-memory window retire the node from rotation; the periodic
+	// dead-node probe brings it back once it answers again.
 	ReportDead(nodeID string)
 	// Revive clears the (exit, model) pair and the exit's transport cooldown
 	// after a real request for that model succeeded through it — real traffic
@@ -231,9 +233,9 @@ const streamIdleTimeout = 90 * time.Second
 func SetProxy(mode, url string) {
 	t := &http.Transport{
 		ResponseHeaderTimeout: responseHeaderTimeout,
-		// Pool tuning. Every upstream request funnels to a handful of hosts
-		// (the Kilo pool, WorkBuddy, CodeArts), yet the global upstream
-		// semaphore allows up to maxConcurrentUpstream (6) in flight at once. Go's
+		// Pool tuning. Every upstream request funnels to a single host
+		// (opencode.ai / the model API), yet the global upstream semaphore
+		// allows up to maxConcurrentUpstream (6) in flight at once. Go's
 		// default MaxIdleConnsPerHost is 2, so four of those six must re-do the
 		// TCP+TLS handshake on every turn: handshake flapping, ECONNRESET, and
 		// first-byte latency spikes -- the more agents you run at once, the
@@ -372,6 +374,91 @@ func classifyConnErr(err error) string {
 	return CodeTransport
 }
 
+// PostStreamed posts one completion request and delivers decoded `data:`
+// payloads to onData. The first ≤4 KiB are sniffed by body shape — the gateway
+// sometimes answers a stream request with SSE under an application/json
+// content-type — and the sniffed bytes are replayed ahead of the live reader.
+// An idle deadline resets on every chunk; total duration is unbounded.
+func PostStreamed(ctx context.Context, path string, body map[string]any, session, requestID string, onData func(payload []byte) error) (*Usage, error) {
+	payload, err := MarshalUpstreamBody(body)
+	if err != nil {
+		return nil, &UpstreamError{Code: CodeTransport, Message: err.Error()}
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, UpstreamBase+path, bytes.NewReader(payload))
+	if err != nil {
+		return nil, &UpstreamError{Code: CodeTransport, Message: err.Error()}
+	}
+	for k, v := range GatewayHeaders(session, requestID, true, "") {
+		req.Header.Set(k, v)
+	}
+	resp, err := laneHTTP.Do(req)
+	if err != nil {
+		if ctx.Err() != nil {
+			return nil, &UpstreamError{Code: CodeAborted, Message: "cancelled"}
+		}
+		return nil, &UpstreamError{Code: classifyConnErr(err), Message: err.Error()}
+	}
+	defer resp.Body.Close()
+
+	upstreamRID := headerRID(resp.Header)
+	retryAfter := 0
+	if ra := resp.Header.Get("retry-after"); ra != "" {
+		if n, perr := strconv.Atoi(ra); perr == nil && n > 0 && n < 3600 {
+			retryAfter = n
+		}
+	}
+
+	// One pump owns resp.Body for the whole call; the head bytes are read
+	// through it for shape inspection and then unread so decoding sees the
+	// full stream.
+	pump := newStreamReader(ctx, resp.Body, streamIdleTimeout)
+	defer pump.Close()
+	head := readUpTo(pump, 4096, 20*time.Second)
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		rest, _ := io.ReadAll(io.LimitReader(pump, 1<<20))
+		return nil, withRID(ClassifyFailure(resp.StatusCode, string(head)+string(rest), retryAfter), upstreamRID)
+	}
+
+	switch sniffBody(head) {
+	case "empty":
+		return nil, &UpstreamError{Code: CodeEmpty, Message: "empty response body", UpstreamRID: upstreamRID}
+	case "json", "unknown":
+		rest, _ := io.ReadAll(io.LimitReader(pump, 8<<20))
+		full := string(head) + string(rest)
+		var parsed any
+		if jerr := json.Unmarshal([]byte(full), &parsed); jerr != nil {
+			return nil, &UpstreamError{Code: CodeServer, Message: truncate(full, 300), UpstreamRID: upstreamRID}
+		}
+		if m, ok := parsed.(map[string]any); ok {
+			if _, has := m["error"]; has {
+				return nil, withRID(ClassifyFailure(resp.StatusCode, jsonString(m["error"]), retryAfter), upstreamRID)
+			}
+		}
+		if uerr := onData([]byte(full)); uerr != nil {
+			return nil, uerr
+		}
+		if m, ok := parsed.(map[string]any); ok {
+			return usageFromBody(m), nil
+		}
+		return nil, nil
+	}
+
+	pump.Unread(head)
+	// SSE body (whatever the header claimed).
+	usage, err := readSSE(pump, onData)
+	if err != nil {
+		if ctx.Err() != nil {
+			return usage, &UpstreamError{Code: CodeAborted, Message: "cancelled", UpstreamRID: upstreamRID}
+		}
+		if ue, ok := err.(*UpstreamError); ok {
+			return usage, withRID(ue, upstreamRID)
+		}
+		return usage, &UpstreamError{Code: CodeTransport, Message: err.Error(), UpstreamRID: upstreamRID}
+	}
+	return usage, nil
+}
+
 // headerRID reads the provider's trace id under either spelling it uses.
 func headerRID(h http.Header) string {
 	for _, key := range []string{"X-Request-Id", "Request-Id"} {
@@ -388,6 +475,42 @@ func withRID(e *UpstreamError, rid string) *UpstreamError {
 		e.UpstreamRID = rid
 	}
 	return e
+}
+
+// GetJSON performs a fingerprinted GET (model listing).
+func GetJSON(ctx context.Context, path string, session, requestID string, out any) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, UpstreamBase+path, nil)
+	if err != nil {
+		return err
+	}
+	for k, v := range GatewayHeaders(session, requestID, false, "application/json") {
+		req.Header.Set(k, v)
+	}
+	// Reuse the shared, proxy-aware client (and its tuned connection pool)
+	// instead of allocating a fresh client -- and a hard 15s Timeout -- on
+	// every listing call. The 15s cap is what fails cold-start / under-load
+	// listings (#41/#36): the response is alive but slow to arrive. Bound the
+	// call with the caller's context; only when that context carries no
+	// deadline do we fall back to a 30s cap, so a hung listing is still
+	// reclaimed instead of blocking forever.
+	if _, hasDeadline := ctx.Deadline(); !hasDeadline {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, 30*time.Second)
+		defer cancel()
+	}
+	resp, err := laneHTTP.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	data, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
+	if err != nil {
+		return err
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return ClassifyFailure(resp.StatusCode, string(data), 0)
+	}
+	return json.Unmarshal(data, out)
 }
 
 // --- body-shape sniffing -------------------------------------------------
@@ -597,8 +720,9 @@ func (s *streamReader) readWithTimeout(p []byte, timeout time.Duration) (int, er
 }
 
 // readSSE parses `data:` frames, dropping comments and [DONE]. Usage-bearing
-// frames are merged into the returned total (each field appears on at most a
-// couple of terminal frames, so summation matches the reference behaviour).
+// frames are folded into the returned total with a per-field max: several
+// upstreams repeat the running usage snapshot on terminal (sometimes every)
+// frame, so summation would compound the same tokens many times over (#105).
 func readSSE(r io.Reader, onData func([]byte) error) (*Usage, error) {
 	br := bufio.NewReaderSize(r, 64*1024)
 	var usage *Usage
@@ -623,13 +747,13 @@ func readSSE(r io.Reader, onData func([]byte) error) (*Usage, error) {
 		}
 		var frame map[string]any
 		if json.Unmarshal([]byte(payload), &frame) == nil {
-		if u := mapUsage(frame); u != nil {
-			if usage == nil {
-				usage = u
-			} else {
-				usage.MergeMax(u)
+			if u := mapUsage(frame); u != nil {
+				if usage == nil {
+					usage = u
+				} else {
+					usage.MergeMax(u)
+				}
 			}
-		}
 			if _, has := frame["error"]; has {
 				return usage, ClassifyFailure(0, jsonString(frame["error"]), 0)
 			}
@@ -656,32 +780,86 @@ func mapUsage(frame map[string]any) *Usage {
 	if m, ok := frame["usage"].(map[string]any); ok {
 		changed = num(&u.Input, m, "prompt_tokens", "input_tokens") || changed
 		changed = num(&u.Output, m, "completion_tokens", "output_tokens") || changed
-		changed = num(&u.CacheRead, m, "cache_read_input_tokens", "cached_tokens", "cache_read_tokens") || changed
+		changed = num(&u.CacheRead, m, "cache_read_input_tokens", "cached_tokens",
+			"cache_read_tokens", "prompt_cache_hit_tokens") || changed
 		changed = num(&u.CacheWrite, m, "cache_creation_input_tokens", "cache_write_tokens") || changed
 		changed = num(&u.TotalTokens, m, "total_tokens") || changed
+		// OpenAI nests cached_tokens under prompt_tokens_details; read it
+		// only when no flat key already filled CacheRead, so one frame can
+		// never count its cache twice.
+		if u.CacheRead == 0 {
+			if pd, ok := m["prompt_tokens_details"].(map[string]any); ok {
+				changed = num(&u.CacheRead, pd, "cached_tokens") || changed
+			}
+		}
 		if rd, ok := m["reasoning_tokens"]; ok {
 			if f, ok := toNum(rd); ok && f >= 0 {
 				u.Reasoning = int(f)
 				changed = true
 			}
 		}
+		// Which family spoke decides whether Input already contains the cache
+		// hits. prompt_tokens (OpenAI, and every OpenAI-compatible vendor) is
+		// the inclusive spelling; a bare input_tokens with a separate
+		// cache_read_input_tokens is Anthropic's exclusive one.
+		u.CacheInclusive = usageInputIsInclusive(m)
 	}
 	// Anthropic message_start carries usage at the top of the message object.
+	//
+	// A frame carrying BOTH the flat usage and message.usage is not something
+	// either protocol does — but a forwarding proxy can produce it, and `num`
+	// ACCUMULATES (that is what makes Merge work). Adding the same input_tokens
+	// twice would double the prompt on every such frame, so each field here is
+	// read only when the flat block left it empty.
 	if msg, ok := frame["message"].(map[string]any); ok {
 		if mm, ok := msg["usage"].(map[string]any); ok {
-			changed = num(&u.Input, mm, "input_tokens") || changed
-			changed = num(&u.Output, mm, "output_tokens") || changed
-			changed = num(&u.CacheRead, mm, "cache_read_input_tokens") || changed
-			changed = num(&u.CacheWrite, mm, "cache_creation_input_tokens") || changed
+			if u.Input == 0 {
+				changed = num(&u.Input, mm, "input_tokens") || changed
+			}
+			if u.Output == 0 {
+				changed = num(&u.Output, mm, "output_tokens") || changed
+			}
+			if u.CacheRead == 0 {
+				changed = num(&u.CacheRead, mm, "cache_read_input_tokens") || changed
+			}
+			if u.CacheWrite == 0 {
+				changed = num(&u.CacheWrite, mm, "cache_creation_input_tokens") || changed
+			}
+			u.CacheInclusive = u.CacheInclusive || usageInputIsInclusive(mm)
 		}
 	}
 	if !changed {
 		return nil
 	}
 	if u.TotalTokens == 0 {
-		u.TotalTokens = u.Input + u.Output
+		// Count the whole prompt, not just the fresh part: an Anthropic
+		// frame omits total_tokens, and input_tokens there excludes the cache
+		// hits, so adding Input alone understated the turn by the hit size.
+		u.TotalTokens = u.InputTotal() + u.Output
 	}
 	return u
+}
+
+// usageInputIsInclusive reports whether this usage block spells its input the
+// OpenAI way — that is, whether Input ALREADY contains whatever cached count
+// sits beside it.
+//
+// prompt_tokens is the tell: its presence means the number is the whole prompt,
+// and Anthropic's input_tokens is the exclusive spelling (its own accounting
+// adds cache_read_input_tokens on top when a total is wanted).
+//
+// The DeepSeek / Tencent family needs the second rule: it reports the hit as
+// prompt_cache_hit_tokens with a matching prompt_cache_miss_tokens, and some
+// gateways in that family omit prompt_tokens entirely. Treating such a frame as
+// exclusive would make InputTotal() = 0 + hit and InputFresh() = 0 — a turn
+// that "sent nothing" while reporting 7808 cached tokens.
+func usageInputIsInclusive(m map[string]any) bool {
+	if _, has := m["prompt_tokens"]; has {
+		return true
+	}
+	_, hit := m["prompt_cache_hit_tokens"]
+	_, miss := m["prompt_cache_miss_tokens"]
+	return hit || miss
 }
 
 func num(dst *int, m map[string]any, keys ...string) bool {
@@ -710,6 +888,8 @@ func toNum(v any) (float64, bool) {
 }
 
 // Merge folds one partial usage into another (fields present on either side).
+// It is additive by design: the right tool when the two sides describe
+// different physical calls, e.g. a continuation that re-bills the prompt.
 func (u *Usage) Merge(o *Usage) {
 	if o == nil {
 		return
@@ -720,15 +900,19 @@ func (u *Usage) Merge(o *Usage) {
 	u.CacheRead += o.CacheRead
 	u.CacheWrite += o.CacheWrite
 	u.TotalTokens += o.TotalTokens
+	// Summing keeps each side's own convention, so the sum is inclusive only
+	// when both halves were: one exclusive half added to an inclusive one
+	// describes neither shape.
+	u.CacheInclusive = u.CacheInclusive && o.CacheInclusive
 }
 
-// MergeMax folds a streaming usage frame into another by taking the larger of
-// each field rather than adding. Streaming usage is a cumulative snapshot, not a
-// delta: a provider that repeats the same complete block across frames (OpenAI
-// include_usage) would be double-counted by a naive += — inflating input by
-// 30–1400x (issue #105) — while Anthropic legitimately splits input (in
-// message_start) from output (in message_delta) across two frames. Per-field max
-// handles both: repeats collapse to one value, splits and growth take the latest.
+// MergeMax folds one usage snapshot into another keeping the larger value per
+// field. Streaming upstreams repeat the running total on terminal frames and
+// some repeat full usage blocks on every frame, so summation would compound
+// the same tokens many times over (issue #105); a per-field max collapses the
+// repeats and keeps the latest figure. CacheRead stays independent of Input:
+// OpenAI's prompt_tokens already includes cached tokens, while Anthropic
+// reports them separately, and either way max-per-field keeps both honest.
 func (u *Usage) MergeMax(o *Usage) {
 	if o == nil {
 		return
@@ -751,6 +935,11 @@ func (u *Usage) MergeMax(o *Usage) {
 	if o.TotalTokens > u.TotalTokens {
 		u.TotalTokens = o.TotalTokens
 	}
+	// One frame of a stream sometimes carries the usage block without the
+	// spelling that identifies its family (a terminal-only frame, or one that
+	// omits prompt_tokens on a later snapshot). Let that empty side inherit the
+	// family instead of erasing what the first frame proved.
+	u.CacheInclusive = u.CacheInclusive || o.CacheInclusive
 }
 
 func jsonString(v any) string {

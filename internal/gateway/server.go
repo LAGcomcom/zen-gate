@@ -26,6 +26,7 @@ import (
 	"zen-gate/internal/autotag"
 	"zen-gate/internal/lane"
 	"zen-gate/internal/logx"
+	"zen-gate/internal/relay"
 	"zen-gate/internal/store"
 )
 
@@ -110,6 +111,13 @@ type SubsController interface {
 	SetPath(path string) error
 	Healthy() int
 	Status() map[string]any
+	// AsRotator exposes the manager as the lane's per-request egress rotator.
+	// The settings page can switch 上游代理 to 订阅轮询 at runtime, and without
+	// this the mode only ever worked when the process happened to boot that
+	// way: lane.SetProxy("rotate") installs a transport whose dialer asks the
+	// Rotator, and a nil Rotator degrades every dial to a plain one — so the
+	// pool looked enabled while every request left from one IP (#121).
+	AsRotator() lane.Rotator
 }
 
 // SetSubs wires the sidecar manager.
@@ -252,22 +260,34 @@ func New(l *lane.Lane, st *store.Store) *Server {
 		_ = st.FlushStats()
 		s.NoteCall(rec)
 	}
+	// A custom provider that refuses the cache-declaring request shape is
+	// remembered: the refusal is about our body, not the user's key, and
+	// rediscovering it on every turn would bill the same 400 twice per request
+	// forever. One retry in the plain shape, then the provider carries NoCache.
+	relay.SetCacheRefusedHandler(func(providerID string) {
+		st.Mutate(func(cfg *store.Config) {
+			for i := range cfg.Providers {
+				if cfg.Providers[i].ID == providerID {
+					cfg.Providers[i].NoCache = true
+				}
+			}
+		})
+		_ = st.Save()
+		if s.logger != nil {
+			s.logger.Infof("供应商 %s 拒绝缓存字段，已记住并改发纯请求体", providerID)
+		}
+	})
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", s.safeRoute)
 	s.mux = mux
 	// tags.json is the durable half of a verdict; the catalog is rebuilt from
-	// the serving sources on every boot AND on every RefreshCatalog (every probe
-	// interval), so without a replay hook a measured 音频/文件 capability would
-	// vanish a poll later and routing/agent injection would fall back to the
-	// name guess. Replay synchronously so readers woken by the rebuild never
-	// see the raw catalog.
+	// the curated table on every boot AND on every RefreshCatalog (every probe
+	// interval), so without a replay hook a measured 音频/文件 capability or an
+	// openref capacity would vanish a poll later and routing/agent injection
+	// would fall back to the name guess. Replay synchronously so readers woken
+	// by the rebuild never see the raw catalog.
 	l.OnCatalogReload = s.applyStoredTags
 	s.applyStoredTags()
-	// Seed the lane's hidden-model set from the persisted config so models the
-	// user unchecked on the 模型 page are skipped by probing and failover from
-	// the first boot (issue #103). adminModelVisibility keeps it in sync on
-	// every toggle.
-	s.Lane.SetHidden(st.Config().HiddenModels)
 	return s
 }
 
@@ -312,6 +332,11 @@ func (s *Server) safeRoute(w http.ResponseWriter, r *http.Request) {
 // Start binds the listener and serves in the background: loopback, or every
 // interface when the user turned on 局域网访问.
 func (s *Server) Start() error {
+	// Seed the lane's hidden set once up front: the probe round and the
+	// failover scan read their own copy, not the store, so without this the
+	// user's unchecked models kept being probed (and billing quota) until the
+	// first visibility toggle (issue #103).
+	s.Lane.SetHidden(s.hiddenSet())
 	addr := fmt.Sprintf("%s:%d", s.bindHost(), s.Store.Config().Port)
 	s.srv = &http.Server{
 		Addr:    addr,
@@ -448,7 +473,10 @@ func (s *Server) route(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	switch {
-	case path == "/health", path == "/healthz":
+	case path == "/health" || path == "/healthz":
+		// /healthz is the supervisor spelling (docker healthchecks, systemd
+		// probes, load balancers): same unauthenticated liveness answer, no
+		// key and no state — a readiness probe must not depend on config.
 		writeJSON(w, 200, map[string]any{"ok": true, "service": "zen-gate"})
 	case path == "/v1/models" && r.Method == http.MethodGet:
 		if !s.authorized(w, r) {
@@ -544,7 +572,10 @@ func bearerOf(r *http.Request) string {
 func (s *Server) handleListModels(w http.ResponseWriter, r *http.Request) {
 	cfg := s.Store.Config()
 	data := []map[string]any{}
-	for _, m := range s.VisibleModels() {
+	vis := s.VisibleModels()
+	// The same ordering the Codex catalog uses: two pickers, one truth.
+	s.sortPickerEntries(vis)
+	for _, m := range vis {
 		data = append(data, s.modelCard(m, m.ID, "zen-gate", cfg, true))
 	}
 	hidden := s.hiddenSet()
@@ -564,11 +595,40 @@ func (s *Server) handleListModels(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]any{"object": "list", "data": data})
 }
 
+// sortPickerEntries orders a model picker the same way everywhere — /v1/models
+// and the Codex catalog must not disagree: free models before providers,
+// region-gated rows sink (with a CN egress they only ever answer RegionError),
+// then by probe state — available first, unknown middle, throttled last.
+func (s *Server) sortPickerEntries(models []lane.ModelInfo) {
+	_, av, _ := s.Lane.Snapshot()
+	priority := map[string]int{
+		lane.StateAvailable: 100,
+		lane.StateUnknown:   50,
+		lane.StateThrottled: 20,
+	}
+	stateOf := func(id string) string {
+		if p, ok := av[id]; ok {
+			return lane.FreshState(p)
+		}
+		return lane.StateUnknown
+	}
+	sort.SliceStable(models, func(i, j int) bool {
+		pi, pj := isProviderID(models[i].ID), isProviderID(models[j].ID)
+		if pi != pj {
+			return pj // free models first
+		}
+		if models[i].RegionSensitive != models[j].RegionSensitive {
+			return models[j].RegionSensitive
+		}
+		return priority[stateOf(models[i].ID)] > priority[stateOf(models[j].ID)]
+	})
+}
+
 // modelCard is one /v1/models entry: the OpenAI fields plus the capability
 // half. A capacity nothing states is omitted — an absent number is honest
 // where a default would be a claim the gateway cannot support.
 //
-// floor carries what the serving source's listing declares; the merged verdict
+// floor carries what the free lane's curated table states; the merged verdict
 // (实测 > 上游声明 > AI标注 > 规则) overrides it wherever it reached a verdict,
 // so a probe result is what a client reads instead of the name guess.
 func (s *Server) modelCard(floor lane.ModelInfo, id, ownedBy string, cfg *store.Config, freeLane bool) map[string]any {
@@ -577,9 +637,12 @@ func (s *Server) modelCard(floor lane.ModelInfo, id, ownedBy string, cfg *store.
 	vision, audio, file, reasoning := floor.Vision, floor.AudioInput, floor.FileInput, floor.Reasoning
 	contextWindow, maxOutput := floor.ContextWindow, floor.MaxOutput
 	source := store.TagSourceUnknown
-	// A source that declares its own capacities is the baseline, so only a real
+	if freeLane && lane.CapabilityMatched(upstream) {
+		source = store.TagSourceHeuris
+	}
+	// For a free-lane model the curated table is the baseline, so only a real
 	// verdict (实测 / 上游声明 / AI标注) may override it — the name regexes are
-	// weaker evidence than the listing, and they used to demote a probe-verified
+	// weaker evidence than the table, and they used to demote a probe-verified
 	// 思考 model to plain text.
 	if caps.Known && (!freeLane || caps.Source != store.TagSourceHeuris) {
 		vision, audio, file, reasoning = caps.Vision, caps.Audio, caps.File, caps.Reasoning
@@ -651,13 +714,49 @@ func (s *Server) modelCard(floor lane.ModelInfo, id, ownedBy string, cfg *store.
 	return entry
 }
 
-// hiddenSet snapshots the user-hidden model ids.
+// hiddenSet snapshots the user-hidden model ids: manual unchecks plus the
+// auto-hidden ones the batch button wrote. A manual uncheck is a standing
+// opinion; an auto-hide expires the moment a probe says available again.
 func (s *Server) hiddenSet() map[string]bool {
+	cfg := s.Store.Config()
 	set := map[string]bool{}
-	for _, h := range s.Store.Config().HiddenModels {
+	for _, h := range cfg.HiddenModels {
+		set[h] = true
+	}
+	for _, h := range cfg.HiddenAuto {
 		set[h] = true
 	}
 	return set
+}
+
+// ClearAutoHidden drops ids from the auto-hidden list once the lane reports
+// them available again: the "this model is dead" opinion that hid it has been
+// factually overturned, and a hidden-forever verdict would keep a healthy
+// model out of every picker until the next restart.
+func (s *Server) ClearAutoHidden(ids ...string) {
+	if len(ids) == 0 {
+		return
+	}
+	dead := map[string]bool{}
+	for _, id := range ids {
+		dead[id] = true
+	}
+	changed := false
+	s.Store.Mutate(func(cfg *store.Config) {
+		kept := cfg.HiddenAuto[:0]
+		for _, h := range cfg.HiddenAuto {
+			if dead[h] {
+				changed = true
+				continue
+			}
+			kept = append(kept, h)
+		}
+		cfg.HiddenAuto = kept
+	})
+	if changed {
+		_ = s.Store.Save()
+		s.Lane.SetHidden(s.hiddenSet())
+	}
 }
 
 // isProviderID reports whether a gateway id names a custom-provider model.
@@ -770,17 +869,8 @@ func (s *Server) handleCodexCatalog(w http.ResponseWriter, r *http.Request) {
 	// the picker's live refresh instead of being drowned back out.
 	models := s.InjectableModels()
 	_, av, _ := s.Lane.Snapshot()
-	customName := map[string]string{}
-	providers := s.Store.Config().Providers
-	for i := range providers {
-		p := &providers[i]
-		if !p.Enabled {
-			continue
-		}
-		for _, m := range p.Models {
-			customName[p.ID+"/"+m] = p.Name
-		}
-	}
+	// The same state vocabulary the shared picker sort uses; the per-entry
+	// descriptions below still read it.
 	priority := map[string]int{
 		lane.StateAvailable: 100,
 		lane.StateUnknown:   50,
@@ -792,21 +882,22 @@ func (s *Server) handleCodexCatalog(w http.ResponseWriter, r *http.Request) {
 		}
 		return lane.StateUnknown
 	}
+	customName := map[string]string{}
+	providers := s.Store.Config().Providers
+	for i := range providers {
+		p := &providers[i]
+		if !p.Enabled {
+			continue
+		}
+		for _, m := range p.Models {
+			customName[p.ID+"/"+m] = p.Name
+		}
+	}
 	// Provider models sink below every free model — including region-gated
 	// ones. The free lane is the product; a provider is the user's own
 	// addition, and its entries carry no live state to rank by anyway.
-	sort.SliceStable(models, func(i, j int) bool {
-		pi, pj := isProviderID(models[i].ID), isProviderID(models[j].ID)
-		if pi != pj {
-			return pj // free models first
-		}
-		// Region-gated models sink to the bottom of the free half: with a CN
-		// egress they only ever answer with a RegionError.
-		if models[i].RegionSensitive != models[j].RegionSensitive {
-			return models[j].RegionSensitive
-		}
-		return priority[stateOf(models[i].ID)] > priority[stateOf(models[j].ID)]
-	})
+	// The comparator itself is shared with /v1/models: two pickers, one truth.
+	s.sortPickerEntries(models)
 	levels := []map[string]any{
 		{"effort": "low", "description": "轻量，最省额度"},
 		{"effort": "medium", "description": "均衡"},
@@ -885,6 +976,11 @@ func (s *Server) resolveEffort(model string, declared ...string) string {
 		if e := normalizeEffortParam(d); e != "" {
 			return e
 		}
+	}
+	// A per-model preference (the rung clicked on the model's card) outranks
+	// the global default; the card's star follows the same order.
+	if e := normalizeEffortParam(s.Store.Config().ModelPrefs[lane.BaseModelId(model)]); e != "" {
+		return e
 	}
 	if e := s.Store.Config().DefaultEffort; e == "light" || e == "deep" {
 		return e

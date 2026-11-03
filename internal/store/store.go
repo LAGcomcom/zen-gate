@@ -74,44 +74,45 @@ func (m ModelMeta) Declared() bool {
 }
 
 type Provider struct {
-	ID        string               `json:"id"`
-	Name      string               `json:"name"`
-	BaseURL   string               `json:"baseUrl"`
-	APIKey    string               `json:"apiKey,omitempty"`
-	// APIKeys lets one provider carry several credentials so the gateway can
-	// spread requests across them (issue #104). It is the preferred field;
-	// APIKey stays for backward compatibility with single-key configs and
-	// clients. EffectiveKeys merges both, deduplicated and non-empty.
+	ID      string `json:"id"`
+	Name    string `json:"name"`
+	BaseURL string `json:"baseUrl"`
+	APIKey  string `json:"apiKey,omitempty"`
+	// APIKeys holds additional keys for per-request load balancing (issue
+	// #104). Invariant: exactly one of the two fields carries the keys — one
+	// key lives in APIKey, two or more in APIKeys (with APIKey cleared) — so
+	// old builds reading a new config keep working and EffectiveKeys never
+	// sees a key twice.
 	APIKeys   []string             `json:"apiKeys,omitempty"`
 	Protocol  string               `json:"protocol"`
 	Enabled   bool                 `json:"enabled"`
 	Models    []string             `json:"models,omitempty"`
 	ModelMeta map[string]ModelMeta `json:"modelMeta,omitempty"` // by upstream model id
 	Note      string               `json:"note,omitempty"`      // preset provenance / key-application hint
+	// NoCache suppresses every prompt-cache hint this gateway would otherwise
+	// add to this provider's requests. Set automatically when the upstream
+	// rejected the cache-declaring shape with a 400, and settable by hand for a
+	// provider whose cache behaviour is not worth guessing about.
+	NoCache bool `json:"noCache,omitempty"`
 }
 
-// EffectiveKeys returns the deduplicated, non-empty credentials for this
-// provider, merging the legacy single APIKey with the APIKeys list. List
-// entries come first so a migrated config keeps its new pool as primary; the
-// single APIKey trails only when it is not already in the list.
-func (p *Provider) EffectiveKeys() []string {
-	seen := make(map[string]struct{})
+// EffectiveKeys lists the keys this provider rotates over, deduplicated and
+// in stable order: the APIKeys list, falling back to the single legacy APIKey
+// when no list is configured. The returned slice is a fresh copy.
+func (p Provider) EffectiveKeys() []string {
 	out := make([]string, 0, len(p.APIKeys)+1)
-	add := func(k string) {
+	seen := map[string]bool{}
+	for _, k := range p.APIKeys {
 		k = strings.TrimSpace(k)
-		if k == "" {
-			return
+		if k == "" || seen[k] {
+			continue
 		}
-		if _, dup := seen[k]; dup {
-			return
-		}
-		seen[k] = struct{}{}
+		seen[k] = true
 		out = append(out, k)
 	}
-	for _, k := range p.APIKeys {
-		add(k)
+	if len(out) == 0 && p.APIKey != "" {
+		out = append(out, p.APIKey)
 	}
-	add(p.APIKey)
 	return out
 }
 
@@ -172,10 +173,22 @@ type Config struct {
 	// back to user-added providers — these bill the user's own keys, so the
 	// default is off.
 	LaneFallbackToProviders bool `json:"laneFallbackToProviders,omitempty"`
+	// WorkBuddyCacheKey adds prompt_cache_key to WorkBuddy turns so the
+	// upstream buckets its prefix cache by our conversation id. Default off:
+	// the field is measured on the reference client for this same backend, but
+	// not yet on this lane, and the gateway in front of it inspects request
+	// bodies. Flip it on only after a live A/B shows the field is accepted AND
+	// the hit count moves — the whole point is the second half.
+	WorkBuddyCacheKey bool `json:"workBuddyCacheKey,omitempty"`
 	// AutoTagEnabled runs the background AI tagger: free-lane models classify
 	// every custom-provider model id's capabilities (vision/audio/file) into
 	// tags.json.
 	AutoTagEnabled bool `json:"autoTagEnabled"`
+	// OpenRefEnabled pulls the public OpenRouter model listing and fills the
+	// capacity fields (context window / max output) for lane models the local
+	// table knows nothing about — recorded as 上游声明, never overriding a
+	// curated row, a probe, or an AI verdict. See internal/openref.
+	OpenRefEnabled bool `json:"openRefEnabled,omitempty"`
 	// LogCategories is the per-class logging switch set. A partial or absent
 	// map merges onto logx.DefaultCategories(), so an upgraded config never
 	// turns the high-volume classes on by itself.
@@ -190,6 +203,20 @@ type Config struct {
 	// they stay servable if requested explicitly but disappear from agent
 	// pickers and /v1/models.
 	HiddenModels []string `json:"hiddenModels,omitempty"`
+	// DefaultModel names the model injected as every enabled agent's default
+	// pick. Empty (or naming a model that is not currently visible) falls
+	// back to the first visible model — the pre-config behaviour.
+	DefaultModel string `json:"defaultModel,omitempty"`
+	// ModelPrefs stores a per-model preferred thinking level (light /
+	// balanced / deep): the rung a request uses when the client declared no
+	// effort of its own. Keys are base model ids; an invalid value falls back
+	// to the global default at resolve time, so stale prefs never 404.
+	ModelPrefs map[string]string `json:"modelPrefs,omitempty"`
+	// HiddenAuto lists ids hidden by the 隐藏全部不可用 batch button. Unlike a
+	// manual uncheck, an auto-hide is an opinion about a moment: the moment a
+	// probe verdict says available again, the entry self-clears (see
+	// gateway/probe hidden sync). A manual uncheck never expires.
+	HiddenAuto []string `json:"hiddenAuto,omitempty"`
 	// WorkBuddyAccounts is the WorkBuddy 账号渠道 pool: one entry per login,
 	// in the order the user wants them tried. The lane writes rotated token
 	// pairs and activity dates back through its persist callback; Masked()
@@ -206,18 +233,37 @@ type Config struct {
 	// pair + the refresh binding). Rotated in place via the lane's persist
 	// callback; Masked() hides every secret field from config exports.
 	CodeArts lane.CAAccount `json:"codeArts"`
+	// ZCodeAccounts is the ZCode (智谱) 账号渠道 pool. The login is a device
+	// authorization flow this gateway runs itself, so these credentials are
+	// minted and stored here — never read from another app's files.
+	ZCodeAccounts []lane.ZCodeAccount `json:"zcodeAccounts,omitempty"`
+	// TraeAccounts is the TRAE (字节) 账号渠道 pool: the Cloud-IDE-JWT login
+	// plus the desktop fingerprint the upstream scores.
+	TraeAccounts []lane.TraeAccount `json:"traeAccounts,omitempty"`
+	// ExtAccounts is the pool for the preset "OpenAI-compatible + private
+	// headers" channels (cline / loomy / raccoon / lobsterai / astudio /
+	// modelscope). One list serves all six: Kind says which one an entry
+	// belongs to, and each channel keeps its own enable flag.
+	ExtAccounts []lane.ExtAccount `json:"extAccounts,omitempty"`
 	Window   WindowState    `json:"window"`
 }
 
 // DayStat aggregates one calendar day.
 type DayStat struct {
-	Requests  int            `json:"requests"`
-	Failed    int            `json:"failed"`
-	Input     int            `json:"input"`
-	Output    int            `json:"output"`
-	Models    map[string]int `json:"models,omitempty"`
-	ModelReqs map[string]int `json:"modelReqs,omitempty"`
-	Agents    map[string]int `json:"agents,omitempty"`
+	Requests int `json:"requests"`
+	Failed   int `json:"failed"`
+	// Input counts every prompt token sent (cached included), which is what an
+	// operator means by "how much did I push through". CacheRead is the part of
+	// it that hit the upstream's prefix cache, and it used to live only in the
+	// 40-row Recent ring: the day buckets dropped it, so the only place a cache
+	// hit could ever be seen was a scrollback that ages out within the hour.
+	Input      int            `json:"input"`
+	Output     int            `json:"output"`
+	CacheRead  int            `json:"cacheRead,omitempty"`
+	CacheWrite int            `json:"cacheWrite,omitempty"`
+	Models     map[string]int `json:"models,omitempty"`
+	ModelReqs  map[string]int `json:"modelReqs,omitempty"`
+	Agents     map[string]int `json:"agents,omitempty"`
 }
 
 // Stats is the persisted usage accounting.
@@ -294,7 +340,11 @@ type Store struct {
 	cfg       atomic.Pointer[Config]
 	perfDirty bool
 	tags      map[string]ModelTag
-	mu        sync.Mutex
+	// channels is the per-channel state behind <home>/channels/<id>.json —
+	// one file per free-lane channel carrying its enable flag and the model
+	// roster it currently serves (see channels.go).
+	channels map[string]*ChannelFile
+	mu       sync.Mutex
 }
 
 const perfMaxSamples = 30
@@ -376,6 +426,7 @@ func Open() (*Store, error) {
 		return nil, err
 	}
 	s := &Store{Home: home}
+	s.loadChannels()
 	cfg, err := loadJSON[Config](filepath.Join(home, "config.json"))
 	if err != nil || cfg.MainKey == "" {
 		def := defaultConfig()
@@ -466,12 +517,13 @@ func Open() (*Store, error) {
 			cfg.RoutingStrategy = "catalog"
 		}
 	}
-	// v11 used to ship the public capacity reference (issue #28). That source
-	// only ever filled capacities for the OpenCode Zen free lane, which is
-	// retired, so it is gone; the version still advances so an older config
-	// does not look like it is missing a live migration.
+	// v11: the public capacity reference (issue #28). Ships enabled: it only
+	// fills capacities for models the local table states nothing about, so
+	// what it can change is a guess being replaced by the upstream's own
+	// published number — recorded as 上游声明 and overruled by the first 实测.
 	if cfg.SchemaVersion < 11 {
 		cfg.SchemaVersion = 11
+		cfg.OpenRefEnabled = true
 	}
 	// v12: WorkBuddy became an account pool. The single account an existing
 	// install already has becomes the pool's first entry, so an upgrade needs
@@ -696,12 +748,8 @@ func (s *Store) Masked() *Config {
 		if cfg.Providers[i].APIKey != "" {
 			cfg.Providers[i].APIKey = MaskedValue
 		}
-		if len(cfg.Providers[i].APIKeys) > 0 {
-			masked := make([]string, len(cfg.Providers[i].APIKeys))
-			for j := range masked {
-				masked[j] = MaskedValue
-			}
-			cfg.Providers[i].APIKeys = masked
+		for j := range cfg.Providers[i].APIKeys {
+			cfg.Providers[i].APIKeys[j] = MaskedValue
 		}
 	}
 	for i := range cfg.Subscriptions {
@@ -746,6 +794,45 @@ func (s *Store) Masked() *Config {
 	if len(cfg.CodeArts.DPoPKey) > 0 {
 		cfg.CodeArts.DPoPKey = map[string]string{"_": MaskedValue}
 	}
+	// ZCode: the JWT authorizes inference and the two third-party tokens are
+	// separate identities. All three are secrets; user id and label stay so a
+	// shared config still says which account it was.
+	for i := range cfg.ZCodeAccounts {
+		if cfg.ZCodeAccounts[i].JWT != "" {
+			cfg.ZCodeAccounts[i].JWT = MaskedValue
+		}
+		if cfg.ZCodeAccounts[i].ZaiToken != "" {
+			cfg.ZCodeAccounts[i].ZaiToken = MaskedValue
+		}
+		if cfg.ZCodeAccounts[i].BigmodelToken != "" {
+			cfg.ZCodeAccounts[i].BigmodelToken = MaskedValue
+		}
+	}
+	// TRAE: the access token rides three request headers, so it is the one
+	// secret that matters. Machine/device ids are fingerprints, not secrets —
+	// but they tie an export to one machine, so they are masked too.
+	for i := range cfg.TraeAccounts {
+		if cfg.TraeAccounts[i].AccessToken != "" {
+			cfg.TraeAccounts[i].AccessToken = MaskedValue
+		}
+		if cfg.TraeAccounts[i].RefreshToken != "" {
+			cfg.TraeAccounts[i].RefreshToken = MaskedValue
+		}
+		if cfg.TraeAccounts[i].MachineID != "" {
+			cfg.TraeAccounts[i].MachineID = MaskedValue
+		}
+		if cfg.TraeAccounts[i].DeviceID != "" {
+			cfg.TraeAccounts[i].DeviceID = MaskedValue
+		}
+	}
+	// The preset channels each store exactly one secret per account (a JWT, a
+	// session string or an API key). The identity extras stay: they say which
+	// account it was without revealing the credential.
+	for i := range cfg.ExtAccounts {
+		if cfg.ExtAccounts[i].Secret != "" {
+			cfg.ExtAccounts[i].Secret = MaskedValue
+		}
+	}
 	return cfg
 }
 
@@ -758,19 +845,26 @@ func (c *Config) clone() *Config {
 	next.LogCategories = cloneBoolMap(c.LogCategories)
 	next.SeenAnnouncements = cloneSlice(c.SeenAnnouncements)
 	next.HiddenModels = cloneSlice(c.HiddenModels)
+	next.ModelPrefs = cloneMap(c.ModelPrefs)
+	next.HiddenAuto = cloneSlice(c.HiddenAuto)
 	next.Subscriptions = cloneSlice(c.Subscriptions)
 	next.WorkBuddyAccounts = cloneSlice(c.WorkBuddyAccounts)
+	next.ZCodeAccounts = cloneSlice(c.ZCodeAccounts)
+	next.TraeAccounts = cloneSlice(c.TraeAccounts)
+	next.ExtAccounts = cloneSlice(c.ExtAccounts)
 	// The CodeArts credential carries a DPoP key map; aliasing it across
 	// snapshots would let a later refresh mutate the value a prior export (or
 	// the old snapshot still being read) points at, so copy it.
 	if c.CodeArts.DPoPKey != nil {
 		next.CodeArts.DPoPKey = cloneMap(c.CodeArts.DPoPKey)
 	}
-		if c.Providers != nil {
+	if c.Providers != nil {
 		next.Providers = make([]Provider, len(c.Providers))
 		for i, p := range c.Providers {
 			p.Models = cloneSlice(p.Models)
 			p.ModelMeta = cloneMeta(p.ModelMeta)
+			// Aliasing the key list across snapshots would let a later save
+			// mutate the slice a request in flight (or an export) points at.
 			p.APIKeys = cloneSlice(p.APIKeys)
 			next.Providers[i] = p
 		}
@@ -835,9 +929,139 @@ func (s *Store) Save() error {
 // but every membership change is written here first so a restart comes back to
 // the same pool. Callers own Save().
 
-// UpsertWorkBuddyAccount inserts or replaces one account, matched by ID.
-func (s *Store) UpsertWorkBuddyAccount(acct lane.WBAccount) {
+// --- ZCode / TRAE account pools --------------------------------------------
+//
+// Same discipline as WorkBuddy above: the store is the authority, the lane keeps
+// a live copy for scheduling, and callers own Save().
+
+// UpsertZCodeAccount inserts or replaces one ZCode account, matched by ID.
+func (s *Store) UpsertZCodeAccount(acct lane.ZCodeAccount) {
 	if strings.TrimSpace(acct.ID) == "" {
+		acct.ID = "zcode-" + acct.UserID
+	}
+	s.Mutate(func(c *Config) {
+		for i := range c.ZCodeAccounts {
+			if c.ZCodeAccounts[i].ID == acct.ID {
+				c.ZCodeAccounts[i] = acct
+				return
+			}
+		}
+		c.ZCodeAccounts = append(c.ZCodeAccounts, acct)
+	})
+}
+
+// RemoveZCodeAccount drops one account; an empty id clears the pool.
+func (s *Store) RemoveZCodeAccount(id string) {
+	s.Mutate(func(c *Config) {
+		if strings.TrimSpace(id) == "" {
+			c.ZCodeAccounts = nil
+			return
+		}
+		keep := c.ZCodeAccounts[:0]
+		for _, a := range c.ZCodeAccounts {
+			if a.ID != id {
+				keep = append(keep, a)
+			}
+		}
+		c.ZCodeAccounts = keep
+	})
+}
+
+// SetZCodeAccountEnabled flips one account's enable flag.
+func (s *Store) SetZCodeAccountEnabled(id string, enabled bool) {
+	s.Mutate(func(c *Config) {
+		for i := range c.ZCodeAccounts {
+			if c.ZCodeAccounts[i].ID == id {
+				c.ZCodeAccounts[i].Enabled = enabled
+			}
+		}
+	})
+}
+
+// UpsertTraeAccount inserts or replaces one TRAE account, matched by ID.
+func (s *Store) UpsertTraeAccount(acct lane.TraeAccount) {
+	if strings.TrimSpace(acct.ID) == "" {
+		acct.ID = "trae-" + acct.UID
+	}
+	s.Mutate(func(c *Config) {
+		for i := range c.TraeAccounts {
+			if c.TraeAccounts[i].ID == acct.ID {
+				c.TraeAccounts[i] = acct
+				return
+			}
+		}
+		c.TraeAccounts = append(c.TraeAccounts, acct)
+	})
+}
+
+// RemoveTraeAccount drops one account; an empty id clears the pool.
+func (s *Store) RemoveTraeAccount(id string) {
+	s.Mutate(func(c *Config) {
+		if strings.TrimSpace(id) == "" {
+			c.TraeAccounts = nil
+			return
+		}
+		keep := c.TraeAccounts[:0]
+		for _, a := range c.TraeAccounts {
+			if a.ID != id {
+				keep = append(keep, a)
+			}
+		}
+		c.TraeAccounts = keep
+	})
+}
+
+// SetTraeAccountEnabled flips one account's enable flag.
+func (s *Store) SetTraeAccountEnabled(id string, enabled bool) {
+	s.Mutate(func(c *Config) {
+		for i := range c.TraeAccounts {
+			if c.TraeAccounts[i].ID == id {
+				c.TraeAccounts[i].Enabled = enabled
+			}
+		}
+	})
+}
+
+// UpsertExtAccount inserts or replaces one preset-channel account, matched by
+// (Kind, ID).
+func (s *Store) UpsertExtAccount(acct lane.ExtAccount) {
+	s.Mutate(func(c *Config) {
+		for i := range c.ExtAccounts {
+			if c.ExtAccounts[i].Kind == acct.Kind && c.ExtAccounts[i].ID == acct.ID {
+				c.ExtAccounts[i] = acct
+				return
+			}
+		}
+		c.ExtAccounts = append(c.ExtAccounts, acct)
+	})
+}
+
+// RemoveExtAccount drops one account; an empty id clears that channel's slice.
+func (s *Store) RemoveExtAccount(kind, id string) {
+	s.Mutate(func(c *Config) {
+		keep := c.ExtAccounts[:0]
+		for _, a := range c.ExtAccounts {
+			if a.Kind != kind || (id != "" && a.ID != id) {
+				keep = append(keep, a)
+			}
+		}
+		c.ExtAccounts = keep
+	})
+}
+
+// SetExtAccountEnabled flips one account's enable flag.
+func (s *Store) SetExtAccountEnabled(kind, id string, enabled bool) {
+	s.Mutate(func(c *Config) {
+		for i := range c.ExtAccounts {
+			if c.ExtAccounts[i].Kind == kind && c.ExtAccounts[i].ID == id {
+				c.ExtAccounts[i].Enabled = enabled
+			}
+		}
+	})
+}
+
+// UpsertWorkBuddyAccount inserts or replaces one account, matched by ID.
+func (s *Store) UpsertWorkBuddyAccount(acct lane.WBAccount) {	if strings.TrimSpace(acct.ID) == "" {
 		acct.ID = lane.WBAccountID(acct)
 	}
 	s.Mutate(func(c *Config) {
@@ -939,6 +1163,8 @@ func (s *Store) Record(rec lane.CallRecord) {
 	}
 	d.Input += rec.Input
 	d.Output += rec.Output
+	d.CacheRead += rec.CacheRead
+	d.CacheWrite += rec.CacheWrite
 	if rec.Model != "" {
 		if d.Models == nil {
 			d.Models = map[string]int{}

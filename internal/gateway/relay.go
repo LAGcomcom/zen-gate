@@ -95,8 +95,9 @@ func (s *Server) relayError(w http.ResponseWriter, anthropic bool, uerr *lane.Up
 func (s *Server) recordRelay(ctx context.Context, p *store.Provider, upstream, agent string, ok bool, usage lane.Usage, ttftMs int64, finish string, err *lane.UpstreamError) {
 	rec := lane.CallRecord{
 		Model: p.ID + "/" + upstream, Agent: agent, Ok: ok && err == nil,
-		Input: usage.Input, Output: usage.Output, Reasoning: usage.Reasoning,
-		CacheRead: usage.CacheRead, TTFTMs: ttftMs, At: time.Now().UnixMilli(),
+		Input: usage.InputTotal(), Output: usage.Output, Reasoning: usage.Reasoning,
+		CacheRead: usage.CacheRead, CacheWrite: usage.CacheWrite,
+		TTFTMs: ttftMs, At: time.Now().UnixMilli(),
 		Trace: lane.TraceFrom(ctx),
 	}
 	if err != nil {
@@ -417,14 +418,17 @@ func (s *Server) providerViews() []map[string]any {
 		models := []string{}
 		models = append(models, p.Models...)
 		keys := p.EffectiveKeys()
-		masked := make([]string, 0, len(keys))
-		for _, k := range keys {
-			masked = append(masked, maskKey(k))
+		// Mask the first effective key even when the single-key field is
+		// empty: after a multi-key save the legacy field is cleared on
+		// purpose, and "未设置 · N 个 Key" would read as broken.
+		masked := ""
+		if len(keys) > 0 {
+			masked = maskKey(keys[0])
 		}
 		out = append(out, map[string]any{
 			"id": p.ID, "name": p.Name, "baseUrl": p.BaseURL,
-			"apiKeyMasked": maskKey(p.APIKey), "hasKey": p.APIKey != "",
-			"apiKeysMasked": masked, "keyCount": len(keys),
+			"apiKeyMasked": masked, "hasKey": len(keys) > 0,
+			"keyCount": len(keys),
 			"protocol": p.Protocol, "enabled": p.Enabled,
 			"models": models, "note": p.Note,
 		})
@@ -434,60 +438,46 @@ func (s *Server) providerViews() []map[string]any {
 
 // decodeProviderIn is the shared save/fetch request body.
 type providerIn struct {
-	ID       string             `json:"id"`
-	Name     string             `json:"name"`
-	BaseURL  string             `json:"baseUrl"`
-	APIKey   string             `json:"apiKey"`
-	APIKeys  []string           `json:"apiKeys"` // 多 key 负载均衡 (issue #104)
-	Protocol string             `json:"protocol"`
-	Enabled  *bool              `json:"enabled"`
-	Models   []string           `json:"models"`
+	ID       string   `json:"id"`
+	Name     string   `json:"name"`
+	BaseURL  string   `json:"baseUrl"`
+	APIKey   string   `json:"apiKey"`
+	APIKeys  []string `json:"apiKeys"` // one per line; nil (field absent) = keep stored keys
+	Protocol string   `json:"protocol"`
+	Enabled  *bool    `json:"enabled"`
+	Models   []string `json:"models"`
 	Catalog  []lane.ListingMeta `json:"catalog"` // listing rows, numbers included
 	Save     *bool              `json:"save"`    // models fetch: false = probe only, don't persist
 }
 
-// mergeProviderKeys combines the legacy single APIKey with the new APIKeys
-// list into one deduplicated, non-empty slice (issue #104). List entries come
-// first, then the single field, so a migrated config keeps its new pool primary.
-func mergeProviderKeys(single string, list []string) []string {
-	seen := make(map[string]struct{})
-	out := make([]string, 0, len(list)+1)
+// effectiveKeysIn folds the request's key fields into the store invariant:
+// one key in APIKey, two or more in APIKeys. Both fields empty means
+// "unchanged" — the form is write-only and never round-trips keys, so an edit
+// that leaves the boxes blank must keep the stored keys.
+//
+// The single-key case has to be read from apiKey as well as apiKeys: the form
+// sends ONE key in apiKey (only a multi-key paste fills apiKeys), so keying the
+// "unchanged" decision on apiKeys alone silently dropped every single-key save
+// — the provider was created with no credential at all.
+func (in *providerIn) effectiveKeysIn() ([]string, bool) {
+	if in.APIKeys == nil && strings.TrimSpace(in.APIKey) == "" {
+		return nil, false
+	}
+	seen := map[string]bool{}
+	out := make([]string, 0, len(in.APIKeys)+1)
 	add := func(k string) {
 		k = strings.TrimSpace(k)
-		if k == "" {
+		if k == "" || seen[k] {
 			return
 		}
-		if _, dup := seen[k]; dup {
-			return
-		}
-		seen[k] = struct{}{}
+		seen[k] = true
 		out = append(out, k)
 	}
-	for _, k := range list {
+	for _, k := range in.APIKeys {
 		add(k)
 	}
-	add(single)
-	return out
-}
-
-// providerFirstKey returns the first effective credential of a stored provider,
-// for paths that only need one key (catalog fetch) and must not load-balance.
-func providerFirstKey(p store.Provider) string {
-	ks := p.EffectiveKeys()
-	if len(ks) == 0 {
-		return ""
-	}
-	return ks[0]
-}
-
-// firstMergedKey returns the first credential of an incoming provider payload,
-// before it is persisted, for the save-preview catalog fetch.
-func firstMergedKey(in providerIn) string {
-	merged := mergeProviderKeys(in.APIKey, in.APIKeys)
-	if len(merged) == 0 {
-		return ""
-	}
-	return merged[0]
+	add(in.APIKey)
+	return out, true
 }
 
 func catalogIDs(catalog []lane.ListingMeta) []string {
@@ -575,8 +565,10 @@ func cleanModels(in []string) []string {
 	return out
 }
 
-// adminProviderSave creates or updates one provider. APIKey is write-only: an
-// empty value on update keeps the stored key so the form never round-trips it.
+// adminProviderSave creates or updates one provider. Keys are write-only: an
+// empty value (or an absent apiKeys field) on update keeps the stored keys so
+// the form never round-trips them. One key lands in the legacy APIKey field,
+// two or more in APIKeys — the invariant EffectiveKeys reads.
 func (s *Server) adminProviderSave(w http.ResponseWriter, r *http.Request) {
 	var in providerIn
 	if err := decodeBody(r, &in); err != nil {
@@ -613,18 +605,11 @@ func (s *Server) adminProviderSave(w http.ResponseWriter, r *http.Request) {
 				}
 				p := &c.Providers[k]
 				p.Name, p.BaseURL, p.Protocol = in.Name, in.BaseURL, in.Protocol
-				// issue #104: a provider may carry several keys. Merge the
-				// legacy single field with the new list, dedupe, and normalise
-				// to the backward-compatible shape (one key -> APIKey, many ->
-				// APIKeys) so old clients and configs still read it.
-				if in.APIKey != "" || len(in.APIKeys) > 0 {
-					merged := mergeProviderKeys(in.APIKey, in.APIKeys)
-					if len(merged) == 1 {
-						p.APIKey = merged[0]
-						p.APIKeys = nil
+				if keys, provided := in.effectiveKeysIn(); provided && len(keys) > 0 {
+					if len(keys) == 1 {
+						p.APIKey, p.APIKeys = keys[0], nil
 					} else {
-						p.APIKeys = merged
-						p.APIKey = ""
+						p.APIKey, p.APIKeys = "", keys
 					}
 				}
 				p.Enabled = enabled
@@ -653,15 +638,15 @@ func (s *Server) adminProviderSave(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 200, map[string]any{"ok": true, "id": in.ID})
 		return
 	}
-	merged := mergeProviderKeys(in.APIKey, in.APIKeys)
 	p := store.Provider{
 		ID: s.mintProviderID(in.Name), Name: in.Name, BaseURL: in.BaseURL,
-		Protocol: in.Protocol, Enabled: enabled, Models: cleanModels(in.Models),
+		Protocol: in.Protocol,
+		Enabled:  enabled, Models: cleanModels(in.Models),
 	}
-	if len(merged) == 1 {
-		p.APIKey = merged[0]
-	} else if len(merged) >= 2 {
-		p.APIKeys = merged
+	if keys, _ := in.effectiveKeysIn(); len(keys) == 1 {
+		p.APIKey = keys[0]
+	} else if len(keys) > 1 {
+		p.APIKeys = keys
 	}
 	mergeCatalog(&p, in.Catalog)
 	s.Store.Mutate(func(c *store.Config) {
@@ -739,7 +724,7 @@ func (s *Server) adminProviderModels(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, 404, map[string]any{"ok": false, "error": "供应商不存在: " + in.ID})
 			return
 		}
-		catalog, err := relay.FetchModelCatalog(ctx, p.BaseURL, providerFirstKey(p), p.Protocol)
+		catalog, err := relay.FetchModelCatalog(ctx, p.BaseURL, relay.FirstKey(&p), p.Protocol)
 		if err != nil {
 			writeJSON(w, 200, map[string]any{"ok": false, "error": err.Error()})
 			return
@@ -794,7 +779,7 @@ func (s *Server) adminProviderModels(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 400, map[string]any{"ok": false, "error": err.Error()})
 		return
 	}
-	catalog, err := relay.FetchModelCatalog(ctx, in.BaseURL, firstMergedKey(in), in.Protocol)
+	catalog, err := relay.FetchModelCatalog(ctx, in.BaseURL, strings.TrimSpace(in.APIKey), in.Protocol)
 	if err != nil {
 		writeJSON(w, 200, map[string]any{"ok": false, "error": err.Error()})
 		return

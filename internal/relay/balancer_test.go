@@ -3,59 +3,96 @@ package relay
 import (
 	"testing"
 	"time"
+
+	"zen-gate/internal/store"
 )
 
-func resetBal() {
-	bal = &keyBalancer{rr: map[string]int{}, cool: map[string]map[string]time.Time{}}
-}
-
-func TestPickKeyRoundRobin(t *testing.T) {
-	resetBal()
-	keys := []string{"k1", "k2", "k3"}
-	pid := "rr"
-	seen := map[string]int{}
-	for i := 0; i < 9; i++ {
-		k, _ := pickKey(pid, keys)
-		seen[k]++
+// Two keys rotate: consecutive picks walk the list instead of hammering one
+// account until it 429s (issue #104).
+func TestKeyBalancerRotates(t *testing.T) {
+	b := &keyBalancer{}
+	seen := map[int]int{}
+	for i := 0; i < 6; i++ {
+		seen[b.pick(3)]++
 	}
-	if seen["k1"] != 3 || seen["k2"] != 3 || seen["k3"] != 3 {
-		t.Fatalf("round-robin uneven: %v", seen)
+	for i := 0; i < 3; i++ {
+		if seen[i] != 2 {
+			t.Fatalf("pick distribution = %v, want each of 3 keys exactly twice", seen)
+		}
 	}
 }
 
-func TestPickKeySkipsCooled(t *testing.T) {
-	resetBal()
-	keys := []string{"good", "bad"}
-	pid := "skip"
-	coolKey(pid, "bad", 30*time.Second)
-	if k, _ := pickKey(pid, keys); k != "good" {
-		t.Fatalf("got %q, want good", k)
+// A penalized key steps out until its cooldown ends; the others absorb the
+// traffic.
+func TestKeyBalancerSkipsCoolingKeys(t *testing.T) {
+	b := &keyBalancer{}
+	b.penalize(0, 2, time.Minute)
+	for i := 0; i < 5; i++ {
+		if got := b.pick(2); got == 0 {
+			t.Fatal("a cooling key was picked")
+		}
+	}
+	// After the cooldown passes the key rejoins the rotation.
+	b.cool[0] = time.Now().Add(-time.Second)
+	if got := b.pick(2); got != 0 {
+		t.Fatalf("pick after cooldown = %d, want the freed key 0", got)
 	}
 }
 
-func TestPickKeyAllCooledLeastBad(t *testing.T) {
-	resetBal()
-	keys := []string{"a", "b"}
-	pid := "all"
-	// a parks for 5s, b for 1s — b lifts sooner, so pick b.
-	coolKey(pid, "a", 5*time.Second)
-	coolKey(pid, "b", time.Second)
-	if k, _ := pickKey(pid, keys); k != "b" {
-		t.Fatalf("got %q, want b", k)
+// When every key is cooling, the earliest to unfreeze wins — queueing behind
+// the best key beats spinning on a dead one.
+func TestKeyBalancerAllCoolingReturnsEarliest(t *testing.T) {
+	b := &keyBalancer{}
+	now := time.Now()
+	b.cool = []time.Time{now.Add(5 * time.Minute), now.Add(time.Second), now.Add(3 * time.Minute)}
+	if got := b.pick(3); got != 1 {
+		t.Fatalf("all cooling: pick = %d, want the earliest-unfreezing key 1", got)
 	}
 }
 
-func TestCooldownFor(t *testing.T) {
-	if got := cooldownFor("INVALID_CREDENTIAL"); got != 10*time.Minute {
-		t.Fatalf("credential cooldown = %v", got)
+// Failure classification drives the park duration: a credential rejection
+// parks far longer than a rate limit, and a model-level failure (other 4xx)
+// parks nothing because the key is not implicated. Each class runs on its own
+// provider: penalize only ever extends a cooldown, never shortens one.
+func TestPenalizeKeyByStatusClass(t *testing.T) {
+	cases := []struct {
+		name   string
+		status int
+		ra     time.Duration
+		want   time.Duration // approx; 0 = no cooldown at all
+	}{
+		{"2xx parks nothing", 200, 0, 0},
+		{"401 parks long", 401, 0, keyCoolCredential},
+		{"403 parks long", 403, 0, keyCoolCredential},
+		{"429 honours retry-after", 429, 30 * time.Second, 30 * time.Second},
+		{"429 default", 429, 0, keyCoolRate},
+		{"5xx parks a bit", 502, 0, keyCoolServer},
+		{"model-level 4xx parks nothing", 404, 0, 0},
 	}
-	if got := cooldownFor("RATE_LIMIT"); got != 10*time.Second {
-		t.Fatalf("quota cooldown = %v", got)
+	for _, tc := range cases {
+		p := &store.Provider{ID: "prov-" + tc.name, APIKeys: []string{"k1", "k2"}}
+		penalizeKey(p, "k1", tc.status, tc.ra)
+		b := balancerFor(p.ID, 2)
+		if tc.want == 0 {
+			if len(b.cool) > 0 && !b.cool[0].IsZero() {
+				t.Fatalf("%s: cooled for %v, want none", tc.name, time.Until(b.cool[0]))
+			}
+			continue
+		}
+		d := time.Until(b.cool[0])
+		if d <= tc.want-time.Second || d > tc.want+time.Second {
+			t.Fatalf("%s: cool = %v, want about %v", tc.name, d, tc.want)
+		}
 	}
-	if got := cooldownFor("SERVER"); got != 15*time.Second {
-		t.Fatalf("server cooldown = %v", got)
-	}
-	if got := cooldownFor("TRANSPORT"); got != 0 {
-		t.Fatalf("transport should not cool, got %v", got)
+}
+
+// A shorter new cooldown never shortens an existing one.
+func TestPenalizeKeyNeverShortens(t *testing.T) {
+	p := &store.Provider{ID: "prov-monotonic", APIKeys: []string{"k1", "k2"}}
+	penalizeKey(p, "k1", 429, time.Minute)
+	penalizeKey(p, "k1", 429, time.Second)
+	b := balancerFor(p.ID, 2)
+	if d := time.Until(b.cool[0]); d < 50*time.Second {
+		t.Fatalf("a short retry-after shortened an existing cooldown: %v", d)
 	}
 }

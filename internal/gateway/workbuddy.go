@@ -144,7 +144,11 @@ func (s *Server) adminWorkBuddyStatus(w http.ResponseWriter, r *http.Request) {
 			"state":            v.State,
 			"cooldownUntil":    v.CooldownUntil,
 			"cooldownModel":    v.CooldownModel,
-			"inFlight":         v.InFlight,
+			// Separate from cooldownUntil on purpose: the card says "内容门冷却"
+			// for this one, because it asks the user for something different
+			// than waiting (stop sending that traffic on this account).
+			"sanitizeUntil": v.SanitizeUntil,
+			"inFlight":      v.InFlight,
 			"lastError":        v.LastError,
 			"noCheckin":        v.NoCheckin,
 		}

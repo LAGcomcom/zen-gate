@@ -8,7 +8,6 @@ package autotag
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"strings"
 	"sync"
 	"time"
@@ -17,13 +16,10 @@ import (
 	"zen-gate/internal/store"
 )
 
-// taggerModels are the classification workhorses, tried in catalog order. The
-// free pool's ids come and go, so none of them is assumed live: the tagger
-// takes the first one the catalog actually lists and otherwise asks the lane
-// for its best available model. Failover (and the Exhausted signal) is the
-// lane's job — if the chosen model is rate-limited the request rides the
-// normal candidate chain.
-var taggerModels = []string{"deepseek-v4.1-flash", "glm-5.3-flash", "kilo-auto/free"}
+// taggerModel is the classification workhorse. Failover (and the Exhausted
+// signal) is the lane's job — if this model is rate-limited the request rides
+// the normal candidate chain.
+const taggerModel = "mimo-v2.6-flash-free"
 
 // batchLimit keeps one classification turn well inside a comfortable output
 // budget; a provider rarely ships more chosen models than this.
@@ -239,13 +235,9 @@ func (t *Tagger) applyToLane(id string, tag store.ModelTag) {
 // the parsed tags plus the raw answer for observability.
 func (t *Tagger) classify(ctx context.Context, ids []string) (map[string]store.ModelTag, string, error) {
 	prompt := tagPrompt(ids)
-	model := t.taggerPick()
-	if model == "" {
-		return nil, "", errNoTaggerModel
-	}
 	var out strings.Builder
 	_, uerr := t.lane.Complete(ctx, lane.Request{
-		Model:     model,
+		Model:     taggerModel,
 		Agent:     "autotag",
 		MaxTokens: taggerBudget,
 		Messages: []lane.Message{{Role: lane.RoleUser,
@@ -259,33 +251,6 @@ func (t *Tagger) classify(ctx context.Context, ids []string) (map[string]store.M
 		return nil, out.String(), uerr
 	}
 	return parseTagJSON(out.String(), ids), out.String(), nil
-}
-
-// errNoTaggerModel reports an empty catalog: there is nothing to classify with,
-// so a round is a failure the caller should back off from rather than a hang.
-var errNoTaggerModel = errors.New("catalog 里没有可用于分类的对话模型")
-
-// taggerPick resolves the model that carries one classification round: the
-// first preferred id the catalog lists, else the lane's own best available
-// model. Preference only steers the choice — availability decides it.
-func (t *Tagger) taggerPick() string {
-	cat, _, _ := t.lane.Snapshot()
-	listed := map[string]bool{}
-	for _, m := range cat {
-		if m.SystemOne || m.Wire == "systemone" {
-			continue
-		}
-		listed[m.ID] = true
-	}
-	for _, id := range taggerModels {
-		if listed[id] {
-			return id
-		}
-	}
-	if c := t.lane.Candidates(lane.Needs{}, "", 1); len(c) > 0 {
-		return c[0]
-	}
-	return ""
 }
 
 func tagPrompt(ids []string) string {

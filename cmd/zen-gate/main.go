@@ -1,7 +1,6 @@
-// zen-gate: a local tray gateway that exposes keyless free model sources
-// (Kilo free pool, WorkBuddy and CodeArts accounts) as OpenAI/Anthropic-
-// compatible APIs and auto-configures installed agents.
-// Usage of those lanes remains subject to each upstream provider's terms.
+// zen-gate: a local tray gateway that exposes the OpenCode Zen free lane as
+// OpenAI/Anthropic-compatible APIs and auto-configures installed agents.
+// Usage of the free lane remains subject to the upstream provider's terms.
 package main
 
 import (
@@ -16,6 +15,7 @@ import (
 	"path/filepath"
 	"runtime/debug"
 	"strings"
+	"syscall"
 	"time"
 
 	"zen-gate/internal/agents"
@@ -29,9 +29,51 @@ import (
 	"zen-gate/internal/store"
 	"zen-gate/internal/subs"
 	"zen-gate/internal/tray"
+	"zen-gate/internal/unblock"
 	"zen-gate/internal/update"
 	"zen-gate/internal/window"
 )
+
+// zoneNames maps the Attachment Manager zone ids to something readable in a log
+// line. Only 3 matters in practice; the rest are here so a diagnostic never has
+// to be a bare number.
+var zoneNames = map[string]string{
+	"0": "本地计算机",
+	"1": "内网",
+	"2": "受信任站点",
+	"3": "Internet",
+	"4": "受限制站点",
+}
+
+// unblockStartup clears the download zone stream from this executable's folder
+// and reports what it did.
+//
+// Deliberately silent when there is nothing to do: this runs on every launch,
+// and an already-clean install (the overwhelmingly common case) must not write
+// a line to the log each time.
+func unblockStartup(logger *logx.Logger) {
+	res := unblock.Near()
+	if !res.Any() {
+		return
+	}
+	for _, t := range res.Scanned {
+		if t.Err != nil {
+			logger.Debugf("解除锁定失败 %s: %v", filepath.Base(t.Path), t.Err)
+			continue
+		}
+		if !t.Cleared {
+			continue
+		}
+		zone := t.ZoneID
+		if name, ok := zoneNames[zone]; ok {
+			zone = name
+		}
+		if zone == "" {
+			zone = "未知来源"
+		}
+		logger.Infof("已解除下载锁定（%s）：%s ——下次双击不再弹 SmartScreen", zone, filepath.Base(t.Path))
+	}
+}
 
 // mainHwnd is the main window handle, captured at OnReady.
 var mainHwnd uintptr
@@ -62,7 +104,12 @@ func main() {
 	port := flag.Int("port", 0, "override listen port")
 	showVersion := flag.Bool("version", false, "print version and exit")
 	flag.Parse()
-	if os.Getenv("ZEN_GATE_HEADLESS") != "" {
+	// ZEN_GATE_HEADLESS: env-var form of -no-tray for supervisors that pass
+	// environment, not argv (docker, systemd, launchd). Any non-empty value
+	// except "0"/"false" (case-insensitive) enables it. The -no-tray path
+	// below is the complete headless mode already — it never calls window.Run,
+	// so no tray and no window are created — one flag is the whole switch.
+	if v := os.Getenv("ZEN_GATE_HEADLESS"); v != "" && !strings.EqualFold(v, "0") && !strings.EqualFold(v, "false") {
 		*noTray = true
 	}
 	if *showVersion {
@@ -84,6 +131,20 @@ func main() {
 	logger := logx.New(st.Home)
 	defer logger.Close()
 	logger.SetStdout(*noTray)
+
+	// Strip the "downloaded from the Internet" zone stream off the files that
+	// shipped next to this binary.
+	//
+	// A released build arrives via browser or GitHub, so Windows stamps
+	// ZoneId=3 on it. Explorer reads that stamp through the Attachment Manager
+	// *before* CreateProcess, which routes the next double-click through
+	// SmartScreen; an unsigned or self-signed binary has no cloud reputation
+	// there, so the user gets the "Windows 已保护你的电脑" wall even though the
+	// program itself is fine. The stamp is plain file metadata owned by the
+	// user, so once we are running we can delete it and stop the wall from
+	// coming back on the next launch. Failing to clear it is not fatal — the
+	// gateway must start regardless — so problems stay at debug level.
+	unblockStartup(logger)
 
 	window.SetAppUserModelID("zen-gate.gateway")
 
@@ -110,19 +171,41 @@ func main() {
 		logger.Infof("已按推荐列表精简 %d 个自定义供应商的模型（旧版保存了整个目录）", n)
 	}
 	update.CleanupBackup() // remove the previous binary left by 一键更新
-	logger.Infof("zen-gate %s 启动 (port %d, proxy %s)", gateway.Version, cfg.Port, cfg.ProxyMode)
+	// Which binary this is matters in a container: a GUI build has no tray to
+	// fail without, but a headless one silently has no window at all, so the log
+	// line names the flavour instead of leaving an operator to guess.
+	if headlessBuild {
+		logger.Infof("zen-gate %s 启动 (无头构建, port %d, proxy %s)", gateway.Version, cfg.Port, cfg.ProxyMode)
+	} else {
+		logger.Infof("zen-gate %s 启动 (port %d, proxy %s)", gateway.Version, cfg.Port, cfg.ProxyMode)
+	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	ln := lane.NewLane()
 	ln.SetDefaultMaxTokens(cfg.DefaultMaxTokens)
+	// Per-channel files: the gate reads channels/<id>.json, and every catalog
+	// rebuild rewrites each channel's roster into its own file.
+	ln.SetChannelGate(st.ChannelEnabled)
+	ln.OnChannelRoster = func(channel string, models []lane.ModelInfo) {
+		rows := make([]store.ChannelModel, 0, len(models))
+		for _, m := range models {
+			rows = append(rows, store.ChannelModel{ID: m.ID, Name: m.Name,
+				ContextWindow: m.ContextWindow, MaxOutput: m.MaxOutput,
+				Vision: m.Vision, Reasoning: m.Reasoning})
+		}
+		st.WriteChannelRoster(channel, rows)
+	}
 	ln.SetExposeRegion(cfg.ExposeRegion)
 	ln.SetFailover(cfg.FailoverEnabled, cfg.FailoverMax)
 	// Smart routing: master switch + failover ordering strategy + the runtime
 	// first-token sample ring that the latency strategy ranks by.
 	ln.SetSmartRouting(cfg.SmartRouting)
 	ln.SetStrategy(cfg.RoutingStrategy)
+	// WorkBuddy prompt-cache hint: off unless the user turned it on (live A/B
+	// first). Read at boot and again on every settings save.
+	ln.SetWorkBuddyCacheKey(cfg.WorkBuddyCacheKey)
 	ln.SetTTFTSource(func(model string) int64 {
 		avg, _ := st.TTFTStats(model)
 		return avg
@@ -157,18 +240,55 @@ func main() {
 		st.Mutate(func(c *store.Config) { c.CodeArts = a })
 		_ = st.Save()
 	})
+	// ZCode / TRAE 账号渠道: these logins are minted by this gateway itself (a
+	// device-authorization flow and a browser callback respectively), so the
+	// pool here is the only copy — there is nothing to import and nothing to
+	// keep in sync with another app.
+	ln.SetZCodeAccounts(cfg.ZCodeAccounts)
+	ln.SetZCodePersist(func(a lane.ZCodeAccount) {
+		st.UpsertZCodeAccount(a)
+		_ = st.Save()
+	})
+	ln.SetTraeAccounts(cfg.TraeAccounts)
+	ln.SetTraePersist(func(a lane.TraeAccount) {
+		st.UpsertTraeAccount(a)
+		_ = st.Save()
+	})
+	// The six preset channels share one pool: each entry names its own channel,
+	// and the credential is whatever that vendor hands the user.
+	ln.SetExtAccounts(cfg.ExtAccounts)
+	ln.SetExtPersist(func(a lane.ExtAccount) {
+		st.UpsertExtAccount(a)
+		_ = st.Save()
+	})
 	// 订阅轮询:sidecar manager wires into the gateway, the lane rotator and
 	// every shutdown path below.
 	mgr := subs.NewManager(st, logger.Infof)
 	if cfg.SubsEnabled && len(cfg.Subscriptions) > 0 {
 		go func() {
-			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
-			defer cancel()
-			if err := mgr.Apply(ctx); err != nil {
-				logger.Errorf("订阅轮询启动失败: %v", err)
-				return
+			// A failed first pull used to be final: every later request then
+			// dialed straight out (rotate with no rotator degrades to a plain
+			// dial) and nothing said so. Retry once a minute until it works,
+			// the subscription is switched off, or the process exits (#121).
+			for attempt := 1; ; attempt++ {
+				pullCtx, pullCancel := context.WithTimeout(ctx, 3*time.Minute)
+				err := mgr.Apply(pullCtx)
+				pullCancel()
+				if err == nil {
+					break
+				}
+				logger.Errorf("订阅轮询启动失败(第 %d 次): %v", attempt, err)
+				if !st.Config().SubsEnabled {
+					return
+				}
+				select {
+				case <-time.After(time.Minute):
+				case <-ctx.Done():
+					return
+				}
 			}
-			if cfg.ProxyMode == "rotate" {
+			if st.Config().ProxyMode == "rotate" {
+				lane.SetProxy("rotate", "")
 				lane.SetRotator(mgr)
 				logger.Infof("订阅轮询已启动(%d 个健康节点)", mgr.Healthy())
 			}
@@ -181,6 +301,14 @@ func main() {
 	}
 	reg := agents.NewRegistry(st)
 	gw := gateway.New(ln, st)
+	// A probe verdict that says available overturns the batch auto-hide that
+	// was standing on the model: healthy models re-enter the pickers without
+	// a restart.
+	ln.OnProbeResult = func(r lane.ProbeResult) {
+		if r.State == lane.StateAvailable {
+			gw.ClearAutoHidden(r.Model)
+		}
+	}
 	gw.SetAgents(reg)
 	// Warm the Detect cache: the first /state after boot would otherwise shell
 	// out to every installed agent (~3s on Windows) and the dashboard would
@@ -315,6 +443,7 @@ func main() {
 			}
 		}
 	}()
+	gw.StartOpenRefLoop(ctx)
 	gw.StartCustomProbeLoop(ctx)
 	syncEndpoints()
 
@@ -485,7 +614,12 @@ func main() {
 	if *noTray {
 		logger.Infof("serving %s (dashboard %s)", gw.BaseURL(), dashURL)
 		c := make(chan os.Signal, 1)
-		signal.Notify(c, os.Interrupt)
+		// SIGTERM alongside os.Interrupt: container stop and systemd send
+		// SIGTERM, and without a notifier for it the default action kills the
+		// process before the flush below runs. On Windows SIGTERM is defined
+		// by syscall (compiles; never delivered at runtime), so the tray
+		// build's exit paths are untouched.
+		signal.Notify(c, os.Interrupt, syscall.SIGTERM)
 		<-c
 		cancel()
 		gw.Stop()

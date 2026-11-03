@@ -11,10 +11,6 @@ import (
 
 // upstreamFrames serves a scripted sequence: refusal first, then a normal
 // stream, so a test can see whether a negative verdict got rechecked.
-//
-// The fake points at the WorkBuddy channel: it is the only remaining source
-// that probes an endpoint per model, and these verdict rules are about probing,
-// not about which lane answered.
 func refusalThenOK(t *testing.T, refusals int) (*httptest.Server, *int32) {
 	t.Helper()
 	var hits int32
@@ -30,23 +26,10 @@ func refusalThenOK(t *testing.T, refusals int) (*httptest.Server, *int32) {
 		fmt.Fprint(w, "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\n")
 		fmt.Fprint(w, "data: [DONE]\n\n")
 	}))
-	oldWB := WorkBuddyBase
-	WorkBuddyBase = srv.URL
-	t.Cleanup(func() { WorkBuddyBase = oldWB; srv.Close() })
+	old := UpstreamBase
+	UpstreamBase = srv.URL
+	t.Cleanup(func() { UpstreamBase = old; srv.Close() })
 	return srv, &hits
-}
-
-// probeLane is a lane holding one WorkBuddy row: the only channel whose probe
-// actually dials the upstream per model.
-func probeLane(ids ...string) *Lane {
-	l := NewLane()
-	l.SetWorkBuddyAccount(wbAcct())
-	cat := make([]ModelInfo, 0, len(ids))
-	for _, id := range ids {
-		cat = append(cat, ModelInfo{ID: id, Name: id, Wire: "chat", Channel: ChannelWorkBuddy})
-	}
-	l.SetCatalog(cat)
-	return l
 }
 
 // A verdict is one exit sampled once. Free quota is per egress IP and moves on
@@ -129,7 +112,8 @@ func TestNextCandidateGivesAStaleVerdictNoVeto(t *testing.T) {
 // verdict down for a window instead of the next probe overwriting it again.
 func TestNoteRealSuccessFlipsOnceAndBlocksTheNextProbe(t *testing.T) {
 	_, hits := refusalThenOK(t, 1<<30) // never succeeds: a probe can only refuse
-	l := probeLane("muse-free")
+	l := NewLane()
+	l.catalog = []ModelInfo{{ID: "muse-free", Name: "muse", Wire: "chat"}}
 	l.availability["muse-free"] = ProbeResult{Model: "muse-free", State: StateThrottled,
 		At: time.Now().UnixMilli()}
 
@@ -167,7 +151,8 @@ func TestNoteRealSuccessFlipsOnceAndBlocksTheNextProbe(t *testing.T) {
 // permanent immunity.
 func TestProbeCanDowngradeOnceTheWindowCloses(t *testing.T) {
 	refusalThenOK(t, 1<<30)
-	l := probeLane("muse-free")
+	l := NewLane()
+	l.catalog = []ModelInfo{{ID: "muse-free", Name: "muse", Wire: "chat"}}
 	l.mu.Lock()
 	l.availability["muse-free"] = ProbeResult{Model: "muse-free", State: StateAvailable,
 		At: time.Now().UnixMilli()}
@@ -189,7 +174,8 @@ func TestProbeCanDowngradeOnceTheWindowCloses(t *testing.T) {
 // a model that reads available instead of throttled.
 func TestNegativeVerdictIsRecheckedOnOtherExits(t *testing.T) {
 	_, hits := refusalThenOK(t, 1) // first request refuses, the retry succeeds
-	l := probeLane("space-bunny-free")
+	l := NewLane()
+	l.catalog = []ModelInfo{{ID: "space-bunny-free", Name: "bunny", Wire: "chat"}}
 
 	r := l.ProbeOne("space-bunny-free")
 	if atomic.LoadInt32(hits) < 2 {

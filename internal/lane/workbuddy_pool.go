@@ -95,6 +95,19 @@ type wbSlot struct {
 
 	lastErr     string
 	refreshedAt time.Time
+	// sanitizeStreak counts content-gate hits inside wbSanitizeWindow; the
+	// second one parks the account until sanitizeUntil (see wbMarkSanitize).
+	// Memory-only on purpose: the gate publishes no reset clock, so the safe
+	// reset is "forget, and get parked again if it is still angry".
+	sanitizeStreak  int
+	sanitizeFirstAt int64
+	// sanitizeUntil is its own deadline rather than a wbAllCool entry, because
+	// the two parks are not interchangeable: a quota cooldown is waited out and
+	// a checkin may legitimately lift it (wbThaw), while a content-gate park is
+	// a verdict about the traffic this account sent — nothing the user does in
+	// the dashboard should clear it early, and a shorter quota window must not
+	// quietly shorten it either.
+	sanitizeUntil int64
 	// noCheckin records an enterprise account: the meter answers 10001
 	// "企业账号不支持该操作", and retrying it every hour forever is noise.
 	noCheckin bool
@@ -110,6 +123,11 @@ type WBAccountView struct {
 	InFlight      int    `json:"inFlight"`
 	LastError     string `json:"lastError,omitempty"`
 	NoCheckin     bool   `json:"noCheckin,omitempty"`
+	// SanitizeUntil rides beside CooldownUntil instead of inside it: the two
+	// read differently on the card ("限流中" vs "内容门冷却中") because the user
+	// can act on one (wait for a window) and cannot act on the other (the
+	// traffic itself was flagged).
+	SanitizeUntil int64 `json:"sanitizeUntil,omitempty"`
 }
 
 // snapshot copies the durable half under the slot lock.
@@ -366,6 +384,11 @@ func (s *wbSlot) usableNow(model string, at int64) bool {
 	if s.authBad || s.breakerUntil > at {
 		return false
 	}
+	if s.sanitizeUntil > at {
+		// Content-gate park: its own deadline, not a wbAllCool entry, so a
+		// later quota cooldown cannot shorten it and a checkin cannot lift it.
+		return false
+	}
 	if until := s.cooled[wbAllCool]; until > at {
 		return false
 	}
@@ -375,6 +398,56 @@ func (s *wbSlot) usableNow(model string, at int64) bool {
 		}
 	}
 	return s.inFlight < wbLeaseLimit
+}
+
+// wbMarkSanitize books one content-gate hit against an account and parks it
+// once the hits stop looking accidental.
+//
+// Why park at all: the WAF does not answer a repeat offender with another
+// polite 11140 — the reference implementation of this backend documents that
+// its risk-control code (3012) carries an escalating account penalty, which is
+// why it must never be retried to "see if the gate relaxed". A second hit
+// inside wbSanitizeWindow is enough evidence: one hit is a marker string that
+// happened to appear in a prompt, two is the traffic itself being flagged.
+//
+// The park is account-wide (every model on the account is equally suspect,
+// because the verdict is about the account's traffic) but it keeps its own
+// deadline field: sharing wbAllCool with quota cooldowns would let a 600-second
+// window overwrite this one, and let a checkin thaw lift a flag the user never
+// addressed.
+func (l *Lane) wbMarkSanitize(s *wbSlot, msg string) {
+	if s == nil {
+		return
+	}
+	now := nowMS()
+	window := int64(wbSanitizeWindow / time.Millisecond)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.lastErr = truncate(msg, 200)
+	if s.sanitizeFirstAt == 0 || now-s.sanitizeFirstAt > window {
+		// A stale streak belongs to a different day's traffic: restart the
+		// count so an account that hit the gate once last week is not parked
+		// by one hit today.
+		s.sanitizeFirstAt = now
+		s.sanitizeStreak = 0
+	}
+	s.sanitizeStreak++
+	if s.sanitizeStreak < wbSanitizeStrikes {
+		return
+	}
+	if until := now + int64(wbSanitizeCool/time.Millisecond); until > s.sanitizeUntil {
+		s.sanitizeUntil = until
+	}
+}
+
+// wbSanitizeUntil reports when the account's content-gate park ends (0 = none).
+func (s *wbSlot) wbSanitizeUntil() int64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.sanitizeUntil <= nowMS() {
+		return 0
+	}
+	return s.sanitizeUntil
 }
 
 // wbAcquire picks the next account that can serve this model and takes one
@@ -678,6 +751,13 @@ func (l *Lane) WorkBuddyViews() []WBAccountView {
 				v.CooldownUntil = s.breakerUntil
 			} else {
 				v.State = "ok"
+			}
+			// The content-gate park rides in its own field so the card can say
+			// which kind of wait this is: one is "wait for the window", the other
+			// is "this account's traffic was flagged".
+			if s.sanitizeUntil > at {
+				v.State = "cooldown"
+				v.SanitizeUntil = s.sanitizeUntil
 			}
 		}
 		s.mu.Unlock()

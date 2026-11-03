@@ -695,12 +695,22 @@ func mapFinish(f string) string {
 	}
 }
 
+// usagePayload renders one usage block for the OpenAI wire. prompt_tokens is
+// every prompt token the model saw (cached included) — that is what this
+// protocol means by it — and the hit portion also travels in
+// prompt_tokens_details so a client can show its own cache rate. Adding
+// Input + CacheRead naively double-counted every OpenAI-family upstream,
+// whose prompt_tokens already contains the hits.
 func usagePayload(u lane.Usage) map[string]any {
-	return map[string]any{
-		"prompt_tokens":     u.Input + u.CacheRead,
+	out := map[string]any{
+		"prompt_tokens":     u.InputTotal(),
 		"completion_tokens": u.Output,
-		"total_tokens":      u.Input + u.CacheRead + u.Output,
+		"total_tokens":      u.InputTotal() + u.Output,
 	}
+	if u.CacheRead > 0 {
+		out["prompt_tokens_details"] = map[string]any{"cached_tokens": u.CacheRead}
+	}
+	return out
 }
 
 func errorStatus(e *lane.UpstreamError) int {
@@ -974,11 +984,15 @@ func (s *Server) writeResponsesEvents(w http.ResponseWriter, model string, c *re
 }
 
 func responsesUsage(u lane.Usage) map[string]any {
-	return map[string]any{
-		"input_tokens":  u.Input + u.CacheRead,
+	out := map[string]any{
+		"input_tokens":  u.InputTotal(),
 		"output_tokens": u.Output,
-		"total_tokens":  u.Input + u.CacheRead + u.Output,
+		"total_tokens":  u.InputTotal() + u.Output,
 	}
+	if u.CacheRead > 0 {
+		out["input_tokens_details"] = map[string]any{"cached_tokens": u.CacheRead}
+	}
+	return out
 }
 
 // responsesCollector buffers lane chunks into ordered output blocks so both

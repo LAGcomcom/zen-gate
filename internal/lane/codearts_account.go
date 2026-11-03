@@ -396,10 +396,17 @@ func (l *Lane) probeCodeArts(ctx context.Context, m ModelInfo) ProbeResult {
 			res.State = StateUnavailable
 			res.Detail = "登录态失效（刷新失败）"
 		case CodeClient:
-			res.State = StateUnavailable
-			res.Detail = truncate(ue.Message, 160)
+			// A 400/404 here names the request shape (a param this probe sent,
+			// a model id the roster spelled differently), not the model being
+			// gone. Recording it as 不可用 deleted working models from every
+			// picker — #123 reported exactly that: 测试 says unavailable, a
+			// manual call to the same id answers and shows up in 用量.
+			res.State = StateUnknown
+			res.Detail = "上游拒绝了这次探测（请求形状问题，不作结论）：" + truncate(ue.Message, 160)
 		case CodeServer:
 			if ue.Unavailable {
+				// 5xx with an explicit "model not registered/not found" body is
+				// about the model; an unqualified 5xx stays inconclusive.
 				res.State = StateUnavailable
 			}
 		}

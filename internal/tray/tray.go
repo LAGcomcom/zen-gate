@@ -1,3 +1,5 @@
+//go:build !headless
+
 // Package tray runs the menu-bar / system-tray icon and menu.
 //
 // The package is split in two halves because the two platforms disagree about

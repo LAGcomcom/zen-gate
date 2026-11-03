@@ -299,7 +299,7 @@ func (s *Server) handleAnthropicMessages(w http.ResponseWriter, r *http.Request)
 				begin()
 				sse.typedEvent(map[string]any{"type": "message_delta",
 					"delta": map[string]any{"stop_reason": stop, "stop_sequence": nil},
-					"usage": map[string]any{"output_tokens": usage.Output}})
+					"usage": anthropicUsage(usage)})
 				sse.typedEvent(map[string]any{"type": "message_stop"})
 				return
 			}
@@ -317,7 +317,7 @@ func (s *Server) handleAnthropicMessages(w http.ResponseWriter, r *http.Request)
 	begin()
 	sse.typedEvent(map[string]any{"type": "message_delta",
 		"delta": map[string]any{"stop_reason": stop, "stop_sequence": nil},
-		"usage": map[string]any{"output_tokens": outcome.Usage.Output}})
+		"usage": anthropicUsage(outcome.Usage)})
 	sse.typedEvent(map[string]any{"type": "message_stop"})
 }
 
@@ -382,10 +382,26 @@ func anthropicResponse(id, model string, c *responsesCollector, outcome lane.Out
 		"id": id, "type": "message", "role": "assistant", "model": model,
 		"content":     content,
 		"stop_reason": stop, "stop_sequence": nil,
-		"usage": map[string]any{
-			"input_tokens":  outcome.Usage.Input + outcome.Usage.CacheRead,
-			"output_tokens": outcome.Usage.Output,
-		},
-		"created": time.Now().Unix(),
+		"usage":       anthropicUsage(outcome.Usage),
+		"created":     time.Now().Unix(),
 	}
+}
+
+// anthropicUsage renders one usage block for the Anthropic wire. Everything a
+// prompt sends travels here: input_tokens is the UNCACHED part only, and the
+// hit / write portions each get their own field — that is this protocol's
+// meaning, so folding them together (input + cache) inflated every cache hit
+// into an extra input. output_tokens is the caller's to append.
+func anthropicUsage(u lane.Usage) map[string]any {
+	out := map[string]any{
+		"input_tokens":  u.InputFresh(),
+		"output_tokens": u.Output,
+	}
+	if u.CacheRead > 0 {
+		out["cache_read_input_tokens"] = u.CacheRead
+	}
+	if u.CacheWrite > 0 {
+		out["cache_creation_input_tokens"] = u.CacheWrite
+	}
+	return out
 }

@@ -151,7 +151,33 @@ const (
 // escapes this file.
 const wbCodeSanitize = "WB_SANITIZE"
 
-// WBAccount is one WorkBuddy login. store.Config persists it verbatim; the
+// The content gate's cooldown.
+//
+// A WAF hit is not like a 429: the vendor does not answer a retry with "try
+// later", it treats repeated hits from the same account as evasion and
+// escalates. The reference implementation of this same backend learned that the
+// hard way with its own risk-control code (3012): its notes are explicit that a
+// repeat offender gets a longer ban than a first offender, so it must be
+// attempted ONCE and then left alone — never probed to see whether the gate
+// has relaxed.
+//
+// Hence a per-account park, not a per-model one: the verdict is about the traffic
+// this account sent, so every model on it is equally suspect. wbSanitizeStrikes
+// consecutive hits inside wbSanitizeWindow are what promote a single unlucky
+// turn (one marker string happened to appear) into a real cooldown.
+const (
+	wbSanitizeStrikes = 2
+	wbSanitizeWindow  = 15 * time.Minute
+	wbSanitizeCool    = 15 * time.Minute
+)
+
+// wbContentGateMark is the phrase PostWorkBuddyStreamed uses when a turn was
+// refused by the content gate even after the marker strings were rewritten.
+// wbPost reads it to distinguish "this account is getting flagged" from an
+// ordinary malformed request: the two look identical in the error code (both
+// CodeClient) and only the phrasings differ.
+const wbContentGateMark = "上游内容门拦截了请求里的客户端特征文本"
+
 // lane keeps a snapshot and writes rotated token pairs back through the
 // persist callback. UID is the JWT sub — the fingerprint seeds derive from it,
 // so the same account always presents the same machine/session ids.
@@ -572,7 +598,7 @@ func PostWorkBuddyStreamed(ctx context.Context, body map[string]any, acct WBAcco
 	ue2 := asUpstream(err2)
 	if ue2 != nil && ue2.Code == wbCodeSanitize {
 		return usage, &UpstreamError{Code: CodeClient,
-			Message: "上游内容门拦截了请求里的客户端特征文本，改写后仍被拒绝——换一个说法或去掉相关系统提示"}
+			Message: wbContentGateMark + "，改写后仍被拒绝——换一个说法或去掉相关系统提示"}
 	}
 	return usage, err2
 }

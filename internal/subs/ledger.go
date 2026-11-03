@@ -38,6 +38,11 @@ const (
 	// it the count restarts, so a node that misbehaves once an hour is never
 	// treated as persistently broken.
 	failMemory = 10 * time.Minute
+	// deadStrikes is how many tunnel-level failures inside failMemory retire
+	// a node from rotation. One strike is nothing (jitter happens); two in
+	// ten minutes is a tunnel that connects and then dies mid-turn — the one
+	// failure mode a tiny probe cannot reproduce and real users keep hitting.
+	deadStrikes = 2
 )
 
 // banKey names one (exit, model) pair in the ledger.
@@ -79,27 +84,12 @@ func (m *Manager) Report(nodeID, model, class string) {
 	m.bans[k] = now.Add(d)
 }
 
-// nodeDeadAfter is how many consecutive transport failures downgrade a node to
-// Alive=false. One is usually a transient stall (a cold-start first call has
-// been measured at 62s here), so two in a row is the bar for calling an egress
-// dead from live traffic.
-const nodeDeadAfter = 2
-
-// ReportDead records that a real request through nodeID failed at the transport
-// layer — the egress tunnel itself is broken (a dead upstream, a connection
-// reset, a silent stall) even though the node's local socks inbound still
-// answers. That is exactly the "能连接但不能用" case: the connect succeeds,
-// the request never returns. A probe is a sample and cannot catch it between
-// probe rounds, and the per-(exit,model) ban alone only parks the pair for
-// seconds and is keyed per model, so the node keeps being chosen for every
-// request and each attempt hangs for up to responseHeaderTimeout (90s).
-//
-// Two consecutive transport failures within failMemory downgrade the node to
-// Alive=false. That drops it from Pick/nextNode immediately AND makes it
-// eligible for the 2-minute dead-node recheck (ProbeDead only re-tests
-// !Alive nodes), so a genuinely dead egress leaves rotation within one or two
-// requests and a merely flaky one self-heals on the next probe instead of
-// lingering until the next full ProbeAll (~30 min).
+// ReportDead books one tunnel-level failure against a node — a transport
+// reset / timeout / dead tunnel seen by real traffic. This is node state, not
+// (exit, model) state: the tunnel connects and then every turn dies, which a
+// probe cannot reproduce because a probe is one tiny round-trip. Two strikes
+// inside failMemory retire the node from rotation; the periodic dead-node
+// probe (or a raced success reaching Revive) brings it back.
 func (m *Manager) ReportDead(nodeID string) {
 	if nodeID == "" {
 		return
@@ -107,17 +97,23 @@ func (m *Manager) ReportDead(nodeID string) {
 	now := time.Now()
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	h := m.health[nodeID]
+	if h == nil || !h.Alive {
+		return // already retired; nothing to accumulate
+	}
 	if last, ok := m.nodeFailAt[nodeID]; ok && now.Sub(last) > failMemory {
 		m.nodeFails[nodeID] = 0
 	}
 	m.nodeFails[nodeID]++
 	m.nodeFailAt[nodeID] = now
-	if m.nodeFails[nodeID] >= nodeDeadAfter {
-		if h := m.health[nodeID]; h != nil {
-			h.Alive = false
-			h.CoolUntil = 0
-		}
+	if m.nodeFails[nodeID] < deadStrikes {
+		return
 	}
+	h.Alive = false
+	delete(m.nodeFails, nodeID)
+	delete(m.nodeFailAt, nodeID)
+	m.log("出口节点 %s（%s）连续 %d 次隧道级失败，暂停参与轮询，等待复探",
+		nodeID, h.Name, deadStrikes)
 }
 
 // Revive clears an exit's failure state after a real request for one model
@@ -130,11 +126,6 @@ func (m *Manager) ReportDead(nodeID string) {
 // or has a separate quota for, so clearing sibling bans here would let a
 // model-B success re-arm a model-A wall. Only the pair that just succeeded is
 // lifted.
-//
-// A served request is also proof the egress is live, so Revive re-arms the
-// node's Alive flag and clears the transport-failure counter that ReportDead
-// may have accumulated — a node that answers one real request is not dead, even
-// if it had timed out twice just before.
 func (m *Manager) Revive(nodeID, model string) {
 	if nodeID == "" {
 		return
@@ -145,11 +136,14 @@ func (m *Manager) Revive(nodeID, model string) {
 	if h := m.health[nodeID]; h != nil {
 		h.CoolUntil = 0
 		h.LastOKMs = now.UnixMilli()
-		h.Alive = true
 		delete(m.nodeStreak, nodeID)
+		// A request just crossed this tunnel: whatever strikes were on the
+		// node, this one is proof against them — even in the race where the
+		// node was retired while the request was in flight.
+		h.Alive = true
+		delete(m.nodeFails, nodeID)
+		delete(m.nodeFailAt, nodeID)
 	}
-	delete(m.nodeFails, nodeID)
-	delete(m.nodeFailAt, nodeID)
 	if model == "" {
 		return
 	}

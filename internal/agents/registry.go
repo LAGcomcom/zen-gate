@@ -281,6 +281,17 @@ func (r *Registry) snapshot() (Options, string) {
 	def := ""
 	if len(r.modelsCache) > 0 {
 		def = r.modelsCache[0].ID
+		// The user's chosen default outranks list order - but only when it
+		// names a model the roster actually carries, otherwise a stale pick
+		// (hidden, retired, channel off) silently injects a dead default.
+		if want := strings.TrimSpace(r.st.Config().DefaultModel); want != "" {
+			for _, m := range r.modelsCache {
+				if m.ID == want {
+					def = want
+					break
+				}
+			}
+		}
 	}
 	sorted := make([]lane.ModelInfo, len(r.modelsCache))
 	copy(sorted, r.modelsCache)
@@ -296,6 +307,10 @@ func (r *Registry) snapshot() (Options, string) {
 		Models:       r.modelsCache,
 		DefaultModel: def,
 	}
+	// The chosen default is part of the injected content (ANTHROPIC_MODEL and
+	// friends): fingerprint it too, or changing only the default looks like
+	// "nothing changed" and the old default stays in every config file.
+	fmt.Fprintf(&b, "\x00def=%s", def)
 	return o, b.String()
 }
 

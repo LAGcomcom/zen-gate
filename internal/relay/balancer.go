@@ -1,122 +1,152 @@
-// Package relay forwards requests to user-added upstream providers. This file
-// carries the multi-key load balancer for issue #104: a provider may hold
-// several API keys, and the gateway spreads requests across them instead of
-// forcing the user to register the same endpoint N times. A key that starts
-// returning auth/quota/server errors is parked for a cooldown so the next
-// picks skip it and a dead key does not keep eating traffic.
 package relay
 
 import (
+	"net/http"
 	"sync"
 	"time"
 
-	"zen-gate/internal/lane"
 	"zen-gate/internal/store"
 )
 
-// keyBalancer holds per-provider key state. It is in-memory only and resets on
-// restart, which is acceptable: a failed key is re-learned within a handful of
-// requests, and a persisted cooldown would just be stale after a relaunch.
+// Per-provider API-key rotation (issue #104): one upstream account is a rate
+// limit, so a provider configured with several keys spreads requests over
+// them. Rotation is round-robin with per-key cooldowns — a key that just
+// earned a 429 or a credential rejection steps out for a bit instead of
+// absorbing the next request too. Balancers live in memory only: a restart
+// forgets cooldowns, which is the right bias (a fresh process should trust
+// every key again).
+
+const (
+	// keyCoolCredential parks a key that the upstream rejected as a credential
+	// (401/403): retrying it sooner only burns the rotation's other slots.
+	keyCoolCredential = 10 * time.Minute
+	// keyCoolRate is the default park for a 429 without a usable Retry-After.
+	keyCoolRate = 10 * time.Second
+	// keyCoolServer parks a key after a 5xx: the key is probably fine, but
+	// letting the others absorb the next few requests is free insurance.
+	keyCoolServer = 15 * time.Second
+)
+
+// keyBalancer is one provider's rotation state.
 type keyBalancer struct {
 	mu   sync.Mutex
-	rr   map[string]int                  // providerID -> next round-robin index
-	cool map[string]map[string]time.Time // providerID -> key -> cooldown expiry
+	rr   uint64
+	cool []time.Time
 }
 
-var bal = &keyBalancer{
-	rr:   make(map[string]int),
-	cool: make(map[string]map[string]time.Time),
-}
-
-// pickKey chooses a key for one request. It round-robins among keys that are
-// not currently cooled; if every key is cooled it returns the least-bad one
-// (the earliest expiry) so a request still goes out rather than erroring. The
-// returned index is the key's position in `keys`, used only for diagnostics.
-func pickKey(providerID string, keys []string) (string, int) {
-	if len(keys) == 0 {
-		return "", -1
-	}
-	if len(keys) == 1 {
-		return keys[0], 0
-	}
-	bal.mu.Lock()
-	defer bal.mu.Unlock()
-	now := time.Now()
-	start := bal.rr[providerID] % len(keys)
-	idx := start
-	for {
-		if !isCooledLocked(providerID, keys[idx], now) {
-			bal.rr[providerID] = (idx + 1) % len(keys)
-			return keys[idx], idx
-		}
-		idx = (idx + 1) % len(keys)
-		if idx == start {
-			break // every key is cooled
-		}
-	}
-	// All cooled: send to the key whose cooldown lifts soonest.
-	best := start
-	var earliest time.Time
-	if m := bal.cool[providerID]; m != nil {
-		for i, k := range keys {
-			until := m[k]
-			if earliest.IsZero() || until.Before(earliest) {
-				earliest = until
-				best = i
-			}
-		}
-	}
-	return keys[best], best
-}
-
-// isCooledLocked reads the cooldown map; callers hold bal.mu.
-func isCooledLocked(providerID, key string, now time.Time) bool {
-	m := bal.cool[providerID]
-	if m == nil {
-		return false
-	}
-	until, ok := m[key]
-	return ok && until.After(now)
-}
-
-// coolKey parks a key for d so subsequent picks avoid it. A non-positive d is
-// a no-op: callers pass a cooldown only when the failure actually warrants one.
-func coolKey(providerID, key string, d time.Duration) {
-	if key == "" || d <= 0 {
-		return
-	}
-	bal.mu.Lock()
-	defer bal.mu.Unlock()
-	if bal.cool[providerID] == nil {
-		bal.cool[providerID] = make(map[string]time.Time)
-	}
-	bal.cool[providerID][key] = time.Now().Add(d)
-}
-
-// cooldownFor maps a classified upstream error to how long the key that caused
-// it should be parked. Credential failures (401/403) mean the key is dead, so
-// they get a long cooldown; rate-limit (429) and server (5xx) errors are
-// transient, so a short one. Anything else is not the key's fault.
-func cooldownFor(code string) time.Duration {
-	switch code {
-	case lane.CodeCredential:
-		return 10 * time.Minute
-	case lane.CodeQuota:
-		return 10 * time.Second
-	case lane.CodeServer:
-		return 15 * time.Second
-	default:
+// pick returns the next key index to present. Indices inside their cooldown
+// are skipped; when every key is cooling it returns whichever unfreezes
+// first — queueing behind the best key beats spinning on a dead one.
+func (b *keyBalancer) pick(n int) int {
+	if n <= 1 {
 		return 0
 	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if len(b.cool) != n {
+		b.cool = make([]time.Time, n)
+	}
+	now := time.Now()
+	start := int(b.rr % uint64(n))
+	fallback, fallbackAt := -1, time.Time{}
+	for off := 0; off < n; off++ {
+		i := (start + off) % n
+		if now.Before(b.cool[i]) {
+			if fallback < 0 || b.cool[i].Before(fallbackAt) {
+				fallback, fallbackAt = i, b.cool[i]
+			}
+			continue
+		}
+		b.rr = uint64(i) + 1
+		return i
+	}
+	return fallback
 }
 
-// firstKey returns the first effective credential, or "" if the provider has
-// none. Used by paths that only need one key and must not load-balance: the
-// /models catalog fetch and the capability/availability probes.
-func firstKey(p *store.Provider) string {
+// penalize parks one key index for d. A shorter new cooldown never shortens
+// an existing one.
+func (b *keyBalancer) penalize(i, n int, d time.Duration) {
+	if n <= 1 || d <= 0 || i < 0 || i >= n {
+		return
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if len(b.cool) != n {
+		b.cool = make([]time.Time, n)
+	}
+	if t := time.Now().Add(d); t.After(b.cool[i]) {
+		b.cool[i] = t
+	}
+}
+
+var (
+	balMu     sync.Mutex
+	balancers = map[string]*keyBalancer{}
+)
+
+func balancerFor(providerID string, n int) *keyBalancer {
+	balMu.Lock()
+	defer balMu.Unlock()
+	b := balancers[providerID]
+	if b == nil {
+		b = &keyBalancer{}
+		balancers[providerID] = b
+	}
+	return b
+}
+
+// keyFor picks the key one request should present: round-robin over the
+// provider's effective keys. Single-key providers take the fast path and
+// never touch balancer state.
+func keyFor(p *store.Provider) string {
+	keys := p.EffectiveKeys()
+	if len(keys) == 0 {
+		return ""
+	}
+	if len(keys) == 1 {
+		return keys[0]
+	}
+	return keys[balancerFor(p.ID, len(keys)).pick(len(keys))]
+}
+
+// FirstKey is the stable key for non-traffic calls (listing fetches, timing
+// probes): keeping them on one key stops probe traffic from churning the
+// rotation's cooldown state.
+func FirstKey(p *store.Provider) string {
 	keys := p.EffectiveKeys()
 	if len(keys) == 0 {
 		return ""
 	}
 	return keys[0]
+}
+
+// penalizeKey parks the key a failed request presented, for a duration that
+// matches why it failed. model-level failures (4xx bodies on a 200, region
+// walls) say nothing about the key and park nothing.
+func penalizeKey(p *store.Provider, key string, status int, retryAfter time.Duration) {
+	keys := p.EffectiveKeys()
+	if len(keys) <= 1 {
+		return
+	}
+	var d time.Duration
+	switch {
+	case status == http.StatusUnauthorized || status == http.StatusForbidden:
+		d = keyCoolCredential
+	case status == http.StatusTooManyRequests:
+		if retryAfter > 0 {
+			d = retryAfter
+		} else {
+			d = keyCoolRate
+		}
+	case status >= 500:
+		d = keyCoolServer
+	default:
+		return
+	}
+	for i, k := range keys {
+		if k == key {
+			balancerFor(p.ID, len(keys)).penalize(i, len(keys), d)
+			return
+		}
+	}
 }

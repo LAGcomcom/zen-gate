@@ -172,8 +172,22 @@ func TestSettingsAllowLanRebinds(t *testing.T) {
 	if !s.Store.Config().AllowLan {
 		t.Fatalf("allowLan 未写入配置")
 	}
-	if _, err := getHealth(fmt.Sprintf("http://%s:%d/health", ip, port)); err != nil {
-		t.Fatalf("开关后未重新监听局域网: %v", err)
+	// The settings handler replies before it switches the listener over (the
+	// reply must leave before Rebind closes the very socket serving it), so
+	// the LAN socket comes up a beat after the 200 — wait for it instead of
+	// racing a single request.
+	deadline := time.Now().Add(5 * time.Second)
+	var lastErr error
+	for {
+		if _, err := getHealth(fmt.Sprintf("http://%s:%d/health", ip, port)); err == nil {
+			break
+		} else {
+			lastErr = err
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("开关后未重新监听局域网: %v", lastErr)
+		}
+		time.Sleep(100 * time.Millisecond)
 	}
 }
 

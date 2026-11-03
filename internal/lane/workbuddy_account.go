@@ -150,8 +150,20 @@ func (l *Lane) wbPost(ctx context.Context, body map[string]any, conversationID s
 			l.wbMarkServer(slot, ue.Message)
 			return usage, err
 		default:
-			// The request's own fault (malformed body, WAF verdict, content
-			// block): every account answers identically.
+			// The content gate refusing the same body twice is a verdict about
+			// the traffic this account sent, and the upstream escalates on
+			// repeat offenders. Book it so the pool stops feeding that account
+			// before the ban hardens, then fall through: another account may
+			// still answer, and the code path below already knows how to switch.
+			if strings.Contains(ue.Message, wbContentGateMark) {
+				l.wbMarkSanitize(slot, ue.Message)
+				l.logf("WorkBuddy 账号 %s 撞内容门：%s",
+					acctLabel(slot.snapshot()), truncate(ue.Message, 120))
+				break
+			}
+			// Any other request-shaped fault (malformed body, unknown field):
+			// every account answers identically, so switching would only pay
+			// the latency twice.
 			return usage, err
 		}
 		if emitted {
