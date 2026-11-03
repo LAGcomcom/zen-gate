@@ -5,6 +5,7 @@ package window
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 
 	"github.com/jchv/go-webview2"
 	"github.com/jchv/go-webview2/webviewloader"
@@ -212,12 +213,23 @@ func embeddedDecision(version string, verr error, forced bool) (bool, string) {
 
 // startTray hosts the tray on its own locked goroutine — the caller's thread
 // stays with the window, or parks forever in fallback mode.
+//
+// LockOSThread is not optional here. systray's Windows loop is a Win32 message
+// pump: it creates the notification-area window on one OS thread and then
+// blocks in GetMessage. Windows delivers messages to the thread that created
+// the window, so if the Go scheduler migrates this goroutine to another M, the
+// pump waits on a thread that will never receive anything — the icon stays on
+// screen and stops answering (issue #128: "托盘图标死掉，点开没反应"). Locking
+// pins the goroutine to its M for the process lifetime.
 func startTray(o Options) {
 	if o.Tray == nil {
 		return
 	}
 	t := *o.Tray
 	go func() {
+		runtime.LockOSThread()
+		// No UnlockOSThread: Loop only returns on quit, and the thread must
+		// stay pinned right up to the exit path.
 		tray.Register(tray.Options{
 			DashboardURL: t.DashboardURL,
 			OnQuit:       t.OnQuit,

@@ -68,6 +68,17 @@ type Manager struct {
 	nodeFailAt map[string]time.Time
 	lastErr    string
 	version    string
+	// probeDone / probeTotal report the round in flight. Without them the panel
+	// could only show "刷新中" with no way to tell running from stuck (the same
+	// complaint the lane's own probe progress answered, #117). Counting starts
+	// once the round's node list is fixed so the denominator does not drift.
+	probeDone  int
+	probeTotal int
+	// probeGate keeps probe rounds from overlapping. A full round and the
+	// two-minute dead-node loop used to run side by side on the same nodes,
+	// doubling the connections and letting the later verdict overwrite the
+	// newer one. Held across the round; ProbeDead gives way, ProbeAll waits.
+	probeGate sync.Mutex
 
 	deathCancel context.CancelFunc // bounds the dead-node recheck loop
 }
@@ -105,6 +116,12 @@ type NodeHealth struct {
 	// Drifts counts how many times this node changed exit IP since the
 	// process started. A node that drifts every round is not one exit.
 	Drifts int `json:"drifts,omitempty"`
+	// FailReason is the last failure category in one phrase an operator can
+	// act on (超时 / 连接被拒 / TLS 握手失败 / 出口回显不可用). Set on death and
+	// on an unreadable exit; cleared by the next good probe. "不可用" without
+	// a reason is the state that forces people to guess.
+	FailReason string `json:"failReason,omitempty"`
+	FailAt     int64  `json:"failAt,omitempty"`
 }
 
 // NewManager builds the manager; logging goes through log (may be nil).
@@ -529,13 +546,15 @@ func (m *Manager) Status() map[string]any {
 		nodes = append(nodes, h)
 	}
 	return map[string]any{
-		"running":  running,
-		"version":  m.version,
-		"nodes":    nodes,
-		"alive":    alive,
-		"lastSync": m.lastSync.Unix(),
-		"lastErr":  m.lastErr,
-		"portBase": PortBase,
+		"running":    running,
+		"version":    m.version,
+		"nodes":      nodes,
+		"alive":      alive,
+		"lastSync":   m.lastSync.Unix(),
+		"lastErr":    m.lastErr,
+		"portBase":   PortBase,
+		"probeDone":  m.probeDone,
+		"probeTotal": m.probeTotal,
 	}
 }
 

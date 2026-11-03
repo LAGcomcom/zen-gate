@@ -177,8 +177,13 @@ func TestPostWorkBuddyStreamedSanitizesFingerprintsOn403(t *testing.T) {
 		switch calls.Add(1) {
 		case 1:
 			firstBody = string(body)
+			// 11140 is the text-fingerprint hit this test is about: the body
+			// carries "You are Claude Code" and the WAF matched it. 11128 (the
+			// code this fixture used to send) is the envelope verdict and must
+			// not trigger a rewrite-and-replay — see issue #128 and
+			// TestWBEnvelopeHitIsNotReplayed.
 			w.WriteHeader(403)
-			fmt.Fprint(w, `{"code":11128,"message":"Illegal API invocation from an unapproved channel"}`)
+			fmt.Fprint(w, `{"code":11140,"message":"Illegal API invocation from an unapproved channel"}`)
 		default:
 			secondBody = string(body)
 			w.Header().Set("content-type", "text/event-stream")

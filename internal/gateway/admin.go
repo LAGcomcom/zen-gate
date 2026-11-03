@@ -291,6 +291,10 @@ func (s *Server) adminState(w http.ResponseWriter) {
 		// empty-channel lane). Two channels may carry the same id; this is the
 		// attribution the merged list cannot show.
 		Channel string `json:"channel,omitempty"`
+		// Family is the model identity this row shares with every other door
+		// to the same weights (lane channel, -free variant, provider prefix).
+		// The page groups by it: one card per model, sources inside.
+		Family string `json:"family,omitempty"`
 		// Hidden marks a model the user unchecked: servable but not advertised
 		// to agent pickers.
 		Hidden bool `json:"hidden,omitempty"`
@@ -364,9 +368,10 @@ func (s *Server) adminState(w http.ResponseWriter) {
 				lv, _ := effortLadder(m, s.modalityCapsOf(m.ID), cfg)
 				return lv
 			}(),
-			Hidden:  hidden[m.ID],
-			Channel: ch,
+			Hidden:   hidden[m.ID],
+			Channel:  ch,
 			Channels: []string{ch},
+			Family:   lane.ModelFamily(m.ID),
 		}
 		if tag, ok := s.Store.ModelTagOf(m.ID); ok {
 			row.TagSource = tag.Source
@@ -406,6 +411,7 @@ func (s *Server) adminState(w http.ResponseWriter) {
 			row := modelRow{
 				ID: id, Name: mid, State: "custom", Custom: true,
 				ProviderID: p.ID,
+				Family:     lane.ModelFamily(id),
 				Blurb:      "自定义供应商「" + p.Name + "」",
 				Hidden:     hidden[id],
 			}

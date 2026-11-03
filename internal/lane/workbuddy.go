@@ -368,9 +368,21 @@ func workBuddyHeaders(acct WBAccount, requestID string) map[string]string {
 func wbConversationProtocol(requestID, conversationID, model string) map[string]string {
 	trace := wbRequestID() // 32 hex: the shape the client's dashless UUID has
 	span, parent := trace[:16], trace[16:32]
+	// Last line of defence. The gate refuses the entire turn when this header
+	// is empty (400 / 11128), and an empty seed is exactly what the hand-built
+	// bodies pass when a call site forgets to derive one — which is how the
+	// WorkBuddy probe came to report "内容门拦截" for weeks (issue #128-3).
+	// Reusing the per-turn request id keeps the request valid; the forgotten
+	// derivation upstream is a bug to fix, not a request worth dropping.
+	conv := strings.TrimSpace(conversationID)
+	if conv == "" {
+		// A fresh id, not the caller's request id: that one is only a header
+		// value and may not have the 32-hex shape the gate demands.
+		conv = wbConversationID("")
+	}
 	h := map[string]string{
 		"X-Request-ID":              requestID,
-		"X-Conversation-ID":         conversationID,
+		"X-Conversation-ID":         conv,
 		"X-Conversation-Request-ID": requestID,
 		"X-Conversation-Message-ID": requestID,
 		"X-Request-Trace-Id":        trace,
@@ -604,66 +616,106 @@ func PostWorkBuddyStreamed(ctx context.Context, body map[string]any, acct WBAcco
 }
 
 // wbFingerprintRewrites are the marker strings the WAF pattern-matches inside
-// the system prompt (observed on Codex / Claude Code traffic): each maps to a
-// neutral stand-in. The list follows the upstream's evolving rules and is the
-// one place to update when 11140/11128 starts hitting again.
+// the request text: each maps to a neutral stand-in. The list follows the
+// upstream's evolving rules and is the one place to update when 11140/11128
+// starts hitting again.
+//
+// Exact rules come first, catch-alls last. The catch-alls exist because the
+// client does not introduce itself once — it names the product in its opening
+// line, in the runtime-context epilogue, in the three per-turn context lines and
+// in the skill catalogue. Patching the opening line alone (the original state of
+// this table) left a dozen occurrences in place, so the "sanitized" retry
+// carried nearly the same fingerprint as the request that had just been refused.
 var wbFingerprintRewrites = []struct {
 	re *regexp.Regexp
 	to string
 }{
+	// Other clients' tell-tales.
 	{regexp.MustCompile(`(?i)x-anthropic-billing-header[^\n"]*`), ""},
 	{regexp.MustCompile(`(?i)\bcc_[a-z_]+=[^\s"']*`), ""},
 	{regexp.MustCompile(`You are Claude Code`), "You are a CLI tool for Claude"},
-	// DeepSeek Harness opens every turn with this fixed self-introduction.
-	// The upstream's WAF has learned it and refuses the request outright
-	// (11140/11128 on the first try and on the sanitized retry alike), so the
-	// client never gets a turn at all. Keep the sentence, drop the product.
-	{regexp.MustCompile(`(?i)You are an AI agent powered by DeepSeek Harness`), "You are an AI agent"},
 	{regexp.MustCompile(`Main branch \(you will usually use this for PRs\)`), "Default branch (you will usually use this for PRs)"},
 	{regexp.MustCompile(`(?i)OhMyOpenCode`), "OpenCode"},
 	{regexp.MustCompile(`11128`), "11-128"},
+
+	// DeepSeek Harness, opening self-description.
+	{regexp.MustCompile(`(?i)You are an AI agent powered by DeepSeek Harness\.?`), "You are an AI agent."},
+	{regexp.MustCompile(`(?i)You are a coding agent powered by the [\w.\-]+ model\.?`), "You are a coding agent."},
+
+	// DeepSeek Harness, runtime-context epilogue.
+	{regexp.MustCompile(`(?i)The runtime context names the DeepSeek Harness implementation checkout\.?`), ""},
+	{regexp.MustCompile(`(?i)Use this checkout only to inspect or extend DSH itself\.?`), ""},
+	{regexp.MustCompile(`(?i)You are interacting with the user through the DeepSeek Harness Web GUI`), "You are interacting with the user through a web GUI"},
+	{regexp.MustCompile(`(?i)because only dsh web injects window\.__DSH_BOOT__`), "because only the web client injects window.__BOOT__"},
+
+	// DeepSeek Harness, per-turn runtime-context lines.
+	{regexp.MustCompile(`(?i)Current DSH file policy:`), "Current file policy:"},
+	{regexp.MustCompile(`(?i)Current DeepSeek Harness implementation checkout:`), "Current implementation checkout:"},
+	{regexp.MustCompile(`(?i)Current DeepSeek Harness Web GUI URL:`), "Current Web GUI URL:"},
+
+	// Skill catalogue lines carry the acronym too.
+	{regexp.MustCompile(`(?i)unexpected DSH sandbox access denials`), "unexpected sandbox access denials"},
+
+	// Catch-alls. Anything the exact rules missed still has to leave the body
+	// clean; the product name and its acronym are what the gate matches, and the
+	// cost of over-rewriting here is a cosmetic one, while the cost of leaving a
+	// single copy is a refused turn.
+	{regexp.MustCompile(`(?i)__DSH_BOOT__`), "__BOOT__"},
+	{regexp.MustCompile(`(?i)DeepSeek Harness`), "the harness"},
+	{regexp.MustCompile(`\bDSH\b`), "CLI"},
+	{regexp.MustCompile(`(?i)\bdsh web\b`), "the web client"},
+	{regexp.MustCompile(`(?i)([\\/])dsh([\\/])`), "${1}cli${2}"},
+	{regexp.MustCompile(`(?i)\bdsh\b`), "cli"},
 }
 
-// wbSanitizeFingerprints rewrites the known client fingerprints out of a
-// request body's message texts. Messages are deep-copied: the caller's body
-// must stay intact for the recovery paths.
+// wbSanitizeFingerprints rewrites the known client fingerprints out of every
+// string a request body carries — not just messages.
+//
+// The gate matches request text, and the client names itself in at least six
+// places across three structures: the opening self-description and the
+// runtime-context block inside messages, the skill catalogue inside tools, and
+// the standalone system/instructions field that other wires use. Rewriting only
+// messages left the rest intact, so the sanitized retry went out carrying the
+// same fingerprint as the request that had just been refused (#120).
 func wbSanitizeFingerprints(body map[string]any) map[string]any {
-	next := cloneMap(body)
-	if msgs, ok := body["messages"].([]map[string]any); ok {
-		copied := make([]map[string]any, len(msgs))
-		for i, m := range msgs {
-			copied[i] = cloneMap(m)
-			switch text := copied[i]["content"].(type) {
-			case string:
-				copied[i]["content"] = wbRewriteText(text)
-			case []any:
-				parts := make([]any, len(text))
-				copy(parts, text)
-				for j, p := range parts {
-					if pm, ok := p.(map[string]any); ok {
-						if t, ok := pm["text"].(string); ok {
-							pm = cloneMap(pm)
-							pm["text"] = wbRewriteText(t)
-							parts[j] = pm
-						}
-					}
-				}
-				copied[i]["content"] = parts
-			case []map[string]any:
-				parts := make([]map[string]any, len(text))
-				for j, p := range text {
-					pm := cloneMap(p)
-					if t, ok := pm["text"].(string); ok {
-						pm["text"] = wbRewriteText(t)
-					}
-					parts[j] = pm
-				}
-				copied[i]["content"] = parts
+	out, ok := wbRewriteValue(body).(map[string]any)
+	if !ok {
+		return body
+	}
+	return out
+}
+
+// wbRewriteValue deep-copies v, rewriting every string it can reach. The copy
+// matters: the caller keeps the original body for its own recovery paths.
+func wbRewriteValue(v any) any {
+	switch t := v.(type) {
+	case string:
+		return wbRewriteText(t)
+	case map[string]any:
+		out := make(map[string]any, len(t))
+		for k, val := range t {
+			out[k] = wbRewriteValue(val)
+		}
+		return out
+	case []any:
+		out := make([]any, len(t))
+		for i, val := range t {
+			out[i] = wbRewriteValue(val)
+		}
+		return out
+	case []map[string]any:
+		out := make([]map[string]any, len(t))
+		for i, val := range t {
+			if m, ok := wbRewriteValue(val).(map[string]any); ok {
+				out[i] = m
+			} else {
+				out[i] = val
 			}
 		}
-		next["messages"] = copied
+		return out
+	default:
+		return v
 	}
-	return next
 }
 
 func wbRewriteText(text string) string {
@@ -736,9 +788,21 @@ func classifyWorkBuddyFailure(status int, payload string, retryAfterSec int) *Up
 		// misfile it as a request fault — exactly the one status that must
 		// trigger the refresh-and-retry path.
 		return &UpstreamError{Code: CodeCredential, Message: "WorkBuddy 登录态失效（上游 401）"}
-	case code == 11140 || code == 11128:
+	case code == 11140:
+		// The WAF matched a marker string inside the request text. Rewriting
+		// the body and replaying once is the cure PostWorkBuddyStreamed
+		// applies.
 		return &UpstreamError{Code: wbCodeSanitize,
-			Message: "上游内容门拦截（" + strconv.Itoa(code) + "）"}
+			Message: "上游内容门拦截（11140）"}
+	case code == 11128:
+		// 11128 is an envelope verdict, not a text one: the gate wants a
+		// conversation id, and a turn whose first message is not a system
+		// message. Rewriting prompt text can never satisfy it, and filing it
+		// as a content gate sent the caller down the sanitize-and-retry path —
+		// one wasted account turn plus a card blaming the user's prompt, while
+		// the real cause sat in a header (issue #128-3).
+		return &UpstreamError{Code: CodeClient,
+			Message: "上游拒绝请求信封（11128：会话 ID 缺失或首条不是系统消息）"}
 	case code == wbBadBodyCode || wbBadBodyRe.MatchString(payload):
 		// The body itself is malformed: every account answers the same 400, so
 		// this is filed as the request's fault and carries no account penalty.

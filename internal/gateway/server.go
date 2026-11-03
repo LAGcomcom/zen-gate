@@ -571,14 +571,25 @@ func bearerOf(r *http.Request) string {
 // unchecked on the 模型 page are not advertised.
 func (s *Server) handleListModels(w http.ResponseWriter, r *http.Request) {
 	cfg := s.Store.Config()
-	data := []map[string]any{}
 	vis := s.VisibleModels()
 	// The same ordering the Codex catalog uses: two pickers, one truth.
 	s.sortPickerEntries(vis)
-	for _, m := range vis {
-		data = append(data, s.modelCard(m, m.ID, "zen-gate", cfg, true))
-	}
 	hidden := s.hiddenSet()
+
+	// Both halves are collected before they are published, because the two
+	// halves are where most of the duplicates live: the free lane, the -free
+	// variant and a custom provider routinely carry the same weights, and one
+	// model advertised four times is what makes a short list unreadable.
+	type cand struct {
+		floor lane.ModelInfo // capability floor (bare model id for a provider)
+		pub   string         // the id a client sends
+		owner string         // "" = the free lane
+		free  bool
+	}
+	all := make([]cand, 0, len(vis))
+	for _, m := range vis {
+		all = append(all, cand{floor: m, pub: m.ID, free: true})
+	}
 	for i := range cfg.Providers {
 		p := &cfg.Providers[i]
 		if !p.Enabled {
@@ -589,8 +600,30 @@ func (s *Server) handleListModels(w http.ResponseWriter, r *http.Request) {
 			if hidden[id] {
 				continue
 			}
-			data = append(data, s.modelCard(lane.ModelInfo{ID: m}, id, p.Name, cfg, false))
+			all = append(all, cand{floor: lane.ModelInfo{ID: m}, pub: id, owner: p.Name})
 		}
+	}
+	_, av, _ := s.Lane.Snapshot()
+	picked := make([]cand, 0, len(all))
+	at := map[string]int{}
+	for _, c := range all {
+		fam := lane.ModelFamily(c.pub)
+		if idx, seen := at[fam]; seen {
+			if s.familyRank(c.pub, av) < s.familyRank(picked[idx].pub, av) {
+				picked[idx] = c
+			}
+			continue
+		}
+		at[fam] = len(picked)
+		picked = append(picked, c)
+	}
+	data := make([]map[string]any, 0, len(picked))
+	for _, c := range picked {
+		owner := c.owner
+		if owner == "" {
+			owner = "zen-gate"
+		}
+		data = append(data, s.modelCard(c.floor, c.pub, owner, cfg, c.free))
 	}
 	writeJSON(w, 200, map[string]any{"object": "list", "data": data})
 }
@@ -767,17 +800,98 @@ func isProviderID(id string) bool { return strings.Contains(id, "/") }
 // VisibleModels lists the free-lane models a picker should show: everything
 // the lane advertises minus the ids the user unchecked. Routing is unaffected
 // — a hidden model requested explicitly still works.
+// channelOfModel maps a catalog row onto the channel that serves it. The
+// catalog encodes the Zen lane as the empty channel (it predates the multi
+// channel layout), so every switch that works in channel ids has to translate
+// before it can ask. A row whose channel is unknown keeps its own id: an
+// unmapped source is enabled by the store's own rule.
+func channelOfModel(m lane.ModelInfo) string {
+	if m.Channel == "" {
+		return lane.ChannelZen
+	}
+	return m.Channel
+}
+
+// familyRank scores two ids of one model family for publication: 0 for a copy
+// that just answered, 1 for one nothing has judged yet, 2 for one known bad
+// (throttled, region-gated, or the upstream said it is not registered).
+//
+// Unknown outranks known-bad on purpose: a fresh provider entry nobody probed
+// is a better bet than the same weights on a channel that just refused.
+func (s *Server) familyRank(id string, av map[string]lane.ProbeResult) int {
+	if p, ok := av[id]; ok {
+		switch lane.FreshState(p) {
+		case lane.StateAvailable:
+			return 0
+		case lane.StateThrottled, lane.StateRegionBlock, lane.StateUnavailable:
+			return 2
+		}
+		return 1
+	}
+	if pr, ok := s.customProbeOf(id); ok {
+		if pr.State == lane.StateUnavailable {
+			return 2
+		}
+		if pr.State == lane.StateAvailable {
+			return 0
+		}
+	}
+	return 1
+}
+
+// collapseFamilies keeps one row per model family, the best-ranked copy.
+//
+// A picker is a list of choices, and two ids carrying the same weights are not
+// two choices — they are one choice with two doors. Publishing both makes a
+// catalog of a dozen models look like a catalog of forty, and the user has no
+// way to tell which row is "the real one". The surviving id is still only a
+// label: every other id of the family keeps routing if a client names it.
+func (s *Server) collapseFamilies(list []lane.ModelInfo, av map[string]lane.ProbeResult) []lane.ModelInfo {
+	out := make([]lane.ModelInfo, 0, len(list))
+	at := map[string]int{}
+	for _, m := range list {
+		fam := lane.ModelFamily(m.ID)
+		idx, seen := at[fam]
+		if !seen {
+			at[fam] = len(out)
+			out = append(out, m)
+			continue
+		}
+		if s.familyRank(m.ID, av) < s.familyRank(out[idx].ID, av) {
+			out[idx] = m
+		}
+	}
+	return out
+}
+
 func (s *Server) VisibleModels() []lane.ModelInfo {
 	hidden := s.hiddenSet()
 	_, av, _ := s.Lane.Snapshot()
 	seen := map[string]bool{}
 	out := []lane.ModelInfo{}
+	// A channel switched off on the wall must not keep publishing rows here.
+	// The catalog is a merge of six channel buckets and is only rebuilt on a
+	// refresh, so the switch has to be applied at read time; otherwise the
+	// picker keeps advertising a channel that no request can reach (#128-1).
+	// One store read per channel, not per model: the list is walked twice.
+	chState := map[string]bool{}
+	channelOn := func(ch string) bool {
+		if v, ok := chState[ch]; ok {
+			return v
+		}
+		v := s.Store == nil || s.Store.ChannelEnabled(ch)
+		chState[ch] = v
+		return v
+	}
 	for _, m := range s.Lane.ServableModels() {
 		// The catalog merges four channel buckets, and a rotation can leave
 		// two of them publishing the same id. Duplicates in a picker are not
 		// cosmetic: the harness resolves an id to the first match, and two
 		// entries with one name but different backends answer differently.
 		if hidden[m.ID] || seen[m.ID] {
+			continue
+		}
+		if !channelOn(channelOfModel(m)) {
 			continue
 		}
 		// A freshly probed refusal (the model left the upstream roster, its
@@ -857,7 +971,11 @@ func (s *Server) InjectableModels() []lane.ModelInfo {
 			out = append(out, entry)
 		}
 	}
-	return out
+	// Every enabled agent gets this list as its picker. Two ids carrying the
+	// same weights are one choice, so the picker gets one row — the best copy,
+	// and the rest keep answering if a client names them.
+	_, av, _ := s.Lane.Snapshot()
+	return s.collapseFamilies(out, av)
 }
 
 // handleCodexCatalog serves the model list in Codex's remote-catalog shape so
