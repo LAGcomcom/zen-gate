@@ -4399,6 +4399,29 @@ function renderSettings(s){
           <button class="act off" id="tg-wbcache">关闭</button></div>
       </div>
 
+      <div class="card" id="set-capa">
+        <h3>能力校准审计台 <span class="muted" style="font-size:11px">外部目录写入留痕 · 逐行否决 · 一键回滚</span></h3>
+        <div class="muted" style="font-size:12px;margin-bottom:8px">公开目录同步照常每 6 小时自动跑，但每一次外部改动都记下「改前 → 改后 / 来源 / 时间」。不认同就给该模型上锁（此后自动同步一律跳过），或按某条记录回滚（回滚即上锁）。手动校准记为「人工校准」，与实测同级、自动锁定。信任顺序：实测 / 人工校准 &gt; 上游声明 &gt; AI标注 &gt; 规则。</div>
+        <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:10px">
+          <button class="ghost" id="btn-capa-refresh">立即同步目录</button>
+          <button class="ghost" id="btn-capa-reload">刷新审计台</button>
+          <span class="muted" id="capa-at" style="font-size:12px"></span>
+        </div>
+        <div class="muted" style="font-size:12px;margin:8px 0 4px">目录现值 vs 本地现值（来自上次成功同步的快照，无需联网）</div>
+        <div id="capa-diff"></div>
+        <div class="muted" style="font-size:12px;margin:12px 0 4px">变更记录（最新在前）</div>
+        <div id="capa-entries"></div>
+        <div style="margin-top:12px;border-top:1px solid var(--hairline);padding-top:10px">
+          <div class="muted" style="font-size:12px;margin-bottom:6px">手动校准（写入后自动锁定该模型，不再被自动同步改动）</div>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+            <input id="capa-model" placeholder="模型 id，如 space-bunny-free" style="flex:2;min-width:190px;background:var(--panel-2);border:1px solid var(--hairline);color:var(--ink);border-radius:6px;padding:6px 9px;font-family:var(--mono);font-size:12px">
+            <input id="capa-ctx" type="number" min="0" placeholder="上下文窗口" style="width:130px;background:var(--panel-2);border:1px solid var(--hairline);color:var(--ink);border-radius:6px;padding:6px 9px;font-size:12px">
+            <input id="capa-out" type="number" min="0" placeholder="最大输出" style="width:120px;background:var(--panel-2);border:1px solid var(--hairline);color:var(--ink);border-radius:6px;padding:6px 9px;font-size:12px">
+            <button class="act" id="btn-capa-save">写入并锁定</button>
+          </div>
+        </div>
+      </div>
+
       <div class="card" id="set-desktop">
         <h3>桌面行为</h3>
         <div class="switch"><div><span class="nm">关闭时最小化到托盘</span><div class="ds">关窗口只是隐藏到托盘，托盘"打开管理页"恢复；托盘"退出"才真正退出</div></div>
@@ -4809,6 +4832,74 @@ function renderSettings(s){
         refresh();
       }
     };
+  }
+  // 能力校准审计台：GET 快照 + 事件委托，一次绑定，避免 refresh 重复挂事件
+  const capaCard = el.querySelector("#set-capa");
+  if (capaCard && !capaCard.dataset.bound) {
+    capaCard.dataset.bound = "1";
+    const capaDiff = el.querySelector("#capa-diff");
+    const capaEntries = el.querySelector("#capa-entries");
+    const fmtNum = n => (Number(n) || 0).toLocaleString();
+    const fmtCap = (ctx, out) => `${fmtNum(ctx)} / ${fmtNum(out)}`;
+    const loadCapa = async () => {
+      const j = await api("/capability/audit");
+      if (!j) return;
+      const at = el.querySelector("#capa-at");
+      if (at) at.textContent = (j.refs && j.refs.at) ? "目录快照：" + new Date(j.refs.at).toLocaleString() : "尚无目录快照";
+      const locks = j.locks || {};
+      const diffs = j.diff || [];
+      capaDiff.innerHTML = diffs.length ? diffs.map(d => `
+        <div style="border:1px solid var(--hairline);border-radius:8px;padding:8px 10px;margin-bottom:6px;display:flex;gap:8px;align-items:center;flex-wrap:wrap;font-size:12px">
+          <code class="k">${esc(d.model)}</code>
+          <span class="muted">${esc(d.source)}</span>
+          <span>目录 <b>${fmtCap(d.refContext, d.refOutput)}</b></span>
+          <span class="muted">→</span>
+          <span>本地 <b>${fmtCap(d.localContext, d.localOutput)}</b> <span class="tag" style="opacity:.65">${esc(d.tagSource)}</span></span>
+          <button class="ghost" data-capa-lock="${esc(d.model)}" data-on="${d.locked ? "0" : "1"}" style="margin-left:auto">${d.locked ? "解除锁定" : "锁定"}</button>
+        </div>`).join("") : `<div class="muted" style="font-size:12px">目录与本地当前一致，或还没有目录快照。开启「公开容量参考」并点「立即同步目录」即可生成。</div>`;
+      const entries = j.entries || [];
+      capaEntries.innerHTML = entries.length ? entries.map(e => {
+        const before = e.before ? fmtCap(e.before.contextWindow, e.before.maxOutput) : "策展表（规则）";
+        const after = e.removed ? "回到策展表（规则）" : fmtCap(e.after.contextWindow, e.after.maxOutput);
+        return `<div style="border:1px solid var(--hairline);border-radius:8px;padding:8px 10px;margin-bottom:6px;display:flex;gap:8px;align-items:center;flex-wrap:wrap;font-size:12px">
+          <code class="k">${esc(e.model)}</code>
+          <span class="muted">${esc(e.origin)} · ${new Date(e.at).toLocaleString()}</span>
+          <span>${esc(before)} <span class="muted">→</span> <b>${esc(after)}</b></span>
+          ${locks[e.model] ? '<span class="tag">已锁定</span>' : ""}
+          <button class="ghost" data-capa-rollback="${e.seq}" style="margin-left:auto">回滚此条</button>
+        </div>`;
+      }).join("") : `<div class="muted" style="font-size:12px">还没有外部目录改动记录。</div>`;
+    };
+    capaCard.addEventListener("click", async (ev) => {
+      const lk = ev.target.closest && ev.target.closest("button[data-capa-lock]");
+      if (lk) {
+        const j = await api("/capability/lock", { model: lk.dataset.capaLock, locked: lk.dataset.on === "1" });
+        if (j) { toast(lk.dataset.on === "1" ? "已锁定，自动同步将跳过该模型" : "已解除锁定"); await loadCapa(); }
+        return;
+      }
+      const rb = ev.target.closest && ev.target.closest("button[data-capa-rollback]");
+      if (rb) {
+        const j = await api("/capability/rollback", { seq: Number(rb.dataset.capaRollback) });
+        if (j) { toast("已回滚并锁定该模型"); await loadCapa(); refresh(); }
+      }
+    });
+    const btnReload = el.querySelector("#btn-capa-reload");
+    if (btnReload) btnReload.onclick = loadCapa;
+    const btnRefresh = el.querySelector("#btn-capa-refresh");
+    if (btnRefresh) btnRefresh.onclick = async () => {
+      const j = await api("/capability/refresh", {});
+      if (j) toast("目录同步已在后台开始，稍后点「刷新审计台」查看");
+    };
+    const btnSave = el.querySelector("#btn-capa-save");
+    if (btnSave) btnSave.onclick = async () => {
+      const model = (el.querySelector("#capa-model").value || "").trim();
+      const ctx = Number(el.querySelector("#capa-ctx").value || 0);
+      const out = Number(el.querySelector("#capa-out").value || 0);
+      if (!model) { toast("请填模型 id"); return; }
+      const j = await api("/capability/calibrate", { model, contextWindow: ctx, maxOutput: out });
+      if (j) { toast("已写入人工校准并锁定"); await loadCapa(); refresh(); }
+    };
+    loadCapa();
   }
   setToggle("#tg-smart", s.settings.smartRouting);
   setToggle("#tg-fallback", s.settings.laneFallbackToProviders);

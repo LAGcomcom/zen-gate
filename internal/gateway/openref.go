@@ -7,7 +7,19 @@ import (
 	"zen-gate/internal/lane"
 	"zen-gate/internal/logx"
 	"zen-gate/internal/openref"
+	"zen-gate/internal/store"
 )
+
+// refCaps converts a fetched catalog to the on-disk snapshot shape. Keeping
+// the snapshot lets the audit desk answer "what does the catalog say" without
+// making the user wait for (or depend on) a fresh network pull.
+func refCaps(meta map[string]openref.ModelMeta) map[string]store.RefCap {
+	out := make(map[string]store.RefCap, len(meta))
+	for id, m := range meta {
+		out[id] = store.RefCap{ContextWindow: m.ContextWindow, MaxOutput: m.MaxOutput}
+	}
+	return out
+}
 
 // Public capacity reference (issue #28): a scheduled pull of two keyless
 // public catalogs, merged into tags.json. main wires the loop; the pull itself
@@ -33,25 +45,33 @@ func (s *Server) OpenRefPull(ctx context.Context) int {
 	}
 	client := lane.Client()
 	cat, _, _ := s.Lane.Snapshot()
+	locks := s.Store.CapabilityLocks()
+	isLocked := func(id string) bool { return locks[id] }
 
 	total := 0
 	// Declarations first: they correct the curated guesses, and the
 	// normalized pass below must not re-decide a row they just settled.
 	if dev, err := openref.FetchModelsDev(ctx, client); err != nil {
 		s.logCat(logx.CatApp, "warn", "models.dev 目录拉取失败（保留上次结果）: %v", err)
-	} else if applied := openref.ApplyExact(s.Store, cat, dev); len(applied) > 0 {
-		s.logCat(logx.CatApp, "info", "上游声明已修正 %d 个模型的能力（来源「上游声明」，实测一次即夺回）: %s",
-			len(applied), openref.Summary(applied))
-		total += len(applied)
+	} else {
+		_ = s.Store.SetCapabilityRefs(store.CapOriginModelsDev, refCaps(dev))
+		if applied := openref.ApplyExact(s.Store, cat, dev, isLocked); len(applied) > 0 {
+			s.logCat(logx.CatApp, "info", "上游声明已修正 %d 个模型的能力（来源「上游声明」，实测一次即夺回）: %s",
+				len(applied), openref.Summary(applied))
+			total += len(applied)
+		}
 	}
 
 	meta, err := openref.Fetch(ctx, client)
 	if err != nil {
 		s.logCat(logx.CatApp, "warn", "公开容量参考拉取失败（保留上次结果）: %v", err)
-	} else if applied := openref.Apply(s.Store, cat, meta); len(applied) > 0 {
-		s.logCat(logx.CatApp, "info", "公开容量参考已补全 %d 个模型（来源记为「上游声明」，实测一次即夺回）: %s",
-			len(applied), openref.Summary(applied))
-		total += len(applied)
+	} else {
+		_ = s.Store.SetCapabilityRefs(store.CapOriginOpenRouter, refCaps(meta))
+		if applied := openref.Apply(s.Store, cat, meta, isLocked); len(applied) > 0 {
+			s.logCat(logx.CatApp, "info", "公开容量参考已补全 %d 个模型（来源记为「上游声明」，实测一次即夺回）: %s",
+				len(applied), openref.Summary(applied))
+			total += len(applied)
+		}
 	}
 	if total == 0 {
 		return 0

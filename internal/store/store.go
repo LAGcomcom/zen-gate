@@ -193,6 +193,11 @@ type Config struct {
 	// table knows nothing about — recorded as 上游声明, never overriding a
 	// curated row, a probe, or an AI verdict. See internal/openref.
 	OpenRefEnabled bool `json:"openRefEnabled,omitempty"`
+	// CapabilityLocks shields models from automatic public-catalog corrections.
+	// A locked row keeps whatever the user (or a live 实测) decided, and the
+	// 6-hourly pull skips it. Keys are base model ids. Set implicitly by a
+	// rollback: undoing a catalog's verdict is also a veto on the next one.
+	CapabilityLocks map[string]bool `json:"capabilityLocks,omitempty"`
 	// LogCategories is the per-class logging switch set. A partial or absent
 	// map merges onto logx.DefaultCategories(), so an upgraded config never
 	// turns the high-volume classes on by itself.
@@ -311,6 +316,7 @@ const quotaEpisodeTTL = 14 * 24 * time.Hour
 const (
 	TagSourceProbe   = "实测"
 	TagSourceListing = "上游声明"
+	TagSourceManual  = "人工校准"
 	TagSourceAI      = "AI标注"
 	TagSourceHeuris  = "规则"
 	// TagSourceUnknown is not a source: it marks a model no rule and no
@@ -350,6 +356,13 @@ type Store struct {
 	cfg       atomic.Pointer[Config]
 	perfDirty bool
 	tags      map[string]ModelTag
+	// audit is the append-only decision log for capacity verdicts: every
+	// public-catalog correction records its before→after pair so the user can
+	// see, veto and roll back what an external source silently changed.
+	audit []CapabilityChange
+	// refs is the last successful public-catalog snapshot, kept so the audit
+	// desk can diff "what the catalog says" against "what we believe" offline.
+	refs CapabilityRefs
 	// channels is the per-channel state behind <home>/channels/<id>.json —
 	// one file per free-lane channel carrying its enable flag and the model
 	// roster it currently serves (see channels.go).
@@ -597,6 +610,8 @@ func Open() (*Store, error) {
 		tags = &map[string]ModelTag{}
 	}
 	s.tags = *tags
+	s.loadCapabilityAudit()
+	s.loadCapabilityRefs()
 	return s, nil
 }
 
@@ -607,16 +622,7 @@ func Open() (*Store, error) {
 func (s *Store) SetModelTag(model string, t ModelTag) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if prev, ok := s.tags[model]; ok {
-		if t.ContextWindow == 0 {
-			t.ContextWindow = prev.ContextWindow
-		}
-		if t.MaxOutput == 0 {
-			t.MaxOutput = prev.MaxOutput
-		}
-	}
-	s.tags[model] = t
-	_ = writeJSON(filepath.Join(s.Home, "tags.json"), s.tags)
+	s.setModelTagLocked(model, t)
 }
 
 // ModelTagOf returns one model's stored capability verdict, if any.
@@ -853,6 +859,7 @@ func (c *Config) clone() *Config {
 	next.AgentKeys = cloneMap(c.AgentKeys)
 	next.EnabledAgents = cloneBoolMap(c.EnabledAgents)
 	next.LogCategories = cloneBoolMap(c.LogCategories)
+	next.CapabilityLocks = cloneBoolMap(c.CapabilityLocks)
 	next.SeenAnnouncements = cloneSlice(c.SeenAnnouncements)
 	next.HiddenModels = cloneSlice(c.HiddenModels)
 	next.ModelPrefs = cloneMap(c.ModelPrefs)

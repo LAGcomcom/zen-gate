@@ -126,14 +126,25 @@ type mergeLog struct {
 	Out   int
 }
 
+// resolveLocked keeps the Apply/ApplyExact signatures compatible with every
+// existing caller: no predicate means nothing is shielded. The gateway passes
+// its CapabilityLocks snapshot so a user veto survives the next 6-hourly pull.
+func resolveLocked(locked []func(string) bool) func(string) bool {
+	if len(locked) > 0 && locked[0] != nil {
+		return locked[0]
+	}
+	return func(string) bool { return false }
+}
+
 // Apply fills capacities into the tag store for lane models nothing else
 // states. cat is the current lane catalog (free lane only); rows already in
 // tags.json, ids the curated table matches, and ids with a collision in meta
 // (already dropped by Fetch) are skipped. Returns what was applied.
-func Apply(st *store.Store, cat []lane.ModelInfo, meta map[string]ModelMeta) []mergeLog {
+func Apply(st *store.Store, cat []lane.ModelInfo, meta map[string]ModelMeta, locked ...func(string) bool) []mergeLog {
 	if len(meta) == 0 {
 		return nil
 	}
+	isLocked := resolveLocked(locked)
 	now := time.Now().UnixMilli()
 	taken := st.SnapshotTags()
 	var applied []mergeLog
@@ -142,6 +153,9 @@ func Apply(st *store.Store, cat []lane.ModelInfo, meta map[string]ModelMeta) []m
 			continue // kilo rows carry the pool's own declared capacities
 		}
 		base := lane.BaseModelId(m.ID)
+		if isLocked(base) {
+			continue
+		}
 		if lane.CapabilityMatched(base) {
 			continue // the curated table is curated on purpose
 		}
@@ -153,13 +167,13 @@ func Apply(st *store.Store, cat []lane.ModelInfo, meta map[string]ModelMeta) []m
 		if !ok {
 			continue
 		}
-		st.SetModelTag(base, store.ModelTag{
+		st.SetModelTagTracked(base, store.ModelTag{
 			CapsOnly:      true,
 			ContextWindow: mm.ContextWindow,
 			MaxOutput:     mm.MaxOutput,
 			Source:        store.TagSourceListing,
 			At:            now,
-		})
+		}, store.CapOriginOpenRouter)
 		applied = append(applied, mergeLog{ID: base, Ctx: mm.ContextWindow, Out: mm.MaxOutput})
 	}
 	sort.Slice(applied, func(i, j int) bool { return applied[i].ID < applied[j].ID })

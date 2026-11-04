@@ -190,6 +190,16 @@ func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request, rest string
 		s.adminRetag(w)
 	case rest == "tags/probe" && r.Method == http.MethodPost:
 		s.adminCapabilityProbe(w, r)
+	case rest == "capability/audit" && r.Method == http.MethodGet:
+		s.adminCapabilityAudit(w, r)
+	case rest == "capability/lock" && r.Method == http.MethodPost:
+		s.adminCapabilityLock(w, r)
+	case rest == "capability/rollback" && r.Method == http.MethodPost:
+		s.adminCapabilityRollback(w, r)
+	case rest == "capability/calibrate" && r.Method == http.MethodPost:
+		s.adminCapabilityCalibrate(w, r)
+	case rest == "capability/refresh" && r.Method == http.MethodPost:
+		s.adminCapabilityRefresh(w, r)
 	case rest == "announcements/read" && r.Method == http.MethodPost:
 		s.adminAnnouncementRead(w, r)
 	case rest == "announcements/refresh" && r.Method == http.MethodPost:
