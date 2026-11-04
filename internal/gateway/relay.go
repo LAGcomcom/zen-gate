@@ -431,6 +431,8 @@ func (s *Server) providerViews() []map[string]any {
 			"keyCount": len(keys),
 			"protocol": p.Protocol, "enabled": p.Enabled,
 			"models": models, "note": p.Note,
+			"billing": p.Billing, "quota": p.Quota,
+			"signupUrl": p.SignupURL, "checkin": p.Checkin,
 		})
 	}
 	return out

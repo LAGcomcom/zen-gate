@@ -182,6 +182,10 @@ func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request, rest string
 		s.adminProviderDelete(w, r)
 	case rest == "providers/models" && r.Method == http.MethodPost:
 		s.adminProviderModels(w, r)
+	case rest == "nodes/import" && r.Method == http.MethodPost:
+		s.adminNodesImport(w, r)
+	case rest == "nodes/export" && r.Method == http.MethodGet:
+		s.adminNodesExport(w, r)
 	case rest == "models/visibility" && r.Method == http.MethodPost:
 		s.adminModelVisibility(w, r)
 	case rest == "models/pref" && r.Method == http.MethodPost:

@@ -2494,6 +2494,26 @@ function renderProviders(s){
         <div class="muted" style="font-size:11.5px;margin-top:8px" id="pv-preset-hint"></div>
       </div>
 
+      <div class="card" id="set-nodes">
+        <h3>节点清单批量注入 <span class="muted" style="font-size:11px">一次粘贴多个 API · 免费/付费与额度结构化 · 导出永不带密钥</span></h3>
+        <div class="muted" style="font-size:12px;margin-bottom:8px">
+          「接更多 API」是数据活，不是写代码：把清单贴进来一次入库。三种写法可混用 ——
+          ① <code class="k">名称 | Base URL | 协议 | 计费 | API Key</code>（后面几列可省，制表符同样作分隔，<code class="k">#</code> 开头是注释）；
+          ② 一行一个裸 URL，名称取域名；③ 导出的 JSON 数组（额度、模型清单、注册页、签到声明这些字段只有 JSON 形式带得进来）。
+          计费取 <code class="k">free / freemium / paid / unknown</code> 或「免费 / 部分免费 / 付费 / 未知」，不写就是 unknown，绝不猜；额度数字一律可选，0 表示「未声明」而不是「无限」。
+          同一端点重复导入只刷新声明字段，名称、Key、模型、启用状态一律保持原样；坏行单独报告，好行照常入库。导出清单刻意不含任何密钥，可以直接复制到另一台机器再粘回来。
+        </div>
+        <textarea id="nodes-text" rows="7" placeholder="# 名称 | Base URL | 协议 | 计费 | API Key&#10;Groq | https://api.groq.com/openai/v1 | openai | free&#10;https://api.cerebras.ai/v1" style="width:100%;box-sizing:border-box;background:var(--panel-2);border:1px solid var(--hairline);color:var(--ink);border-radius:6px;padding:8px 10px;font-family:var(--mono);font-size:12px;line-height:1.55;resize:vertical"></textarea>
+        <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:8px">
+          <button class="ghost" id="btn-nodes-preview">预览（不写入）</button>
+          <button class="act" id="btn-nodes-import">导入清单</button>
+          <button class="ghost" id="btn-nodes-export">导出当前清单</button>
+          <button class="ghost" id="btn-nodes-clear">清空输入框</button>
+          <span class="muted" id="nodes-hint" style="font-size:12px"></span>
+        </div>
+        <div id="nodes-result" style="margin-top:10px"></div>
+      </div>
+
       <!-- 渠道弹窗：一张卡 = 一个渠道。每个渠道的管理面常驻在 .chan-pane 里
            （只是 display:none），弹窗只负责显示对应那一块 —— 面板不搬 DOM，
            账号池渲染 / 登录轮询 / status 轮询的入口 id 全部保持不变。 -->
@@ -2703,6 +2723,54 @@ function renderProviders(s){
         pvRenderPresets();
       };
     });
+    // 节点清单批量注入：一次绑定。预览是真·零写入（后端在 Mutate 之前返回），
+    // 导入只增量刷新声明字段，坏行单独列出、不影响好行。
+    const nodesCard = el.querySelector("#set-nodes");
+    if (nodesCard && !nodesCard.dataset.bound) {
+      nodesCard.dataset.bound = "1";
+      const nodesText = el.querySelector("#nodes-text");
+      const nodesResult = el.querySelector("#nodes-result");
+      const nodesHint = el.querySelector("#nodes-hint");
+      const actLabel = { add:"新增", update:"刷新声明", skip:"跳过" };
+      const showNodesResult = (j, preview) => {
+        const items = j.items || [], problems = j.problems || [];
+        const rows = items.slice(0, 20).map(it => `
+          <div style="display:flex;gap:8px;align-items:baseline;font-size:12px;padding:3px 0;border-bottom:1px solid var(--hairline)">
+            <span style="min-width:60px;color:var(--ink-mute)">${esc(actLabel[it.action] || it.action)}</span>
+            <code class="k">${esc(it.name)}</code>
+            <span class="muted" style="font-size:11.5px">${esc(it.reason || "")}</span>
+          </div>`).join("");
+        const more = items.length > 20 ? `<div class="muted" style="font-size:11.5px;margin-top:4px">…另有 ${items.length - 20} 条</div>` : "";
+        const bad = problems.length ? `<div style="margin-top:8px;color:var(--bad);font-size:12px">
+            <b>${problems.length} 行未入库</b>（好行不受影响）：<br>${problems.map(x=>esc(x)).join("<br>")}</div>` : "";
+        nodesResult.innerHTML = `<div style="font-size:12px;margin-bottom:6px">
+            ${preview ? "预览结果（未写入）" : "已写入"}：新增 <b>${Number(j.added)||0}</b> · 刷新 <b>${Number(j.updated)||0}</b> · 跳过 <b>${Number(j.skipped)||0}</b></div>
+          ${rows}${more}${bad}`;
+      };
+      const runNodes = async (preview) => {
+        const text = nodesText.value;
+        if (!text.trim()) { toast("先粘贴节点清单"); return; }
+        const j = await api("/nodes/import", { text, dryRun: !!preview });
+        if (!j) return;
+        showNodesResult(j, preview);
+        nodesHint.textContent = preview ? "仅为预览，配置没有任何改动" : "清单已合并入库";
+        if (!preview) { toast("节点清单已导入"); refresh(); }
+      };
+      el.querySelector("#btn-nodes-preview").onclick = ()=> runNodes(true);
+      el.querySelector("#btn-nodes-import").onclick = ()=> runNodes(false);
+      el.querySelector("#btn-nodes-clear").onclick = ()=>{
+        nodesText.value = ""; nodesResult.innerHTML = ""; nodesHint.textContent = "";
+      };
+      el.querySelector("#btn-nodes-export").onclick = async ()=>{
+        const j = await api("/nodes/export");
+        if (!j) return;
+        const nodes = j.nodes || [];
+        nodesText.value = JSON.stringify(nodes, null, 2);
+        nodesResult.innerHTML = "";
+        nodesHint.textContent = "已导出 " + nodes.length + " 个节点的无密钥清单，可直接复制或在别的机器粘贴回导";
+        toast("清单已填入输入框（不含密钥）");
+      };
+    }
     el.querySelector("#pv-form-toggle").onclick = ()=>{ pvResetForm(); pvSetFormOpen(true); };
     el.querySelector("#pv-fetch").onclick = async ()=>{
       const name = el.querySelector("#pv-name").value.trim();
@@ -3785,6 +3853,22 @@ function renderProviderList(s){
     const models = p.models || [];
     const chips = models.slice(0,12).map(m=>`<span class="pm">${esc(m)}</span>`).join("")
       + (models.length>12 ? `<span class="pm">+${models.length-12} …</span>` : "");
+    // 节点清单带进来的声明字段：计费档位 / 公开额度 / 签到 / 注册页。
+    // 一律只读展示，编辑仍走「添加供应商」弹窗，避免两处状态互相覆盖。
+    const billName = { free:"免费", freemium:"部分免费", paid:"付费", unknown:"计费未声明" };
+    const q = p.quota || {};
+    const quotaBits = [q.rpm ? q.rpm+" 次/分" : "", q.rpd ? q.rpd+" 次/日" : "", q.tpd ? q.tpd+" token/日" : ""].filter(Boolean).join(" · ");
+    const tagStyle = 'font-size:11px;padding:1px 6px;border:1px solid var(--hairline);border-radius:5px;color:var(--ink-dim);text-decoration:none';
+    const nodeTag = (txt, href) => href
+      ? `<a style="${tagStyle}" href="${esc(safeHref(href))}" target="_blank" rel="noopener noreferrer">${esc(txt)} ↗</a>`
+      : `<span style="${tagStyle}">${esc(txt)}</span>`;
+    const nodeTags = [];
+    if (p.billing) nodeTags.push(nodeTag(billName[p.billing] || p.billing));
+    if (quotaBits) nodeTags.push(nodeTag(quotaBits + (q.source ? " · " + q.source : "")));
+    if (p.checkin === "daily") nodeTags.push(nodeTag("每日签到"));
+    if (p.signupUrl) nodeTags.push(nodeTag("注册页", p.signupUrl));
+    const nodeMetaRow = nodeTags.length
+      ? `<div style="display:flex;gap:5px;flex-wrap:wrap;margin:0 0 8px">${nodeTags.join("")}</div>` : "";
     d.innerHTML = `
       <div class="pvhead">
         <span class="pvdot ${p.enabled?"on":""}" title="${p.enabled?"已启用":"已停用"}"></span>
@@ -3799,6 +3883,7 @@ function renderProviderList(s){
         <span class="pvcount">${models.length} 模型</span>
         <div class="pmodels">${chips || '<span class="muted" style="font-size:11.5px">还没有模型 —— 点下方「挑选模型」拉取并勾选</span>'}</div>
       </div>
+      ${nodeMetaRow}
       <div class="pvfoot">
         <span class="u" title="${esc(p.baseUrl)}">${esc(p.baseUrl)}</span>
         <span class="pvops">

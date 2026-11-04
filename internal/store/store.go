@@ -94,6 +94,14 @@ type Provider struct {
 	// rejected the cache-declaring shape with a 400, and settable by hand for a
 	// provider whose cache behaviour is not worth guessing about.
 	NoCache bool `json:"noCache,omitempty"`
+	// Node-catalog fields: a supplier's billing tier, its published free-tier
+	// ceiling, where to obtain a key, and whether it has a daily credit claim.
+	// Billing/Quota are claims with a source, not computed guesses — an absent
+	// value reads as "unknown" everywhere (see node_catalog.go).
+	Billing   string     `json:"billing,omitempty"`
+	Quota     *NodeQuota `json:"quota,omitempty"`
+	SignupURL string     `json:"signupUrl,omitempty"`
+	Checkin   string     `json:"checkin,omitempty"`
 }
 
 // EffectiveKeys lists the keys this provider rotates over, deduplicated and
@@ -883,6 +891,12 @@ func (c *Config) clone() *Config {
 			// Aliasing the key list across snapshots would let a later save
 			// mutate the slice a request in flight (or an export) points at.
 			p.APIKeys = cloneSlice(p.APIKeys)
+			// Quota is a pointer: aliasing it across config snapshots would let
+			// a later edit mutate a value an in-flight request already read.
+			if p.Quota != nil {
+				q := *p.Quota
+				p.Quota = &q
+			}
 			next.Providers[i] = p
 		}
 	}
