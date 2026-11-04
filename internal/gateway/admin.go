@@ -140,6 +140,8 @@ func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request, rest string
 		s.adminCheckinAll(w, r)
 	case rest == "checkin/one" && r.Method == http.MethodPost:
 		s.adminCheckinOne(w, r)
+	case rest == "checkin/refresh" && r.Method == http.MethodPost:
+		s.adminCheckinRefresh(w, r)
 	case rest == "workbuddy/logout" && r.Method == http.MethodPost:
 		s.adminWorkBuddyLogout(w, r)
 	case rest == "workbuddy/account/toggle" && r.Method == http.MethodPost:

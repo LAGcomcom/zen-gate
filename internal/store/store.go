@@ -393,6 +393,10 @@ type Store struct {
 	// refs is the last successful public-catalog snapshot, kept so the audit
 	// desk can diff "what the catalog says" against "what we believe" offline.
 	refs CapabilityRefs
+	// checkinEvidence is the durable "the credits really went up" proof for
+	// daily claims. It lives outside the process so a restart never re-claims
+	// a day that already paid out.
+	checkinEvidence map[string]CheckinEvidence
 	// channels is the per-channel state behind <home>/channels/<id>.json —
 	// one file per free-lane channel carrying its enable flag and the model
 	// roster it currently serves (see channels.go).
@@ -642,6 +646,7 @@ func Open() (*Store, error) {
 	s.tags = *tags
 	s.loadCapabilityAudit()
 	s.loadCapabilityRefs()
+	s.loadCheckinEvidence()
 	return s, nil
 }
 

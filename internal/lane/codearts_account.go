@@ -349,16 +349,19 @@ func (l *Lane) CodeArtsDailyCheckin(ctx context.Context) (bool, error) {
 			}
 		}
 	}
-	if _, err := caClient().Checkin(ctx, caCred(acct)); err != nil {
+	res, err := caClient().Checkin(ctx, caCred(acct))
+	if err != nil {
 		return true, err // transient: leave the day open so the next tick retries
 	}
-	l.markCodeArtsCheckin(today)
+	l.markCodeArtsCheckin(today, res.Credits)
 	return true, nil
 }
 
-func (l *Lane) markCodeArtsCheckin(date string) {
+func (l *Lane) markCodeArtsCheckin(date string, credits float64) {
 	l.caMu.Lock()
 	l.caAcct.LastCheckinDate = date
+	l.caAcct.LastCheckinCredits = credits
+	l.caAcct.ClaimedCredits += credits
 	l.caPersistLocked()
 	l.caMu.Unlock()
 }

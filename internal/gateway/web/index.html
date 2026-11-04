@@ -4576,13 +4576,15 @@ function renderSettings(s){
       </div>
 
       <div class="card" id="set-checkin">
-        <h3>自动签到 <span class="muted" style="font-size:11px">统一登记 · 每天一次 · 可手动补签</span></h3>
+        <h3>自动签到 <span class="muted" style="font-size:11px">积分增量确认 · 确认后零写请求 · 6 小时只读复核</span></h3>
         <div class="muted" style="font-size:12px;margin-bottom:8px">
-          所有每日领取任务登记在一处：启动 90 秒后先跑一次，之后每小时补查；每条按本地日历日幂等，重复点不会有成本。
+          成功判据不是「接口说成功」，而是账号积分真的涨了：优先用领取响应里的奖励金额，其次是签到前后余额增量，两者都读不到才退回幂等的接口成功并标注证据强度。
+          一个周期确认后<b>不再发送任何签到请求</b>，每 6 小时只做一次只读余额复核；国内按本地 00:00 重置，国外按 08:00 估计，重置点猜错也能被复核兜住。
           节点清单里声明 <code class="k">checkin: daily</code> 的供应商会自动出现在这里并标成「待接入」——声明只是登记，不会假装已经签到。
         </div>
         <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:10px">
           <button class="ghost" id="btn-checkin-all">立即全部签到</button>
+          <button class="ghost" id="btn-checkin-probe">只读查余额</button>
           <button class="ghost" id="btn-checkin-reload">刷新状态</button>
           <span class="muted" id="checkin-at" style="font-size:12px"></span>
         </div>
@@ -5068,43 +5070,76 @@ function renderSettings(s){
     };
     loadCapa();
   }
-  // 自动签到统一登记表：GET 状态 + 事件委托，一次绑定；「单独补签」按 id 跑一条
+  // 自动签到：积分增量证据 + 确认后零写请求 + 6 小时只读复核
   const checkinCard = el.querySelector("#set-checkin");
   if (checkinCard && !checkinCard.dataset.bound) {
     checkinCard.dataset.bound = "1";
     const checkinList = el.querySelector("#checkin-list");
+    const ckTime = (sec) => {
+      if (!sec) return "—";
+      const d = new Date(sec * 1000);
+      const p = (n) => String(n).padStart(2, "0");
+      return `${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+    };
+    const ckNum = (v) => (typeof v === "number" && isFinite(v) ? String(Math.round(v * 100) / 100) : "—");
     const loadCheckin = async () => {
       const j = await api("/checkin/status");
       if (!j) return;
       const at = el.querySelector("#checkin-at");
-      if (at) at.textContent = "本地日历日 " + j.today;
+      if (at) at.textContent = "本地日历日 " + j.today + " · 确认后每 " + (j.verifyHours || 6) + " 小时只读复核";
       const rows = j.tasks || [];
       checkinList.innerHTML = rows.length ? rows.map(t => {
         const state = !t.wired ? '<span class="tag">待接入</span>'
           : !t.available ? '<span class="muted">未登录 / 无可用账号</span>'
-          : t.doneToday ? '<span class="pill ok">今日已完成</span>'
+          : t.doneToday ? `<span class="pill ok">已确认 · ${esc(t.method || "证据")}</span>`
           : '<span class="pill warn">今日待办</span>';
+        const facts = [];
+        if (t.hasProbe && t.balance) facts.push(`${esc(t.balanceKind || "余额")} <b>${ckNum(t.balance)}</b>`);
+        if (t.reward > 0) facts.push(`本次奖励 <b>+${ckNum(t.reward)}</b>`);
+        if (t.delta > 0) facts.push(`余额增量 <b>+${ckNum(t.delta)}</b>`);
+        if (t.before || t.after) facts.push(`签到前 ${ckNum(t.before)} → 后 ${ckNum(t.after)}`);
+        if (t.confirmed) facts.push(`确认于 ${ckTime(t.at)}`);
+        if (t.nextCheckAt) facts.push((t.doneToday ? "下次只读复核 " : "下次重试 ") + ckTime(t.nextCheckAt));
+        if (!t.wired) facts.push("重置窗口 —");
+        else facts.push("重置 " + String(t.resetHour || 0).padStart(2, "0") + ":00");
         return `<div style="border:1px solid var(--hairline);border-radius:8px;padding:8px 10px;margin-bottom:6px;font-size:12px">
           <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
             <b>${esc(t.name)}</b><code class="k">${esc(t.channel)}</code>${state}
-            <span class="muted" style="font-size:11.5px">上次 ${esc(t.lastDate || "—")}</span>
-            ${t.wired && t.available ? `<button class="ghost" data-checkin-one="${esc(t.id)}" style="margin-left:auto">单独补签</button>` : ""}
+            <span class="muted" style="font-size:11.5px">账号日期戳 ${esc(t.lastDate || "—")}</span>
+            ${t.wired && t.available && !t.doneToday ? `<button class="ghost" data-checkin-one="${esc(t.id)}" style="margin-left:auto">单独补签</button>` : ""}
+            ${t.hasProbe ? `<button class="ghost" data-checkin-probe="${esc(t.id)}" ${t.wired && t.available && !t.doneToday ? "" : 'style="margin-left:auto"'}>查余额</button>` : ""}
           </div>
           <div class="muted" style="font-size:11.5px;margin-top:4px">${esc(t.detail || "")}</div>
+          ${facts.length ? `<div style="font-size:11.5px;margin-top:4px">${facts.join(" · ")}</div>` : ""}
+          ${t.note ? `<div class="muted" style="font-size:11.5px;margin-top:3px">${esc(t.note)}</div>` : ""}
         </div>`;
       }).join("") : '<div class="muted" style="font-size:12px">还没有登记任何签到任务。</div>';
     };
     checkinCard.addEventListener("click", async (ev) => {
       const one = ev.target.closest && ev.target.closest("button[data-checkin-one]");
-      if (!one) return;
-      const j = await api("/checkin/one", { id: one.dataset.checkinOne });
-      if (j) { toast("已执行该签到任务"); await loadCheckin(); }
+      if (one) {
+        const j = await api("/checkin/one", { id: one.dataset.checkinOne });
+        if (j) { toast("已执行该签到任务"); await loadCheckin(); }
+        return;
+      }
+      const probe = ev.target.closest && ev.target.closest("button[data-checkin-probe]");
+      if (probe) {
+        const j = await api("/checkin/refresh", { id: probe.dataset.checkinProbe });
+        if (j) { toast("只读查余额完成（未签到）"); await loadCheckin(); }
+      }
     });
     const btnAll = el.querySelector("#btn-checkin-all");
     if (btnAll) btnAll.onclick = async () => {
       const j = await api("/checkin/all", {});
       if (!j) return;
       toast("签到完成 " + j.claimed + " 项" + (j.failed ? "，失败 " + j.failed + " 项" : ""));
+      await loadCheckin();
+    };
+    const btnProbe = el.querySelector("#btn-checkin-probe");
+    if (btnProbe) btnProbe.onclick = async () => {
+      const j = await api("/checkin/refresh", {});
+      if (!j) return;
+      toast("只读查余额完成" + (j.failed ? "，读不到 " + j.failed + " 项" : ""));
       await loadCheckin();
     };
     const btnReload = el.querySelector("#btn-checkin-reload");
