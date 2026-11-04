@@ -1612,7 +1612,7 @@ async function openTaskDrawer(model){
 document.addEventListener("keydown", e=>{ if(e.key === "Escape" && drawerFor) closeTaskDrawer(); });
 
 // 模型页筛选状态：渠道 × 状态 × 搜索词，纯前端过滤，跨刷新保留。
-let mf = { q: "", chan: "", state: "" };
+let mf = { q: "", chan: "", state: "", bill: "" };
 // 已展开的说明卡（key = 模型id+blurb前缀）：10s 轮询重渲染不塌回。
 const openBlurbs = new Set();
 // 视图模式：grid | list，记忆在 localStorage。
@@ -1837,7 +1837,7 @@ function renderModels(state){
   // ---- 单行吸顶控制条：搜索/默认/筛选/批量/视图一行收完（窄窗自然折行） ----
   const chip = (kind, id, label, n) =>
     `<span class="mchip ${mf[kind]===id?"on":""}${n===0?" zero":""}" data-${kind}="${id}">${label}${n!=null?`<span class="cnt">${n}</span>`:""}</span>`;
-  const active = mf.q || mf.chan || mf.state;
+  const active = mf.q || mf.chan || mf.state || mf.bill;
   const toolbar = `<div class="msticky">
     <h2 class="pt">模型 <span class="sub">${avail}/${laneModels.length} 可用${customModels.length?` · 自定义 ${customProbed}/${customModels.length} 已实测`:""}${hiddenCount?` · 已隐藏 ${hiddenCount}`:""}</span></h2>
     <div class="mbar">
@@ -1854,6 +1854,11 @@ function renderModels(state){
       ${chip("state","throttled","限流",stateCounts.throttled)}
       ${chip("state","region-blocked","地区受限",stateCounts["region-blocked"])}
       ${chip("state","unavailable","不可用",stateCounts.unavailable)}
+      <span class="mchip ${!mf.bill?"on":""}" data-bill="" title="按提供该模型的渠道声明筛选；未声明不猜成免费">计费</span>
+      ${chip("bill","free","免费",cnt(s.models,m=>m.billing==="free"))}
+      ${chip("bill","freemium","部分免费",cnt(s.models,m=>m.billing==="freemium"))}
+      ${chip("bill","paid","付费",cnt(s.models,m=>m.billing==="paid"))}
+      ${chip("bill","unknown","未声明",cnt(s.models,m=>!m.billing||m.billing==="unknown"))}
       <span class="spacer"></span>
       <button class="ghost" id="hide-dead" title="把探测为不可用 / 地区受限的模型从 Agent 选择器隐藏；探到可用会自动解除">隐藏全部不可用</button>
       <button class="ghost" id="show-all" title="恢复全部隐藏的模型${hiddenCount?`（当前 ${hiddenCount} 个）`:""}">恢复显示</button>
@@ -1875,7 +1880,8 @@ function renderModels(state){
   const match = (m) =>
     (!mf.q || (m.id+" "+(m.name||"")).toLowerCase().includes(mf.q.toLowerCase()))
     && (!mf.chan || mf.chan === (m.custom ? "custom" : (m.channel || "zen")))
-    && (!mf.state || m.state === mf.state);
+    && (!mf.state || m.state === mf.state)
+    && (!mf.bill || mf.bill === (m.billing || "unknown"));
 
   const groups = [];
   // 每个渠道一组，顺序与名单都来自后端的 state.channels（与 lane.Channels 同源）。
@@ -1938,10 +1944,10 @@ function renderModels(state){
       const shown = g.cards.filter(match);
       const disabled = !g.enabled;
       const availInGroup = g.cards.filter(m => m.state === "available" && !m.hidden).length;
-      if(!shown.length && (mf.q || mf.state || (mf.chan && mf.chan !== g.ch))) continue;
+      if(!shown.length && (mf.q || mf.state || mf.bill || (mf.chan && mf.chan !== g.ch))) continue;
       anyShown = anyShown || shown.length > 0;
       // 可用为 0 的渠道默认折叠（手动展开记住）；明确筛选时不折叠
-      const folded = !disabled && availInGroup === 0 && !mf.state && (!mf.chan || mf.chan === g.ch) && foldedChans.has(g.ch);
+      const folded = !disabled && availInGroup === 0 && !mf.state && !mf.bill && (!mf.chan || mf.chan === g.ch) && foldedChans.has(g.ch);
       body += `<div class="msec">
         <span class="dot ${disabled?"off":"on"}"></span>
         <span class="chname">${esc(g.meta.name)}</span>
@@ -1949,7 +1955,7 @@ function renderModels(state){
         <span class="chdesc">${esc(g.meta.desc)}</span>
         ${disabled?`<span class="pill region">已停用</span><button class="ghost" data-en="${g.ch}">启用</button>`
           :`<span class="chcount">${shown.length}/${g.cards.length} 个${availInGroup?` · 可用 ${availInGroup}`:""}${g.ch!=="custom"&&g.roster?` · 名单 ${g.roster}${g.refreshedAt?` · 更新 ${new Date(g.refreshedAt*1000).toTimeString().slice(0,5)}`:""}`:""}</span>
-            ${!disabled && availInGroup === 0 && !mf.state && (!mf.chan || mf.chan === g.ch) ? `<button class="ghost fold" data-fold="${g.ch}">${folded?"展开":"收起"}</button>`:""}`}
+            ${!disabled && availInGroup === 0 && !mf.state && !mf.bill && (!mf.chan || mf.chan === g.ch) ? `<button class="ghost fold" data-fold="${g.ch}">${folded?"展开":"收起"}</button>`:""}`}
       </div>`;
       if(disabled && !shown.length){
         body += `<div class="mempty">渠道已停用 —— 它的 ${g.roster||0} 个模型已从所有 Agent 选择器撤下；点「启用」按渠道文件里的名单恢复。</div>`;
@@ -1998,7 +2004,11 @@ function renderModels(state){
           }
           if(parts.length) quotaRow = `<div class="mquota">${parts.join("")}</div>`;
         }
-        const tags = (m.systemOne?'<span class="pill warn">判断模型</span>':"")
+        const billName = { free:"免费", freemium:"部分免费", paid:"付费", unknown:"计费未声明" };
+        const billTag = m.billing
+          ? `<span class="tag" title="来自提供该模型的渠道声明；未声明 = 不猜，别当成免费">${esc(billName[m.billing] || m.billing)}</span>`
+          : "";
+        const tags = billTag + (m.systemOne?'<span class="pill warn">判断模型</span>':"")
           + (m.vision?'<span class="tag">视觉</span>':"")
           + (m.audioInput?'<span class="tag">音频</span>':"")
           + (m.fileInput?'<span class="tag">文件</span>':"")
@@ -2066,7 +2076,7 @@ function renderModels(state){
       }
       body += `</div>`;
     }
-    if(!anyShown && (mf.q || mf.chan || mf.state)){
+    if(!anyShown && (mf.q || mf.chan || mf.state || mf.bill)){
       body += `<div class="mempty">没有匹配的模型 —— 换个筛选条件试试</div>`;
     }
   }
@@ -2095,8 +2105,11 @@ function renderModels(state){
   el.querySelectorAll(".mchip[data-state]").forEach(ch=>{
     ch.onclick = ()=>{ mf.state = ch.dataset.state; renderModels(state); };
   });
+  el.querySelectorAll(".mchip[data-bill]").forEach(ch=>{
+    ch.onclick = ()=>{ mf.bill = ch.dataset.bill; renderModels(state); };
+  });
   const clearEl = el.querySelector("#m-clear");
-  if(clearEl) clearEl.onclick = ()=>{ mf = { q:"", chan:"", state:"" }; renderModels(state); };
+  if(clearEl) clearEl.onclick = ()=>{ mf = { q:"", chan:"", state:"", bill:"" }; renderModels(state); };
   el.querySelectorAll(".vtoggle button").forEach(b=>{
     b.onclick = ()=>{ mview = b.dataset.view; localStorage.setItem("zengate.mview", mview); renderModels(state); };
   });
@@ -4481,6 +4494,7 @@ function renderSettings(s){
         <span class="mchip" data-g="set-desktop">桌面</span>
         <span class="mchip" data-g="set-net">网络</span>
         <span class="mchip" data-g="set-data">数据</span>
+        <span class="mchip" data-g="set-checkin">签到</span>
         <span class="mchip" data-g="set-update">更新</span>
       </div>
       <div class="card" id="set-base"><div class="row" style="row-gap:14px">
@@ -4525,6 +4539,8 @@ function renderSettings(s){
           </div></div>
         <div class="switch"><div><span class="nm">耗尽后回落自定义 API</span><div class="ds">免费车道所有候选都被限流时，把本次请求交给自定义 API 里同名 / 能力匹配的模型继续完成（会消耗你自己的 Key 额度，默认关闭）</div></div>
           <button class="act off" id="tg-fallback">关闭</button></div>
+        <div class="switch"><div><span class="nm">回落时免费优先</span><div class="ds">回落自定义 API 时先试节点清单里声明「免费」的供应商，同级再试付费的；只为省额度改顺序，不会把不支持当前请求（视觉 / 长上下文）的模型提前。默认关闭，保持原有目录顺序</div></div>
+          <button class="act off" id="tg-freefirst">关闭</button></div>
         <div class="switch"><div><span class="nm">AI 能力标注</span><div class="ds">用免费车道模型后台给模型打能力标签（视觉/音频/文件，存本地 tags.json），供路由过滤与模型页徽章使用；几百 token/批，「实测」过的模型不会被覆盖</div></div>
           <div style="display:flex;gap:8px;align-items:center">
             <button class="ghost" id="btn-retag">重新标注</button>
@@ -4557,6 +4573,20 @@ function renderSettings(s){
             <button class="act" id="btn-capa-save">写入并锁定</button>
           </div>
         </div>
+      </div>
+
+      <div class="card" id="set-checkin">
+        <h3>自动签到 <span class="muted" style="font-size:11px">统一登记 · 每天一次 · 可手动补签</span></h3>
+        <div class="muted" style="font-size:12px;margin-bottom:8px">
+          所有每日领取任务登记在一处：启动 90 秒后先跑一次，之后每小时补查；每条按本地日历日幂等，重复点不会有成本。
+          节点清单里声明 <code class="k">checkin: daily</code> 的供应商会自动出现在这里并标成「待接入」——声明只是登记，不会假装已经签到。
+        </div>
+        <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:10px">
+          <button class="ghost" id="btn-checkin-all">立即全部签到</button>
+          <button class="ghost" id="btn-checkin-reload">刷新状态</button>
+          <span class="muted" id="checkin-at" style="font-size:12px"></span>
+        </div>
+        <div id="checkin-list"></div>
       </div>
 
       <div class="card" id="set-desktop">
@@ -5038,8 +5068,52 @@ function renderSettings(s){
     };
     loadCapa();
   }
+  // 自动签到统一登记表：GET 状态 + 事件委托，一次绑定；「单独补签」按 id 跑一条
+  const checkinCard = el.querySelector("#set-checkin");
+  if (checkinCard && !checkinCard.dataset.bound) {
+    checkinCard.dataset.bound = "1";
+    const checkinList = el.querySelector("#checkin-list");
+    const loadCheckin = async () => {
+      const j = await api("/checkin/status");
+      if (!j) return;
+      const at = el.querySelector("#checkin-at");
+      if (at) at.textContent = "本地日历日 " + j.today;
+      const rows = j.tasks || [];
+      checkinList.innerHTML = rows.length ? rows.map(t => {
+        const state = !t.wired ? '<span class="tag">待接入</span>'
+          : !t.available ? '<span class="muted">未登录 / 无可用账号</span>'
+          : t.doneToday ? '<span class="pill ok">今日已完成</span>'
+          : '<span class="pill warn">今日待办</span>';
+        return `<div style="border:1px solid var(--hairline);border-radius:8px;padding:8px 10px;margin-bottom:6px;font-size:12px">
+          <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+            <b>${esc(t.name)}</b><code class="k">${esc(t.channel)}</code>${state}
+            <span class="muted" style="font-size:11.5px">上次 ${esc(t.lastDate || "—")}</span>
+            ${t.wired && t.available ? `<button class="ghost" data-checkin-one="${esc(t.id)}" style="margin-left:auto">单独补签</button>` : ""}
+          </div>
+          <div class="muted" style="font-size:11.5px;margin-top:4px">${esc(t.detail || "")}</div>
+        </div>`;
+      }).join("") : '<div class="muted" style="font-size:12px">还没有登记任何签到任务。</div>';
+    };
+    checkinCard.addEventListener("click", async (ev) => {
+      const one = ev.target.closest && ev.target.closest("button[data-checkin-one]");
+      if (!one) return;
+      const j = await api("/checkin/one", { id: one.dataset.checkinOne });
+      if (j) { toast("已执行该签到任务"); await loadCheckin(); }
+    });
+    const btnAll = el.querySelector("#btn-checkin-all");
+    if (btnAll) btnAll.onclick = async () => {
+      const j = await api("/checkin/all", {});
+      if (!j) return;
+      toast("签到完成 " + j.claimed + " 项" + (j.failed ? "，失败 " + j.failed + " 项" : ""));
+      await loadCheckin();
+    };
+    const btnReload = el.querySelector("#btn-checkin-reload");
+    if (btnReload) btnReload.onclick = loadCheckin;
+    loadCheckin();
+  }
   setToggle("#tg-smart", s.settings.smartRouting);
   setToggle("#tg-fallback", s.settings.laneFallbackToProviders);
+  setToggle("#tg-freefirst", s.settings.preferFreeProviders);
   setToggle("#tg-autotag", s.settings.autoTagEnabled);
   setToggle("#tg-openref", s.settings.openRefEnabled);
   setToggle("#tg-wbcache", s.settings.workBuddyCacheKey);
@@ -5071,6 +5145,7 @@ function renderSettings(s){
   };
   bindSettingToggle("#tg-smart", "smartRouting", "智能路由已开启：切换会避开不支持本次模态的模型", "智能路由已关闭：恢复目录顺序、不带能力过滤");
   bindSettingToggle("#tg-fallback", "laneFallbackToProviders", "耗尽后回落自定义 API 已开启（消耗你的 Key 额度）", "耗尽后回落自定义 API 已关闭");
+  bindSettingToggle("#tg-freefirst", "preferFreeProviders", "回落时免费供应商优先", "回落时恢复目录顺序");
   bindSettingToggle("#tg-autotag", "autoTagEnabled", "AI 能力标注已开启", "AI 能力标注已暂停");
   bindSettingToggle("#tg-openref", "openRefEnabled", "公开容量参考已开启：新模型将自动获得上游容量", "公开容量参考已暂停");
   bindSettingToggle("#tg-wbcache", "workBuddyCacheKey",

@@ -134,6 +134,12 @@ func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request, rest string
 		s.adminWorkBuddyLoginPoll(w)
 	case rest == "workbuddy/checkin" && r.Method == http.MethodPost:
 		s.adminWorkBuddyCheckin(w)
+	case rest == "checkin/status" && r.Method == http.MethodGet:
+		s.adminCheckinStatus(w, r)
+	case rest == "checkin/all" && r.Method == http.MethodPost:
+		s.adminCheckinAll(w, r)
+	case rest == "checkin/one" && r.Method == http.MethodPost:
+		s.adminCheckinOne(w, r)
 	case rest == "workbuddy/logout" && r.Method == http.MethodPost:
 		s.adminWorkBuddyLogout(w, r)
 	case rest == "workbuddy/account/toggle" && r.Method == http.MethodPost:
@@ -311,6 +317,10 @@ func (s *Server) adminState(w http.ResponseWriter) {
 		// empty-channel lane). Two channels may carry the same id; this is the
 		// attribution the merged list cannot show.
 		Channel string `json:"channel,omitempty"`
+		// Billing is the tier of the source serving this published id: free /
+		// freemium / paid / unknown. unknown is a first-class answer, never a
+		// missing field to fill with a guess.
+		Billing string `json:"billing,omitempty"`
 		// Family is the model identity this row shares with every other door
 		// to the same weights (lane channel, -free variant, provider prefix).
 		// The page groups by it: one card per model, sources inside.
@@ -376,6 +386,7 @@ func (s *Server) adminState(w http.ResponseWriter) {
 		}
 		row := modelRow{
 			ID: m.ID, Name: m.Name, Blurb: m.Blurb, State: stateOrDefault(p), Detail: p.Detail, QuotaResetAt: p.QuotaResetAt,
+			Billing: laneBilling(m.ID),
 			TTFTMs: p.TTFTMs, LatencyMs: p.LatencyMs,
 			Vision: m.Vision, AudioInput: m.AudioInput, FileInput: m.FileInput,
 			Reasoning:     m.Reasoning,
@@ -431,6 +442,7 @@ func (s *Server) adminState(w http.ResponseWriter) {
 			row := modelRow{
 				ID: id, Name: mid, State: "custom", Custom: true,
 				ProviderID: p.ID,
+				Billing:    billingForModel(id, false, cfg),
 				Family:     lane.ModelFamily(id),
 				Blurb:      "自定义供应商「" + p.Name + "」",
 				Hidden:     hidden[id],
@@ -500,6 +512,7 @@ func (s *Server) adminState(w http.ResponseWriter) {
 		"smartRouting":            cfg.SmartRouting,
 		"routingStrategy":         cfg.RoutingStrategy,
 		"laneFallbackToProviders": cfg.LaneFallbackToProviders,
+		"preferFreeProviders":     cfg.PreferFreeProviders,
 		"workBuddyCacheKey":       cfg.WorkBuddyCacheKey,
 		"autoTagEnabled":          cfg.AutoTagEnabled,
 		"openRefEnabled":          cfg.OpenRefEnabled,
@@ -601,6 +614,7 @@ func (s *Server) adminSettings(w http.ResponseWriter, r *http.Request) {
 		SmartRouting            *bool            `json:"smartRouting"`
 		RoutingStrategy         *string          `json:"routingStrategy"`
 		LaneFallbackToProviders *bool            `json:"laneFallbackToProviders"`
+		PreferFreeProviders     *bool            `json:"preferFreeProviders"`
 		WorkBuddyCacheKey       *bool            `json:"workBuddyCacheKey"`
 		AutoTagEnabled          *bool            `json:"autoTagEnabled"`
 		OpenRefEnabled          *bool            `json:"openRefEnabled"`
@@ -770,6 +784,11 @@ func (s *Server) adminSettings(w http.ResponseWriter, r *http.Request) {
 		cfg.LaneFallbackToProviders = *in.LaneFallbackToProviders
 		changed = true
 		dirty["laneFallbackToProviders"] = true
+	}
+	if in.PreferFreeProviders != nil {
+		cfg.PreferFreeProviders = *in.PreferFreeProviders
+		changed = true
+		dirty["preferFreeProviders"] = true
 	}
 	if in.WorkBuddyCacheKey != nil {
 		cfg.WorkBuddyCacheKey = *in.WorkBuddyCacheKey
@@ -951,6 +970,9 @@ func (s *Server) commitSettings(next *store.Config, dirty map[string]bool) {
 		}
 		if dirty["laneFallbackToProviders"] {
 			c.LaneFallbackToProviders = next.LaneFallbackToProviders
+		}
+		if dirty["preferFreeProviders"] {
+			c.PreferFreeProviders = next.PreferFreeProviders
 		}
 		// Without this branch the WorkBuddy cache toggle was a phantom: the
 		// handler set the lane flag, answered {"changed":true}, and the next

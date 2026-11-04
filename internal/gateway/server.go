@@ -711,6 +711,10 @@ func (s *Server) modelCard(floor lane.ModelInfo, id, ownedBy string, cfg *store.
 		"output_modalities": []string{"text"},
 		"reasoning":         reasoning,
 		"capability_source": source,
+		// free / freemium / paid / unknown, from the source that actually
+		// serves this published id. Clients can pick a tier without having to
+		// know our provider table.
+		"billing": billingForModel(id, freeLane, cfg),
 	}
 	if contextWindow > 0 {
 		entry["context_window"] = contextWindow

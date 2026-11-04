@@ -119,10 +119,29 @@ type fallbackPick struct {
 func (s *Server) providerFallbackPicks(needs lane.Needs, requestedBase string) []fallbackPick {
 	cfg := s.Store.Config()
 	smart := cfg.SmartRouting
+	providers := cfg.Providers
+	if cfg.PreferFreeProviders {
+		// Stable partition, not a score sort: suppliers declaring free move to
+		// the front while each tier keeps its catalog order. The capability
+		// filter and the same-upstream-id prepend below still outrank billing —
+		// saving a key must not promote a model that cannot carry the turn.
+		ordered := make([]store.Provider, 0, len(providers))
+		for i := range providers {
+			if providers[i].Billing == store.BillingFree {
+				ordered = append(ordered, providers[i])
+			}
+		}
+		for i := range providers {
+			if providers[i].Billing != store.BillingFree {
+				ordered = append(ordered, providers[i])
+			}
+		}
+		providers = ordered
+	}
 	picks := make([]fallbackPick, 0, 8)
 	late := make([]fallbackPick, 0, 8)
-	for i := range cfg.Providers {
-		p := &cfg.Providers[i]
+	for i := range providers {
+		p := &providers[i]
 		if !p.Enabled || len(p.Models) == 0 {
 			continue
 		}

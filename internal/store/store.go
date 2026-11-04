@@ -185,6 +185,11 @@ type Config struct {
 	// back to user-added providers — these bill the user's own keys, so the
 	// default is off.
 	LaneFallbackToProviders bool `json:"laneFallbackToProviders,omitempty"`
+	// PreferFreeProviders reorders fallback candidates so a supplier declared
+	// free is tried before a paid one, at the SAME capability rank. It never
+	// promotes an unknown-capability model over a known-capable one: saving a
+	// key must not silently break a vision or long-context turn. Default off.
+	PreferFreeProviders bool `json:"preferFreeProviders,omitempty"`
 	// WorkBuddyCacheKey adds prompt_cache_key to WorkBuddy turns so the
 	// upstream buckets its prefix cache by our conversation id. Default off:
 	// the field is measured on the reference client for this same backend, but
