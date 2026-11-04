@@ -72,6 +72,12 @@ type CAAccount struct {
 	// LastCheckinDate is the local calendar day the daily credit check-in
 	// claimed, so the loop runs it at most once per day.
 	LastCheckinDate string `json:"lastCheckinDate,omitempty"`
+	// LastCheckinCredits / ClaimedCredits are the credit facts a claim returns.
+	// The claim response reports the amount just claimed, not an account
+	// balance, so the running total is the only monotonic number we can verify
+	// "积分真的增加了" against. It is persisted with the account.
+	LastCheckinCredits float64 `json:"lastCheckinCredits,omitempty"`
+	ClaimedCredits     float64 `json:"claimedCredits,omitempty"`
 }
 
 // auth rebuilds the protocol-package credential. Empty expiry writes no

@@ -199,6 +199,8 @@ func main() {
 	}
 	ln.SetExposeRegion(cfg.ExposeRegion)
 	ln.SetFailover(cfg.FailoverEnabled, cfg.FailoverMax)
+	ln.SetModelFallbackChain(cfg.ModelFallbackChain)
+	ln.SetRouteWall(cfg.RouteWall)
 	// Smart routing: master switch + failover ordering strategy + the runtime
 	// first-token sample ring that the latency strategy ranks by.
 	ln.SetSmartRouting(cfg.SmartRouting)
@@ -274,18 +276,35 @@ func main() {
 				pullCtx, pullCancel := context.WithTimeout(ctx, 3*time.Minute)
 				err := mgr.Apply(pullCtx)
 				pullCancel()
-				if err == nil {
-					break
+			if err == nil {
+				break
+			}
+			// 第一次失败用 ERROR（用户需要看到），之后退避并降级为 WARN，
+			// 避免「代理端口配错」这类持久失败每 60 秒刷一条 ERROR、把仪表盘
+			// 永远钉在「订阅轮询失败 / 网关有问题」的状态（#121 后续）。
+			backoff := time.Minute
+			if attempt > 1 {
+				// 1m → 2m → 4m → 8m → 封顶 15m
+				b := 1 << uint(attempt-1)
+				if b > 15 {
+					b = 15
 				}
-				logger.Errorf("订阅轮询启动失败(第 %d 次): %v", attempt, err)
-				if !st.Config().SubsEnabled {
-					return
-				}
-				select {
-				case <-time.After(time.Minute):
-				case <-ctx.Done():
-					return
-				}
+				backoff = time.Duration(b) * time.Minute
+			}
+			msg := fmt.Sprintf("订阅轮询启动失败(第 %d 次): %v", attempt, err)
+			if attempt == 1 {
+				logger.Errorf("%s", msg)
+			} else {
+				logger.Warnf("%s（退避 %v 后重试）", msg, backoff)
+			}
+			if !st.Config().SubsEnabled {
+				return
+			}
+			select {
+			case <-time.After(backoff):
+			case <-ctx.Done():
+				return
+			}
 			}
 			if st.Config().ProxyMode == "rotate" {
 				lane.SetProxy("rotate", "")
@@ -381,68 +400,11 @@ func main() {
 	ln.OnChange = syncEndpoints
 	gw.SetModelsSync(syncEndpoints)
 	ln.StartLoops(ctx, time.Duration(cfg.ProbeIntervalMinutes)*time.Minute)
-	// WorkBuddy 每日任务：本地日历日一次，按版本各走各的路 —— 国际版用免费
-	// 模型发一条极小对话领活跃积分，国内版直接调 daily-checkin 签到（国际版
-	// 没有这个端点）。启动 90s 后先查一次（覆盖"当天已登录"的场景），之后每
-	// 小时补查；已完成/未登录的判断是纯日期比较，重复触发没有成本。
-	go func() {
-		time.Sleep(90 * time.Second)
-		runWBDaily := func() {
-			if ran, err := ln.WorkBuddyDailyActivity(ctx); ran {
-				if err != nil {
-					logger.Infof("WorkBuddy 每日活跃未完成（下个小时重试）: %v", err)
-				} else {
-					logger.Infof("WorkBuddy 每日活跃已完成")
-				}
-			}
-			if ran, err := ln.WorkBuddyDailyCheckin(ctx); ran {
-				if err != nil {
-					logger.Infof("WorkBuddy 国内版签到未完成（下个小时重试）: %v", err)
-				} else {
-					logger.Infof("WorkBuddy 国内版每日签到已完成")
-				}
-			}
-		}
-		runWBDaily()
-		t := time.NewTicker(time.Hour)
-		defer t.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-t.C:
-				runWBDaily()
-			}
-		}
-	}()
-	// CodeArts 每日签到：华为云官方活动（每日 1000 积分，30 天有效），本地
-	// 日历日一次。领取是幂等的（已领取只补确认），启动 100s 后先查一次，
-	// 之后每小时补查；未登录/已完成的检查是纯日期比较，重复触发没有成本。
-	go func() {
-		time.Sleep(100 * time.Second)
-		runCACheckin := func() {
-			ran, err := ln.CodeArtsDailyCheckin(ctx)
-			if !ran {
-				return
-			}
-			if err != nil {
-				logger.Infof("CodeArts 每日签到未完成（下个小时重试）: %v", err)
-				return
-			}
-			logger.Infof("CodeArts 每日签到已完成")
-		}
-		runCACheckin()
-		t := time.NewTicker(time.Hour)
-		defer t.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-t.C:
-				runCACheckin()
-			}
-		}
-	}()
+	// 每日签到统一调度：WorkBuddy CN 签到 / 国际版活跃 / CodeArts 签到三条每日
+	// 任务，连同节点清单里声明 daily 的待接入项，统一登记在 gateway 的签到注册表
+	// 里。启动 90s 后先跑一次（覆盖「当天已登录」），之后每小时补查；每条领取
+	// 仍按本地日历日幂等。新增平台改注册表即可，不用再动这里。
+	gw.StartCheckinLoop(ctx)
 	gw.StartOpenRefLoop(ctx)
 	gw.StartCustomProbeLoop(ctx)
 	syncEndpoints()

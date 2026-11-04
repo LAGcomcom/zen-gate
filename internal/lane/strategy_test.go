@@ -32,12 +32,12 @@ func TestNextCandidateFiltersByNeeds(t *testing.T) {
 
 	// A vision request must skip the text-only nemotron even though it comes
 	// first in catalog order.
-	if got := l.nextCandidate(Needs{Image: true}, map[string]bool{}); got != "space-bunny-free" {
+	if got := l.nextCandidate(Needs{Image: true}, map[string]bool{}, nil, nil); got != "space-bunny-free" {
 		t.Fatalf("vision request: next = %q, want space-bunny-free", got)
 	}
 	// Without a modality footprint the same pool keeps catalog order —
 	// space-bunny sits ahead of nemotron-lightning in the roster.
-	if got := l.nextCandidate(Needs{}, map[string]bool{}); got != "space-bunny-free" {
+	if got := l.nextCandidate(Needs{}, map[string]bool{}, nil, nil); got != "space-bunny-free" {
 		t.Fatalf("no needs: next = %q, want space-bunny-free", got)
 	}
 }
@@ -45,10 +45,10 @@ func TestNextCandidateFiltersByNeeds(t *testing.T) {
 func TestNextCandidateContextFit(t *testing.T) {
 	l := NewLane()
 	throttleAll(l, "nemotron-3.5-lightning-free") // 128k window, the smallest here
-	if got := l.nextCandidate(Needs{PromptTokens: 200000}, map[string]bool{}); got != "" {
+	if got := l.nextCandidate(Needs{PromptTokens: 200000}, map[string]bool{}, nil, nil); got != "" {
 		t.Fatalf("oversized request: next = %q, want none", got)
 	}
-	if got := l.nextCandidate(Needs{PromptTokens: 1000}, map[string]bool{}); got != "nemotron-3.5-lightning-free" {
+	if got := l.nextCandidate(Needs{PromptTokens: 1000}, map[string]bool{}, nil, nil); got != "nemotron-3.5-lightning-free" {
 		t.Fatalf("small request: next = %q, want nemotron-3.5-lightning-free", got)
 	}
 }
@@ -65,13 +65,13 @@ func TestNextCandidateLatencyStrategy(t *testing.T) {
 	})
 	// Both candidates are unprobed (same availability band); the measured-fast
 	// one wins even though nemotron-lightning comes first in catalog order.
-	if got := l.nextCandidate(Needs{}, map[string]bool{}); got != "space-bunny-free" {
+	if got := l.nextCandidate(Needs{}, map[string]bool{}, nil, nil); got != "space-bunny-free" {
 		t.Fatalf("latency strategy: next = %q, want space-bunny-free", got)
 	}
 	// Catalog strategy on the same pool: listing order.
 	l.SetTTFTSource(nil)
 	l.SetStrategy(StrategyCatalog)
-	if got := l.nextCandidate(Needs{}, map[string]bool{}); got != "space-bunny-free" {
+	if got := l.nextCandidate(Needs{}, map[string]bool{}, nil, nil); got != "space-bunny-free" {
 		t.Fatalf("catalog strategy: next = %q, want space-bunny-free", got)
 	}
 }
@@ -82,11 +82,11 @@ func TestSmartRoutingOffRestoresLegacy(t *testing.T) {
 	throttleAll(l, "ll-alpha-free", "space-bunny-free")
 	// Legacy ignores the modality filter: a vision request still lands on
 	// space-bunny purely by catalog position, which is exactly what "off" means.
-	if got := l.nextCandidate(Needs{Image: true}, map[string]bool{}); got != "space-bunny-free" {
+	if got := l.nextCandidate(Needs{Image: true}, map[string]bool{}, nil, nil); got != "space-bunny-free" {
 		t.Fatalf("legacy: next = %q, want space-bunny-free", got)
 	}
 	// Legacy skips the context check too: a 10M-token prompt still finds one.
-	if got := l.nextCandidate(Needs{PromptTokens: 10 << 20}, map[string]bool{}); got != "space-bunny-free" {
+	if got := l.nextCandidate(Needs{PromptTokens: 10 << 20}, map[string]bool{}, nil, nil); got != "space-bunny-free" {
 		t.Fatalf("legacy oversized: next = %q, want space-bunny-free", got)
 	}
 }
@@ -187,7 +187,7 @@ func TestLatencyStrategyPrefersTheSampleRingOverTheLastProbe(t *testing.T) {
 		}
 		return 0
 	})
-	if got := l.nextCandidate(Needs{}, map[string]bool{}); got != "space-bunny-free" {
+	if got := l.nextCandidate(Needs{}, map[string]bool{}, nil, nil); got != "space-bunny-free" {
 		t.Fatalf("next = %q, want the model the ring measured fast", got)
 	}
 }

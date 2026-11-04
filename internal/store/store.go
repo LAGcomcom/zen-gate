@@ -94,6 +94,22 @@ type Provider struct {
 	// rejected the cache-declaring shape with a 400, and settable by hand for a
 	// provider whose cache behaviour is not worth guessing about.
 	NoCache bool `json:"noCache,omitempty"`
+	// Node-catalog fields: a supplier's billing tier, its published free-tier
+	// ceiling, where to obtain a key, and whether it has a daily credit claim.
+	// Billing/Quota are claims with a source, not computed guesses — an absent
+	// value reads as "unknown" everywhere (see node_catalog.go).
+	Billing   string     `json:"billing,omitempty"`
+	Quota     *NodeQuota `json:"quota,omitempty"`
+	SignupURL string     `json:"signupUrl,omitempty"`
+	Checkin   string     `json:"checkin,omitempty"`
+	// Read-only balance contract, declared by the node list. "接更多网站" stays
+	// a data change: the check-in panel can watch a new supplier's credits
+	// without a Go adapter. See node_catalog.go for the semantics; the key is
+	// never stored in these fields.
+	CheckinResetHour int    `json:"checkinResetHour,omitempty"`
+	BalanceURL       string `json:"balanceUrl,omitempty"`
+	BalancePath      string `json:"balancePath,omitempty"`
+	BalanceKind      string `json:"balanceKind,omitempty"`
 }
 
 // EffectiveKeys lists the keys this provider rotates over, deduplicated and
@@ -160,6 +176,10 @@ type Config struct {
 	SingBoxPath     string         `json:"singBoxPath,omitempty"`
 	FailoverEnabled bool           `json:"failoverEnabled"`
 	FailoverMax     int            `json:"failoverMax"`
+	// ModelFallbackChain is the user-authored ordered list of model ids that
+	// catch a turn refused on the requested model (quota/region/free-tier/
+	// server error). Issue #25. Empty = the lane falls back to its own pick.
+	ModelFallbackChain []string `json:"modelFallbackChain,omitempty"`
 	// SmartRouting is the multimodal-routing master switch: on = failover
 	// candidates are filtered by the request's modalities and ordered by the
 	// routing strategy; off = the exact pre-routing behaviour (catalog order,
@@ -173,6 +193,11 @@ type Config struct {
 	// back to user-added providers — these bill the user's own keys, so the
 	// default is off.
 	LaneFallbackToProviders bool `json:"laneFallbackToProviders,omitempty"`
+	// PreferFreeProviders reorders fallback candidates so a supplier declared
+	// free is tried before a paid one, at the SAME capability rank. It never
+	// promotes an unknown-capability model over a known-capable one: saving a
+	// key must not silently break a vision or long-context turn. Default off.
+	PreferFreeProviders bool `json:"preferFreeProviders,omitempty"`
 	// WorkBuddyCacheKey adds prompt_cache_key to WorkBuddy turns so the
 	// upstream buckets its prefix cache by our conversation id. Default off:
 	// the field is measured on the reference client for this same backend, but
@@ -189,6 +214,11 @@ type Config struct {
 	// table knows nothing about — recorded as 上游声明, never overriding a
 	// curated row, a probe, or an AI verdict. See internal/openref.
 	OpenRefEnabled bool `json:"openRefEnabled,omitempty"`
+	// CapabilityLocks shields models from automatic public-catalog corrections.
+	// A locked row keeps whatever the user (or a live 实测) decided, and the
+	// 6-hourly pull skips it. Keys are base model ids. Set implicitly by a
+	// rollback: undoing a catalog's verdict is also a veto on the next one.
+	CapabilityLocks map[string]bool `json:"capabilityLocks,omitempty"`
 	// LogCategories is the per-class logging switch set. A partial or absent
 	// map merges onto logx.DefaultCategories(), so an upgraded config never
 	// turns the high-volume classes on by itself.
@@ -245,8 +275,30 @@ type Config struct {
 	// modelscope). One list serves all six: Kind says which one an entry
 	// belongs to, and each channel keeps its own enable flag.
 	ExtAccounts []lane.ExtAccount `json:"extAccounts,omitempty"`
+	// RouteWall is the user-authored channel routing rules (the 渠道墙 /
+	// selectable route-wall feature). Each enabled rule matches a request — by
+	// model name or globally — and constrains which channels (supplier buckets)
+	// the lane may route that request through. The lane applies the union of
+	// every matching rule's allow/deny sets while picking a failover target.
+	RouteWall []lane.RouteRule `json:"routeWall,omitempty"`
 	Window   WindowState    `json:"window"`
 }
+
+// ChannelStat is one supplier's token ledger for a day. It answers "how many
+// tokens did THIS API burn" — the question an aggregated gateway has to be able
+// to answer before anyone can decide which free/paid lane is worth keeping.
+type ChannelStat struct {
+	Requests   int `json:"requests"`
+	Failed     int `json:"failed"`
+	Input      int `json:"input"`
+	Output     int `json:"output"`
+	CacheRead  int `json:"cacheRead,omitempty"`
+	CacheWrite int `json:"cacheWrite,omitempty"`
+}
+
+// ChannelUnattributed holds records written before channel attribution existed.
+// They are shown as 未标注, never redistributed by a guess.
+const ChannelUnattributed = "unattributed"
 
 // DayStat aggregates one calendar day.
 type DayStat struct {
@@ -261,9 +313,10 @@ type DayStat struct {
 	Output     int            `json:"output"`
 	CacheRead  int            `json:"cacheRead,omitempty"`
 	CacheWrite int            `json:"cacheWrite,omitempty"`
-	Models     map[string]int `json:"models,omitempty"`
-	ModelReqs  map[string]int `json:"modelReqs,omitempty"`
-	Agents     map[string]int `json:"agents,omitempty"`
+	Models     map[string]int             `json:"models,omitempty"`
+	ModelReqs  map[string]int             `json:"modelReqs,omitempty"`
+	Agents     map[string]int             `json:"agents,omitempty"`
+	Channels   map[string]*ChannelStat    `json:"channels,omitempty"`
 }
 
 // Stats is the persisted usage accounting.
@@ -301,6 +354,7 @@ const quotaEpisodeTTL = 14 * 24 * time.Hour
 const (
 	TagSourceProbe   = "实测"
 	TagSourceListing = "上游声明"
+	TagSourceManual  = "人工校准"
 	TagSourceAI      = "AI标注"
 	TagSourceHeuris  = "规则"
 	// TagSourceUnknown is not a source: it marks a model no rule and no
@@ -340,6 +394,17 @@ type Store struct {
 	cfg       atomic.Pointer[Config]
 	perfDirty bool
 	tags      map[string]ModelTag
+	// audit is the append-only decision log for capacity verdicts: every
+	// public-catalog correction records its before→after pair so the user can
+	// see, veto and roll back what an external source silently changed.
+	audit []CapabilityChange
+	// refs is the last successful public-catalog snapshot, kept so the audit
+	// desk can diff "what the catalog says" against "what we believe" offline.
+	refs CapabilityRefs
+	// checkinEvidence is the durable "the credits really went up" proof for
+	// daily claims. It lives outside the process so a restart never re-claims
+	// a day that already paid out.
+	checkinEvidence map[string]CheckinEvidence
 	// channels is the per-channel state behind <home>/channels/<id>.json —
 	// one file per free-lane channel carrying its enable flag and the model
 	// roster it currently serves (see channels.go).
@@ -587,6 +652,9 @@ func Open() (*Store, error) {
 		tags = &map[string]ModelTag{}
 	}
 	s.tags = *tags
+	s.loadCapabilityAudit()
+	s.loadCapabilityRefs()
+	s.loadCheckinEvidence()
 	return s, nil
 }
 
@@ -597,16 +665,7 @@ func Open() (*Store, error) {
 func (s *Store) SetModelTag(model string, t ModelTag) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if prev, ok := s.tags[model]; ok {
-		if t.ContextWindow == 0 {
-			t.ContextWindow = prev.ContextWindow
-		}
-		if t.MaxOutput == 0 {
-			t.MaxOutput = prev.MaxOutput
-		}
-	}
-	s.tags[model] = t
-	_ = writeJSON(filepath.Join(s.Home, "tags.json"), s.tags)
+	s.setModelTagLocked(model, t)
 }
 
 // ModelTagOf returns one model's stored capability verdict, if any.
@@ -843,6 +902,7 @@ func (c *Config) clone() *Config {
 	next.AgentKeys = cloneMap(c.AgentKeys)
 	next.EnabledAgents = cloneBoolMap(c.EnabledAgents)
 	next.LogCategories = cloneBoolMap(c.LogCategories)
+	next.CapabilityLocks = cloneBoolMap(c.CapabilityLocks)
 	next.SeenAnnouncements = cloneSlice(c.SeenAnnouncements)
 	next.HiddenModels = cloneSlice(c.HiddenModels)
 	next.ModelPrefs = cloneMap(c.ModelPrefs)
@@ -866,6 +926,12 @@ func (c *Config) clone() *Config {
 			// Aliasing the key list across snapshots would let a later save
 			// mutate the slice a request in flight (or an export) points at.
 			p.APIKeys = cloneSlice(p.APIKeys)
+			// Quota is a pointer: aliasing it across config snapshots would let
+			// a later edit mutate a value an in-flight request already read.
+			if p.Quota != nil {
+				q := *p.Quota
+				p.Quota = &q
+			}
 			next.Providers[i] = p
 		}
 	}
@@ -1184,6 +1250,28 @@ func (s *Store) Record(rec lane.CallRecord) {
 		}
 		d.Agents[rec.Agent] += rec.Output
 	}
+	ch := rec.Channel
+	if ch == "" {
+		ch = s.channelForLegacy(rec.Model)
+	}
+	if d.Channels == nil {
+		// Day buckets written before this field existed unmarshal with a nil
+		// map; assigning into it panics the process.
+		d.Channels = map[string]*ChannelStat{}
+	}
+	cs := d.Channels[ch]
+	if cs == nil {
+		cs = &ChannelStat{}
+		d.Channels[ch] = cs
+	}
+	cs.Requests++
+	if !rec.Ok {
+		cs.Failed++
+	}
+	cs.Input += rec.Input
+	cs.Output += rec.Output
+	cs.CacheRead += rec.CacheRead
+	cs.CacheWrite += rec.CacheWrite
 	s.stats.Recent = append(s.stats.Recent, rec)
 	if len(s.stats.Recent) > maxRecent {
 		s.stats.Recent = s.stats.Recent[len(s.stats.Recent)-maxRecent:]
@@ -1219,14 +1307,52 @@ func (s *Store) FlushStats() error {
 	return writeJSON(filepath.Join(s.Home, "stats.json"), s.stats)
 }
 
-// SnapshotStats returns a copy for display.
+// channelForLegacy attributes records written before Channel existed. Custom
+// suppliers namespace their models as "id/model", so a configured provider id
+// is solid evidence; anything else stays unattributed rather than guessed.
+func (s *Store) channelForLegacy(model string) string {
+	if i := strings.IndexByte(model, '/'); i > 0 {
+		id := model[:i]
+		for _, p := range s.Config().Providers {
+			if p.ID == id {
+				return id
+			}
+		}
+	}
+	return ChannelUnattributed
+}
+
+func cloneIntMap(m map[string]int) map[string]int {
+	if m == nil {
+		return nil
+	}
+	out := make(map[string]int, len(m))
+	for k, v := range m {
+		out[k] = v
+	}
+	return out
+}
+
+// SnapshotStats returns a deep copy for display. Day buckets hold maps; a
+// shallow struct copy would hand the UI maps that Record is still writing into,
+// which is a concurrent map read/write panic waiting to happen.
 func (s *Store) SnapshotStats() (map[string]*DayStat, []lane.CallRecord) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	days := map[string]*DayStat{}
 	for k, v := range s.stats.Days {
-		clone := *v
-		days[k] = &clone
+		c := *v
+		c.Models = cloneIntMap(v.Models)
+		c.ModelReqs = cloneIntMap(v.ModelReqs)
+		c.Agents = cloneIntMap(v.Agents)
+		if v.Channels != nil {
+			c.Channels = make(map[string]*ChannelStat, len(v.Channels))
+			for id, st := range v.Channels {
+				cp := *st
+				c.Channels[id] = &cp
+			}
+		}
+		days[k] = &c
 	}
 	recent := make([]lane.CallRecord, len(s.stats.Recent))
 	copy(recent, s.stats.Recent)

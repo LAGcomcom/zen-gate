@@ -30,6 +30,11 @@ type ProbeResult struct {
 	TTFTMs    int64  `json:"ttftMs,omitempty"`
 	LatencyMs int64  `json:"latencyMs"`
 	At        int64  `json:"at"`
+	// QuotaResetAt is the unix second at which a throttled (429) model's free
+	// window reopens. Zero means "unknown — just retry later". It lets the UI
+	// separate a quota wall ("额度用尽，X 点重置") from a real connectivity
+	// fault (node dead / proxy refused), which should never be shown as quota.
+	QuotaResetAt int64 `json:"quotaResetAt,omitempty"`
 }
 
 // stateTTL bounds how long one sampled verdict speaks for the model. Free
@@ -141,6 +146,7 @@ func probeModelInner(ctx context.Context, m ModelInfo) ProbeResult {
 			res.State = StateRegionBlock
 		case CodeQuota:
 			res.State = StateThrottled
+			res.QuotaResetAt = quotaResetAt(ue)
 		case CodeServer:
 			if ue.Unavailable {
 				res.State = StateUnavailable
@@ -164,7 +170,55 @@ func probeModelInner(ctx context.Context, m ModelInfo) ProbeResult {
 var (
 	inBandUnavailableRe = regexp.MustCompile(`(?i)model is unavailable|not supported|does not exist|invalid model`)
 	inBandRegionRe      = regexp.MustCompile(`(?i)not available in your country|region`)
+	// resetAtRe catches the upstream free-window reset clock carried in a 429
+	// body, e.g. WorkBuddy 6004 "your usage will reset at 2099-01-01 00:00:00
+	// UTC+8" or a FreeUsageLimitError with the same tail. Empty zone means the
+	// timestamp is already local wall-clock.
+	resetAtRe = regexp.MustCompile(`(?i)reset at\s+(\d{4}[-/]\d{2}[-/]\d{2}[ T]\d{2}:\d{2}(?::\d{2})?)\s*(UTC\+?0?8|GMT\+?0?8|UTC|GMT|Z)?`)
 )
+
+// quotaResetAt turns a 429 verdict into the unix second its free window reopens.
+// It prefers the explicit Retry-After the gateway already parsed, then falls
+// back to a reset-clock string in the body. A zero result means "unknown — just
+// retry later"; it must never be treated as a connectivity fault.
+func quotaResetAt(ue *UpstreamError) int64 {
+	if ue == nil {
+		return 0
+	}
+	if ue.RetryAfter > 0 {
+		return time.Now().Add(time.Duration(ue.RetryAfter) * time.Second).Unix()
+	}
+	m := resetAtRe.FindStringSubmatch(ue.Message)
+	if m == nil {
+		return 0
+	}
+	layouts := []string{"2006-01-02 15:04:05", "2006-01-02 15:04", "2006/01/02 15:04:05", "2006/01/02 15:04"}
+	var t time.Time
+	var err error
+	for _, lay := range layouts {
+		t, err = time.ParseInLocation(lay, m[1], time.Local)
+		if err == nil {
+			break
+		}
+	}
+	if err != nil {
+		return 0
+	}
+	zone := strings.ToUpper(m[2])
+	switch {
+	case strings.HasPrefix(zone, "UTC+08") || strings.HasPrefix(zone, "GMT+08") || zone == "UTC+8" || zone == "GMT+8":
+		_, offset := time.Now().Zone()
+		if offset != 8*3600 {
+			t = t.Add(time.Duration(8*3600-offset) * time.Second)
+		}
+	case zone == "UTC" || zone == "GMT" || zone == "Z":
+		_, offset := time.Now().Zone()
+		if offset != 0 {
+			t = t.Add(time.Duration(0-offset) * time.Second)
+		}
+	}
+	return t.Unix()
+}
 
 func inBandRefusal(payload string) (state, detail string) {
 	var m map[string]any
@@ -232,6 +286,7 @@ func probeSystemOne(ctx context.Context, m ModelInfo, res ProbeResult) ProbeResu
 			res.State = StateRegionBlock
 		case CodeQuota:
 			res.State = StateThrottled
+			res.QuotaResetAt = quotaResetAt(ue)
 		case CodeServer:
 			if ue.Unavailable {
 				res.State = StateUnavailable
@@ -255,6 +310,14 @@ func probeSystemOne(ctx context.Context, m ModelInfo, res ProbeResult) ProbeResu
 // the time routing reads it. A small worker pool keeps the round fast while
 // still delivering results progressively. onResult is serialized through a
 // mutex so callers need not be concurrency-safe.
+//
+// The bound is small on purpose and must stay small. Unlike the node egress
+// probe (subs.probeMaxParallel), every call here is a real request to a real
+// account: it spends quota and it is attributable. A wave of N would show the
+// upstream one account calling from N exits at the same instant — the exact
+// signature of a shared account, which is answered with a ban rather than an
+// error. 8 is already the ceiling of what a free tier tolerates; widening it
+// does not make the round faster, it makes the account disposable.
 func ProbeCatalog(ctx context.Context, models []ModelInfo, onResult func(ProbeResult)) {
 	const concurrency = 8
 	sem := make(chan struct{}, concurrency)
@@ -298,54 +361,136 @@ func DetectEgress(ctx context.Context) Egress {
 
 // DetectEgressVia is DetectEgress through an explicit client (proxy testing).
 func DetectEgressVia(ctx context.Context, client *http.Client) Egress {
-	try := func(url string, parse func([]byte) Egress) (Egress, bool) {
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-		if err != nil {
-			return Egress{}, false
-		}
-		resp, err := client.Do(req)
-		if err != nil {
-			return Egress{}, false
-		}
-		defer resp.Body.Close()
-		data, err := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
-		if err != nil {
-			return Egress{}, false
-		}
-		e := parse(data)
-		if e.IP == "" {
-			return Egress{}, false
-		}
-		return e, true
-	}
-	if e, ok := try("https://ipinfo.io/json", func(b []byte) Egress {
+	e, _ := DetectEgressViaErr(ctx, client)
+	return e
+}
+
+// egressSource is one IP echo endpoint plus how to read its answer.
+type egressSource struct {
+	url   string
+	parse func([]byte) Egress
+}
+
+// egressSources are raced, not tried in order.
+//
+// They answer the same question about the same exit, so trying them one after
+// another only bought the sum of three timeouts: at the old 12s budget a single
+// node could spend 36s failing to learn its own IP, and a probe round over a
+// 64-node pool spent that per node. Racing them costs a few extra KB of
+// request and collapses the whole question to one round-trip.
+var egressSources = []egressSource{
+	{"https://ipinfo.io/json", func(b []byte) Egress {
 		var m struct {
 			IP      string `json:"ip"`
 			Country string `json:"country"`
 		}
 		_ = json.Unmarshal(b, &m)
 		return Egress{IP: m.IP, Country: strings.ToUpper(m.Country)}
-	}); ok {
-		return e
-	}
-	if e, ok := try("https://api.ipify.org?format=json", func(b []byte) Egress {
+	}},
+	{"https://api.ipify.org?format=json", func(b []byte) Egress {
 		var m struct {
 			IP string `json:"ip"`
 		}
 		_ = json.Unmarshal(b, &m)
 		return Egress{IP: m.IP}
-	}); ok {
-		return e
-	}
-	if e, ok := try("https://ipapi.co/json/", func(b []byte) Egress {
+	}},
+	{"https://ipapi.co/json/", func(b []byte) Egress {
 		var m struct {
 			IP          string `json:"ip"`
 			CountryCode string `json:"country_code"`
 		}
 		_ = json.Unmarshal(b, &m)
 		return Egress{IP: m.IP, Country: strings.ToUpper(m.CountryCode)}
-	}); ok {
-		return e
+	}},
+}
+
+// countryGrace is how long an answer with an IP but no country waits for one
+// that also names the country. ipify is usually first but never says where;
+// ipinfo and ipapi do. The IP is the identity that matters for rotation and
+// drift, so a country-less answer is still an answer — it just gets a short
+// grace period, not the whole probe budget.
+const countryGrace = 300 * time.Millisecond
+
+// DetectEgressViaErr keeps the failure reason alongside the (empty) answer.
+//
+// The caller needs the reason, not just the absence of a result: "no echo
+// service could be read" and "the transport refused every request" lead to
+// opposite conclusions about a node — unknown versus dead — and an operator
+// cannot act on either without knowing which one happened.
+func DetectEgressViaErr(ctx context.Context, client *http.Client) (Egress, error) {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	type answer struct {
+		eg  Egress
+		err error
 	}
-	return Egress{}
+	// Buffered to len(sources): the losers of the race must be able to finish
+	// writing after the winner returned, or they leak a goroutine each.
+	ch := make(chan answer, len(egressSources))
+	for _, src := range egressSources {
+		go func(src egressSource) {
+			eg, err := fetchEgress(ctx, client, src)
+			ch <- answer{eg: eg, err: err}
+		}(src)
+	}
+
+	var ipOnly Egress // first answer that had an IP but no country
+	var firstErr error
+	grace := time.NewTimer(countryGrace)
+	defer grace.Stop()
+	graceC := grace.C
+
+	for i := 0; i < len(egressSources); i++ {
+		select {
+		case a := <-ch:
+			switch {
+			case a.err != nil:
+				if firstErr == nil {
+					firstErr = a.err
+				}
+			case a.eg.Country != "":
+				// Complete answer: nothing left worth waiting for.
+				return a.eg, nil
+			case ipOnly.IP == "":
+				ipOnly = a.eg
+			}
+		case <-graceC:
+			// A country-less answer is already in hand; do not hold the round
+			// hostage to the slower services just for a display field.
+			graceC = nil
+			if ipOnly.IP != "" {
+				return ipOnly, nil
+			}
+		}
+	}
+	if ipOnly.IP != "" {
+		return ipOnly, nil
+	}
+	if firstErr == nil {
+		firstErr = fmt.Errorf("三个出口回显服务都没有给出 IP")
+	}
+	return Egress{}, firstErr
+}
+
+// fetchEgress asks one echo service through the given client.
+func fetchEgress(ctx context.Context, client *http.Client, src egressSource) (Egress, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, src.url, nil)
+	if err != nil {
+		return Egress{}, err
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return Egress{}, fmt.Errorf("%s: %w", src.url, err)
+	}
+	defer resp.Body.Close()
+	data, err := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
+	if err != nil {
+		return Egress{}, fmt.Errorf("%s: 读取响应失败: %w", src.url, err)
+	}
+	e := src.parse(data)
+	if e.IP == "" {
+		return Egress{}, fmt.Errorf("%s: HTTP %d，响应里没有 IP", src.url, resp.StatusCode)
+	}
+	return e, nil
 }

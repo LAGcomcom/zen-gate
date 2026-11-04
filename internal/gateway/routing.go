@@ -119,10 +119,29 @@ type fallbackPick struct {
 func (s *Server) providerFallbackPicks(needs lane.Needs, requestedBase string) []fallbackPick {
 	cfg := s.Store.Config()
 	smart := cfg.SmartRouting
+	providers := cfg.Providers
+	if cfg.PreferFreeProviders {
+		// Stable partition, not a score sort: suppliers declaring free move to
+		// the front while each tier keeps its catalog order. The capability
+		// filter and the same-upstream-id prepend below still outrank billing —
+		// saving a key must not promote a model that cannot carry the turn.
+		ordered := make([]store.Provider, 0, len(providers))
+		for i := range providers {
+			if providers[i].Billing == store.BillingFree {
+				ordered = append(ordered, providers[i])
+			}
+		}
+		for i := range providers {
+			if providers[i].Billing != store.BillingFree {
+				ordered = append(ordered, providers[i])
+			}
+		}
+		providers = ordered
+	}
 	picks := make([]fallbackPick, 0, 8)
 	late := make([]fallbackPick, 0, 8)
-	for i := range cfg.Providers {
-		p := &cfg.Providers[i]
+	for i := range providers {
+		p := &providers[i]
 		if !p.Enabled || len(p.Models) == 0 {
 			continue
 		}
@@ -159,23 +178,33 @@ func (s *Server) providerFallbackPicks(needs lane.Needs, requestedBase string) [
 // false when every provider refused (the caller then reports the original
 // lane error).
 func (s *Server) providerFallback(ctx context.Context, picks []fallbackPick, unified []lane.Message, tools []lane.ToolDef, maxTokens int, agent string, emit func(lane.Chunk)) (lane.Usage, string, string, *lane.UpstreamError, bool) {
+	cands := make([]nodeCandidate, 0, len(picks))
 	for _, pick := range picks {
-		usage, finish, uerr := relay.Complete(ctx, relay.Turn{
-			Provider: pick.p, Model: pick.model, Messages: unified,
-			Tools: tools, MaxTokens: maxTokens, Agent: agent,
-			// No rung is forwarded here on purpose: the fallback serves a
-			// different vendor's model than the one the caller picked, and a
-			// thinking level chosen for that model is not a statement about
-			// this one. The direct relay path carries the caller's own word.
-		}, emit)
-		s.recordRelay(ctx, pick.p, pick.model, agent, finish != "", usage, 0, finish, uerr)
-		if uerr == nil {
-			s.logCat(logx.CatRouting, "info", "免费车道耗尽，已回落自定义 API: %s/%s", pick.p.ID, pick.model)
-			return usage, finish, pick.p.ID + "/" + pick.model, nil, true
-		}
-		s.logCat(logx.CatRouting, "warn", "回落候选 %s/%s 失败: %s", pick.p.ID, pick.model, uerr.Message)
+		cands = append(cands, nodeCandidate{Provider: pick.p, Model: pick.model})
 	}
-	return lane.Usage{}, "", "", nil, false
+	res := s.runNodeSwitch(ctx, cands, emit,
+		func(c nodeCandidate, e func(lane.Chunk)) (lane.Usage, string, *lane.UpstreamError) {
+			usage, finish, uerr := relay.Complete(ctx, relay.Turn{
+				Provider: c.Provider, Model: c.Model, Messages: unified,
+				Tools: tools, MaxTokens: maxTokens, Agent: agent,
+				// No rung is forwarded here on purpose: the fallback serves a
+				// different vendor's model than the one the caller picked, and
+				// a thinking level chosen for that model is not a statement
+				// about this one. The direct relay path carries its own word.
+			}, e)
+			s.recordRelay(ctx, c.Provider, c.Model, agent, finish != "", usage, 0, finish, uerr)
+			return usage, finish, uerr
+		})
+	if len(res.Attempts) == 0 {
+		return lane.Usage{}, "", "", nil, false
+	}
+	last := res.Attempts[len(res.Attempts)-1]
+	if last.Err == nil {
+		s.logCat(logx.CatRouting, "info", "免费车道耗尽，已回落自定义 API: %s/%s",
+			res.Served.Provider.ID, res.Served.Model)
+		return last.Usage, last.Finish, res.Served.Provider.ID + "/" + res.Served.Model, nil, true
+	}
+	return lane.Usage{}, "", "", last.Err, false
 }
 
 // fallbackEnabled reports whether the one-way lane→provider fallback may run
