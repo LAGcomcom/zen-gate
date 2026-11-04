@@ -126,27 +126,19 @@ func (s *Server) relayChatCompletions(w http.ResponseWriter, r *http.Request, re
 	created := time.Now().Unix()
 	served := p.ID + "/" + upstream
 
-	doRelay := func(consume func(lane.Chunk)) (lane.Usage, string, *lane.UpstreamError, int64) {
-		start := time.Now()
-		var firstAt int64
-		usage, finish, uerr := relay.Complete(ctx, relay.Turn{
+	doRelay := func(consume func(lane.Chunk)) nodeRun {
+		return s.completeRelayWithNodeSwitch(ctx, p, upstream, relay.Turn{
 			Provider: p, Model: upstream, Messages: unified,
 			Tools: convertOpenAITools(req.Tools), MaxTokens: maxTok, Agent: agent,
 			ReasoningEffort: s.relayEffort(req.Model, upstream, req.ReasoningEffort),
-		}, func(c lane.Chunk) {
-			if firstAt == 0 {
-				firstAt = time.Since(start).Milliseconds()
-			}
-			consume(c)
-		})
-		return usage, finish, uerr, firstAt
+		}, consume)
 	}
 
 	if !req.Stream {
 		var text, reasoning strings.Builder
 		var toolCalls []map[string]any
-		usage, finish, uerr, ttft := doRelay(func(c lane.Chunk) { emit.consume(c, &text, &reasoning, &toolCalls) })
-		s.recordRelay(ctx, p, upstream, agent, finish != "", usage, ttft, finish, uerr)
+		res := doRelay(func(c lane.Chunk) { emit.consume(c, &text, &reasoning, &toolCalls) })
+		usage, finish, uerr, _ := s.accountNodeRun(ctx, res, agent)
 		if uerr != nil && text.Len() == 0 && len(toolCalls) == 0 {
 			s.relayError(w, false, uerr)
 			return
@@ -186,12 +178,12 @@ func (s *Server) relayChatCompletions(w http.ResponseWriter, r *http.Request, re
 		}
 		sse.event(chunkPayload(id, created, served, delta, finish, nil))
 	}
-	usage, finish, uerr, ttft := doRelay(func(c lane.Chunk) {
+	res := doRelay(func(c lane.Chunk) {
 		for _, d := range emit.stream(c) {
 			sendChunk(d.delta, nil)
 		}
 	})
-	s.recordRelay(ctx, p, upstream, agent, finish != "", usage, ttft, finish, uerr)
+	usage, finish, uerr, _ := s.accountNodeRun(ctx, res, agent)
 	if uerr != nil && !emit.hasAny() {
 		if sse.flushed {
 			sse.event(map[string]any{"error": map[string]any{
@@ -231,23 +223,16 @@ func (s *Server) relayResponses(w http.ResponseWriter, r *http.Request, req resp
 	ctx := r.Context()
 	served := p.ID + "/" + upstream
 	collector := newResponsesCollector()
-	start := time.Now()
-	var firstAt int64
 	respEffort := ""
 	if req.Reasoning != nil {
 		respEffort = req.Reasoning.Effort
 	}
-	usage, finish, uerr := relay.Complete(ctx, relay.Turn{
+	res := s.completeRelayWithNodeSwitch(ctx, p, upstream, relay.Turn{
 		Provider: p, Model: upstream, Messages: unified,
 		Tools: convertOpenAITools(req.Tools), MaxTokens: req.MaxOutputTokens, Agent: agent,
 		ReasoningEffort: s.relayEffort(req.Model, upstream, respEffort),
-	}, func(c lane.Chunk) {
-		if firstAt == 0 {
-			firstAt = time.Since(start).Milliseconds()
-		}
-		collector.consume(c)
-	})
-	s.recordRelay(ctx, p, upstream, agent, finish != "", usage, firstAt, finish, uerr)
+	}, collector.consume)
+	usage, finish, uerr, _ := s.accountNodeRun(ctx, res, agent)
 	outcome := lane.Outcome{Usage: usage, Finish: finish, ServedModel: served}
 	if uerr != nil && !collector.hasAnything() {
 		s.relayError(w, false, uerr)
@@ -272,26 +257,18 @@ func (s *Server) relayAnthropicMessages(w http.ResponseWriter, r *http.Request, 
 	}
 	st := &anthropicStreamState{blockMap: map[int]int{}}
 
-	doRelay := func(consume func(lane.Chunk)) (lane.Usage, string, *lane.UpstreamError, int64) {
-		start := time.Now()
-		var firstAt int64
-		usage, finish, uerr := relay.Complete(ctx, relay.Turn{
+	doRelay := func(consume func(lane.Chunk)) nodeRun {
+		return s.completeRelayWithNodeSwitch(ctx, p, upstream, relay.Turn{
 			Provider: p, Model: upstream, Messages: unified,
 			Tools: tools, MaxTokens: maxTok, Agent: agent,
 			ReasoningEffort: s.relayEffort(req.Model, upstream, anthropicEffortDeclared(req)),
-		}, func(c lane.Chunk) {
-			if firstAt == 0 {
-				firstAt = time.Since(start).Milliseconds()
-			}
-			consume(c)
-		})
-		return usage, finish, uerr, firstAt
+		}, consume)
 	}
 
 	if !req.Stream {
 		collector := newResponsesCollector()
-		usage, finish, uerr, ttft := doRelay(collector.consume)
-		s.recordRelay(ctx, p, upstream, agent, finish != "", usage, ttft, finish, uerr)
+		res := doRelay(collector.consume)
+		usage, finish, uerr, _ := s.accountNodeRun(ctx, res, agent)
 		outcome := lane.Outcome{Usage: usage, Finish: finish, ServedModel: served}
 		if uerr != nil && !collector.hasAnything() {
 			s.relayError(w, true, uerr)
@@ -320,11 +297,11 @@ func (s *Server) relayAnthropicMessages(w http.ResponseWriter, r *http.Request, 
 			"content": []any{}, "stop_sequence": nil, "stop_reason": nil,
 			"usage": map[string]any{"input_tokens": 0, "output_tokens": 0}}})
 	}
-	usage, finish, uerr, ttft := doRelay(func(c lane.Chunk) {
+	res := doRelay(func(c lane.Chunk) {
 		begin()
 		st.consume(c)
 	})
-	s.recordRelay(ctx, p, upstream, agent, finish != "", usage, ttft, finish, uerr)
+	usage, finish, uerr, _ := s.accountNodeRun(ctx, res, agent)
 	stop := "end_turn"
 	switch {
 	case finish == lane.FinishToolCalls:

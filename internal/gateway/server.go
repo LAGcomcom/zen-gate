@@ -71,6 +71,12 @@ type Server struct {
 	// are probed manually from the dashboard, never on a schedule.
 	customProbeMu sync.Mutex
 	customProbe   map[string]lane.ProbeResult
+	// nodeOnce / nodeBook hold short-lived per-node health for seamless
+	// switching. Lazily initialised so a Server built by hand in tests works.
+	// Cooldowns are deliberately NOT persisted: a reboot may mean the endpoint
+	// is already back, and a cooldown must never permanently disable a node.
+	nodeOnce sync.Once
+	nodeBook *nodeSwitchBook
 	// customProbing is the namespaced id of the custom model under probe, so
 	// a long queue (NVIDIA free lane can take 30s+) shows as 探测中 instead
 	// of looking dead.

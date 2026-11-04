@@ -2518,6 +2518,7 @@ function renderProviders(s){
           <code class="k">balanceUrl</code> + <code class="k">balancePath</code>（只读 GET 与点分取数路径，如 <code class="k">data.credits</code>）、<code class="k">balanceKind</code>（显示口径，如「积分余额」）。
           余额端点只做 GET、永不签到；声明了 balanceUrl 就必须给 balancePath，字段名不猜。只有与 Base URL 同源的余额端点才会携带 API Key，外部 URL 一律不带密钥。
           同一端点重复导入只刷新声明字段，名称、Key、模型、启用状态一律保持原样；坏行单独报告，好行照常入库。导出清单刻意不含任何密钥，可以直接复制到另一台机器再粘回来。
+          <b>节点切换无感</b>：同一个模型在多个节点都有时，某节点在吐出内容前失败，请求内自动改道到下一个节点，客户端只会收到一次正常回答；失败节点短时冷却，后续请求直接绕开，恢复后自动回到首选。已输出内容后不再切换（避免重复输出）。
         </div>
         <textarea id="nodes-text" rows="7" placeholder="# 名称 | Base URL | 协议 | 计费 | API Key&#10;Groq | https://api.groq.com/openai/v1 | openai | free&#10;https://api.cerebras.ai/v1" style="width:100%;box-sizing:border-box;background:var(--panel-2);border:1px solid var(--hairline);color:var(--ink);border-radius:6px;padding:8px 10px;font-family:var(--mono);font-size:12px;line-height:1.55;resize:vertical"></textarea>
         <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:8px">
@@ -2528,6 +2529,7 @@ function renderProviders(s){
           <span class="muted" id="nodes-hint" style="font-size:12px"></span>
         </div>
         <div id="nodes-result" style="margin-top:10px"></div>
+        <div id="nodes-health" style="margin-top:10px"></div>
       </div>
 
       <!-- 渠道弹窗：一张卡 = 一个渠道。每个渠道的管理面常驻在 .chan-pane 里
@@ -2747,7 +2749,22 @@ function renderProviders(s){
       const nodesText = el.querySelector("#nodes-text");
       const nodesResult = el.querySelector("#nodes-result");
       const nodesHint = el.querySelector("#nodes-hint");
+      const nodesHealth = el.querySelector("#nodes-health");
       const actLabel = { add:"新增", update:"刷新声明", skip:"跳过" };
+      // 无感切换的运行状态：哪个节点在冷却、被切走过几次、什么时候恢复。
+      // 冷却只存在内存里，重启即清零，不会永久停用任何节点。
+      const loadNodesHealth = async () => {
+        const j = await api("/nodes/health");
+        if (!j || !nodesHealth) return;
+        const rows = j.rows || [];
+        const cooling = rows.filter(x => !x.healthy);
+        const bits = cooling.map(x => `<code class="k">${esc(x.name)}</code> 连续失败 ${x.fails} 次 · 剩余 ${Math.ceil(x.coolingMs/1000)}s · 累计被切走 ${x.switchesAway||0} 次${x.lastError ? " · "+esc(x.lastError) : ""}`);
+        nodesHealth.innerHTML = `<div style="border-top:1px solid var(--hairline);padding-top:8px;font-size:12px">
+          节点健康：<b>${rows.length}</b> 个节点 · 健康 <b>${rows.length-cooling.length}</b> · 冷却 <b>${cooling.length}</b>
+          <span class="muted" style="font-size:11.5px">（单请求最多切换 ${j.maxSwitches} 次 · 失败预算 ${j.budgetSeconds}s · 冷却上限 ${Math.round(j.cooldownMaxSeconds/60)} 分钟 · 已输出内容后不切换）</span>
+        </div>` + (bits.length ? `<div style="font-size:11.5px;margin-top:5px">${bits.join("<br>")}</div>` : "");
+      };
+      loadNodesHealth();
       const showNodesResult = (j, preview) => {
         const items = j.items || [], problems = j.problems || [];
         const rows = items.slice(0, 20).map(it => `
@@ -2770,7 +2787,7 @@ function renderProviders(s){
         if (!j) return;
         showNodesResult(j, preview);
         nodesHint.textContent = preview ? "仅为预览，配置没有任何改动" : "清单已合并入库";
-        if (!preview) { toast("节点清单已导入"); refresh(); }
+        if (!preview) { toast("节点清单已导入"); refresh(); loadNodesHealth(); }
       };
       el.querySelector("#btn-nodes-preview").onclick = ()=> runNodes(true);
       el.querySelector("#btn-nodes-import").onclick = ()=> runNodes(false);

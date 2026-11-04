@@ -194,6 +194,8 @@ func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request, rest string
 		s.adminProviderModels(w, r)
 	case rest == "nodes/import" && r.Method == http.MethodPost:
 		s.adminNodesImport(w, r)
+	case rest == "nodes/health" && r.Method == http.MethodGet:
+		s.adminNodesHealth(w, r)
 	case rest == "nodes/export" && r.Method == http.MethodGet:
 		s.adminNodesExport(w, r)
 	case rest == "models/visibility" && r.Method == http.MethodPost:
