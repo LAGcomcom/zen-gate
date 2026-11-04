@@ -187,13 +187,28 @@ func (s *Server) checkinTasks() []CheckinTask {
 		if p.SignupURL != "" {
 			detail += "；注册地址：" + p.SignupURL
 		}
-		tasks = append(tasks, CheckinTask{
+		task := CheckinTask{
 			ID: "node:" + p.ID, Name: p.Name + " 每日签到", Channel: p.ID,
 			Detail:    detail,
+			ResetHour: p.CheckinResetHour,
 			Available: func() bool { return false },
 			LastDate:  func() string { return "" },
 			Run:       nil,
-		})
+		}
+		// A declared balance endpoint makes the row watchable (GET only) even
+		// though its claim executor is not wired. The reset hour is data too:
+		// no hard-coded 00:00/08:00 guess for a platform we have never seen.
+		if p.BalanceURL != "" && p.BalancePath != "" {
+			task.Probe = nodeBalanceProbe(p)
+			kind := strings.TrimSpace(p.BalanceKind)
+			if kind == "" {
+				kind = "余额"
+			}
+			task.Detail += "；已声明只读" + kind + "端点，可查余额但不会签到"
+		} else {
+			task.Detail += "；未声明只读余额端点"
+		}
+		tasks = append(tasks, task)
 	}
 	return tasks
 }
@@ -408,6 +423,13 @@ func (s *Server) checkinStatusRows(now time.Time) []map[string]any {
 			} else {
 				next = now.Add(checkinRetryInterval).Unix()
 			}
+		} else if t.Probe != nil {
+			// A declared-but-unwired node still has a read-only watch schedule.
+			base := e.VerifiedAt
+			if base == 0 {
+				base = now.Unix()
+			}
+			next = time.Unix(base, 0).Add(checkinVerifyInterval).Unix()
 		}
 		rows = append(rows, map[string]any{
 			"id": t.ID, "name": t.Name, "channel": t.Channel, "detail": t.Detail,

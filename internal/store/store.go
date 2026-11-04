@@ -102,6 +102,14 @@ type Provider struct {
 	Quota     *NodeQuota `json:"quota,omitempty"`
 	SignupURL string     `json:"signupUrl,omitempty"`
 	Checkin   string     `json:"checkin,omitempty"`
+	// Read-only balance contract, declared by the node list. "接更多网站" stays
+	// a data change: the check-in panel can watch a new supplier's credits
+	// without a Go adapter. See node_catalog.go for the semantics; the key is
+	// never stored in these fields.
+	CheckinResetHour int    `json:"checkinResetHour,omitempty"`
+	BalanceURL       string `json:"balanceUrl,omitempty"`
+	BalancePath      string `json:"balancePath,omitempty"`
+	BalanceKind      string `json:"balanceKind,omitempty"`
 }
 
 // EffectiveKeys lists the keys this provider rotates over, deduplicated and

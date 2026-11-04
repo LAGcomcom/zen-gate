@@ -434,6 +434,11 @@ func (s *Server) providerViews() []map[string]any {
 			"models": models, "note": p.Note,
 			"billing": p.Billing, "quota": p.Quota,
 			"signupUrl": p.SignupURL, "checkin": p.Checkin,
+			"checkinResetHour": p.CheckinResetHour,
+			"balancePath": p.BalancePath, "balanceKind": p.BalanceKind,
+			// balanceUrl itself is not sent to the panel: it is a server-side
+			// egress target, and the card only needs to show that a read-only
+			// watch was declared, not where it points.
 		})
 	}
 	return out

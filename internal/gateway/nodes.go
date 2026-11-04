@@ -111,6 +111,21 @@ func refreshNodeMeta(p *store.Provider, sp store.NodeSpec) {
 	if sp.Checkin != "" {
 		p.Checkin = sp.Checkin
 	}
+	// The balance contract is a declaration, not user-entered state: re-import
+	// refreshes it just like billing/quota. An omitted field leaves the old one
+	// alone (incremental merge, never delete what the user did not overwrite).
+	if sp.CheckinResetHour != 0 {
+		p.CheckinResetHour = sp.CheckinResetHour
+	}
+	if sp.BalanceURL != "" {
+		p.BalanceURL = sp.BalanceURL
+	}
+	if sp.BalancePath != "" {
+		p.BalancePath = sp.BalancePath
+	}
+	if sp.BalanceKind != "" {
+		p.BalanceKind = sp.BalanceKind
+	}
 	if sp.Note != "" {
 		p.Note = sp.Note
 	}
@@ -127,7 +142,11 @@ func providerFromNode(id string, sp store.NodeSpec) store.Provider {
 		ID: id, Name: sp.Name, BaseURL: sp.BaseURL, Protocol: sp.Protocol,
 		Enabled: true, Billing: sp.Billing, SignupURL: sp.SignupURL,
 		Checkin: sp.Checkin, Note: sp.Note,
-		Models: append([]string{}, sp.Models...),
+		CheckinResetHour: sp.CheckinResetHour,
+		BalanceURL:       sp.BalanceURL,
+		BalancePath:      sp.BalancePath,
+		BalanceKind:      sp.BalanceKind,
+		Models:           append([]string{}, sp.Models...),
 	}
 	if sp.Quota != nil {
 		q := *sp.Quota

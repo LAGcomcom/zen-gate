@@ -2512,8 +2512,11 @@ function renderProviders(s){
         <div class="muted" style="font-size:12px;margin-bottom:8px">
           「接更多 API」是数据活，不是写代码：把清单贴进来一次入库。三种写法可混用 ——
           ① <code class="k">名称 | Base URL | 协议 | 计费 | API Key</code>（后面几列可省，制表符同样作分隔，<code class="k">#</code> 开头是注释）；
-          ② 一行一个裸 URL，名称取域名；③ 导出的 JSON 数组（额度、模型清单、注册页、签到声明这些字段只有 JSON 形式带得进来）。
+          ② 一行一个裸 URL，名称取域名；③ 导出的 JSON 数组（额度、模型清单、注册页、签到与余额声明这些字段只有 JSON 形式带得进来）。
           计费取 <code class="k">free / freemium / paid / unknown</code> 或「免费 / 部分免费 / 付费 / 未知」，不写就是 unknown，绝不猜；额度数字一律可选，0 表示「未声明」而不是「无限」。
+          签到与余额也是声明：<code class="k">checkin:"daily"</code>（登记为待接入，绝不假装已签）、<code class="k">checkinResetHour:8</code>（重置点，默认 0 点）、
+          <code class="k">balanceUrl</code> + <code class="k">balancePath</code>（只读 GET 与点分取数路径，如 <code class="k">data.credits</code>）、<code class="k">balanceKind</code>（显示口径，如「积分余额」）。
+          余额端点只做 GET、永不签到；声明了 balanceUrl 就必须给 balancePath，字段名不猜。只有与 Base URL 同源的余额端点才会携带 API Key，外部 URL 一律不带密钥。
           同一端点重复导入只刷新声明字段，名称、Key、模型、启用状态一律保持原样；坏行单独报告，好行照常入库。导出清单刻意不含任何密钥，可以直接复制到另一台机器再粘回来。
         </div>
         <textarea id="nodes-text" rows="7" placeholder="# 名称 | Base URL | 协议 | 计费 | API Key&#10;Groq | https://api.groq.com/openai/v1 | openai | free&#10;https://api.cerebras.ai/v1" style="width:100%;box-sizing:border-box;background:var(--panel-2);border:1px solid var(--hairline);color:var(--ink);border-radius:6px;padding:8px 10px;font-family:var(--mono);font-size:12px;line-height:1.55;resize:vertical"></textarea>
@@ -3878,7 +3881,10 @@ function renderProviderList(s){
     const nodeTags = [];
     if (p.billing) nodeTags.push(nodeTag(billName[p.billing] || p.billing));
     if (quotaBits) nodeTags.push(nodeTag(quotaBits + (q.source ? " · " + q.source : "")));
-    if (p.checkin === "daily") nodeTags.push(nodeTag("每日签到"));
+    if (p.checkin === "daily") {
+      nodeTags.push(nodeTag("每日签到" + (p.checkinResetHour ? " · " + String(p.checkinResetHour).padStart(2,"0") + ":00 重置" : "")));
+    }
+    if (p.balancePath) nodeTags.push(nodeTag("只读" + (p.balanceKind || "余额") + " · " + p.balancePath));
     if (p.signupUrl) nodeTags.push(nodeTag("注册页", p.signupUrl));
     const nodeMetaRow = nodeTags.length
       ? `<div style="display:flex;gap:5px;flex-wrap:wrap;margin:0 0 8px">${nodeTags.join("")}</div>` : "";
@@ -5099,9 +5105,8 @@ function renderSettings(s){
         if (t.delta > 0) facts.push(`余额增量 <b>+${ckNum(t.delta)}</b>`);
         if (t.before || t.after) facts.push(`签到前 ${ckNum(t.before)} → 后 ${ckNum(t.after)}`);
         if (t.confirmed) facts.push(`确认于 ${ckTime(t.at)}`);
-        if (t.nextCheckAt) facts.push((t.doneToday ? "下次只读复核 " : "下次重试 ") + ckTime(t.nextCheckAt));
-        if (!t.wired) facts.push("重置窗口 —");
-        else facts.push("重置 " + String(t.resetHour || 0).padStart(2, "0") + ":00");
+        if (t.nextCheckAt) facts.push((t.doneToday || !t.wired ? "下次只读复核 " : "下次重试 ") + ckTime(t.nextCheckAt));
+        facts.push("重置 " + String(t.resetHour || 0).padStart(2, "0") + ":00" + (t.resetHour ? "（节点声明）" : "（默认）"));
         return `<div style="border:1px solid var(--hairline);border-radius:8px;padding:8px 10px;margin-bottom:6px;font-size:12px">
           <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
             <b>${esc(t.name)}</b><code class="k">${esc(t.channel)}</code>${state}

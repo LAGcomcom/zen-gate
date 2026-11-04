@@ -1,9 +1,11 @@
 package store
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"net/url"
+	"strconv"
 	"strings"
 )
 
@@ -27,7 +29,7 @@ type NodeQuota struct {
 	RPM    int    `json:"rpm,omitempty"`
 	RPD    int    `json:"rpd,omitempty"`
 	TPD    int    `json:"tpd,omitempty"`
-	Reset  string `json:"reset,omitempty"` // daily | monthly | none
+	Reset  string `json:"reset,omitempty"`  // daily | monthly | none
 	Source string `json:"source,omitempty"` // declared | measured
 	Note   string `json:"note,omitempty"`
 }
@@ -48,13 +50,32 @@ type NodeSpec struct {
 	Quota     *NodeQuota `json:"quota,omitempty"`
 	Models    []string   `json:"models,omitempty"`
 	SignupURL string     `json:"signupUrl,omitempty"`
-	// Checkin declares whether this node has a daily credit claim and which
-	// family handles it. The existing WorkBuddy / CodeArts check-ins are two
-	// separate implementations today; this field is the data contract a single
-	// registry and scheduler will read next.
-	Checkin string   `json:"checkin,omitempty"` // daily | none | ""
-	Note    string   `json:"note,omitempty"`
-	Keys    []string `json:"keys,omitempty"`
+	// Checkin declares whether this node has a daily credit claim. A wired
+	// executor is still a separate thing: a declaration is listed as 待接入,
+	// never reported as done (see gateway/checkin.go).
+	Checkin string `json:"checkin,omitempty"` // daily | none | ""
+	// The read-only balance contract. "接更多网站 / 更多算力" should stay a
+	// data change all the way down to the check-in panel: a node that publishes
+	// a balance endpoint can be watched (GET only, never a claim) without
+	// writing a Go adapter for that platform.
+	//
+	// CheckinResetHour is the local hour the platform rolls its daily window —
+	// 0 for the usual midnight, 8 for the overseas 08:00 reset. Declaring it
+	// beats guessing, and a wrong guess is still healed by the 6-hourly
+	// read-only verification.
+	// BalanceURL may be absolute (http/https) or relative to BaseURL. It must
+	// not carry a credential in its query string: the key comes from the
+	// provider's own APIKey/APIKeys and travels in the Authorization header.
+	// BalancePath is a dotted JSON path into the response, e.g.
+	// "data.credits" or "data.accounts.0.total". Empty means "do not read a
+	// balance" rather than "guess a field name" — the store never guesses.
+	// BalanceKind labels the unit for the panel: 积分余额 / 美元余额 / 累计领取.
+	CheckinResetHour int      `json:"checkinResetHour,omitempty"`
+	BalanceURL       string   `json:"balanceUrl,omitempty"`
+	BalancePath      string   `json:"balancePath,omitempty"`
+	BalanceKind      string   `json:"balanceKind,omitempty"`
+	Note             string   `json:"note,omitempty"`
+	Keys             []string `json:"keys,omitempty"`
 }
 
 // ParseNodeSpecs accepts three shapes so a paste from anywhere works:
@@ -171,6 +192,30 @@ func normalizeNodeSpec(s NodeSpec) (NodeSpec, error) {
 	if s.Checkin != "" && s.Checkin != "daily" && s.Checkin != "none" {
 		return NodeSpec{}, fmt.Errorf("checkin 只能是 daily / none，得到 %q", s.Checkin)
 	}
+	if s.CheckinResetHour < 0 || s.CheckinResetHour > 23 {
+		return NodeSpec{}, fmt.Errorf("checkinResetHour 只能是 0-23，得到 %d", s.CheckinResetHour)
+	}
+	s.BalanceURL = strings.TrimSpace(s.BalanceURL)
+	if strings.Contains(s.BalanceURL, "://") {
+		bu, err := url.Parse(s.BalanceURL)
+		if err != nil || bu.Host == "" || (bu.Scheme != "http" && bu.Scheme != "https") {
+			return NodeSpec{}, fmt.Errorf("balanceUrl 不是合法的 http(s) 地址: %q", s.BalanceURL)
+		}
+		if bu.User != nil {
+			return NodeSpec{}, fmt.Errorf("balanceUrl 不要内嵌账号密码，密钥走节点的 key 字段")
+		}
+	}
+	s.BalancePath = strings.TrimSpace(s.BalancePath)
+	for _, r := range s.BalancePath {
+		ok := r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '_' || r == '-' || r == '.'
+		if !ok {
+			return NodeSpec{}, fmt.Errorf("balancePath 只能是点分字段名，得到 %q", s.BalancePath)
+		}
+	}
+	if s.BalanceURL != "" && s.BalancePath == "" {
+		return NodeSpec{}, fmt.Errorf("声明了 balanceUrl 就必须给 balancePath（不猜字段名）")
+	}
+	s.BalanceKind = strings.TrimSpace(s.BalanceKind)
 	if s.Quota != nil {
 		q := *s.Quota
 		if q.RPM < 0 || q.RPD < 0 || q.TPD < 0 {
@@ -223,8 +268,86 @@ func NormalizeBilling(raw string) (string, error) {
 	}
 }
 
+// BalanceReadURL resolves the declared read-only endpoint. An absolute URL is
+// used as-is; a relative one is joined onto BaseURL (which may itself carry a
+// path prefix like /v1). Only http/https are accepted.
+func BalanceReadURL(baseURL, balanceURL string) (string, error) {
+	raw := strings.TrimSpace(balanceURL)
+	if raw == "" {
+		return "", fmt.Errorf("未声明余额端点")
+	}
+	if strings.Contains(raw, "://") {
+		u, err := url.Parse(raw)
+		if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
+			return "", fmt.Errorf("余额端点不是合法的 http(s) 地址")
+		}
+		return raw, nil
+	}
+	base := strings.TrimRight(strings.TrimSpace(baseURL), "/")
+	if base == "" {
+		return "", fmt.Errorf("缺少 baseUrl")
+	}
+	if !strings.HasPrefix(raw, "/") {
+		raw = "/" + raw
+	}
+	return base + raw, nil
+}
+
+// ReadBalanceValue walks a dotted JSON path and returns a number. It accepts
+// JSON numbers and numeric strings, and array indexes ("accounts.0.total").
+// A missing field is an error, never a silent zero: a zero balance and an
+// unreadable balance are different facts.
+func ReadBalanceValue(body []byte, path string) (float64, error) {
+	var v any
+	dec := json.NewDecoder(bytes.NewReader(body))
+	dec.UseNumber()
+	if err := dec.Decode(&v); err != nil {
+		return 0, fmt.Errorf("余额响应不是 JSON: %v", err)
+	}
+	for _, seg := range strings.Split(strings.TrimSpace(path), ".") {
+		if seg == "" {
+			continue
+		}
+		switch cur := v.(type) {
+		case map[string]any:
+			next, ok := cur[seg]
+			if !ok {
+				return 0, fmt.Errorf("余额路径 %q 找不到字段 %q", path, seg)
+			}
+			v = next
+		case []any:
+			i, err := strconv.Atoi(seg)
+			if err != nil || i < 0 || i >= len(cur) {
+				return 0, fmt.Errorf("余额路径 %q 的数组下标 %q 无效", path, seg)
+			}
+			v = cur[i]
+		default:
+			return 0, fmt.Errorf("余额路径 %q 在 %q 处不是对象或数组", path, seg)
+		}
+	}
+	switch n := v.(type) {
+	case json.Number:
+		f, err := n.Float64()
+		if err != nil {
+			return 0, fmt.Errorf("余额值不是数字: %v", n)
+		}
+		return f, nil
+	case float64:
+		return n, nil
+	case string:
+		f, err := strconv.ParseFloat(strings.TrimSpace(n), 64)
+		if err != nil {
+			return 0, fmt.Errorf("余额值 %q 不是数字", n)
+		}
+		return f, nil
+	default:
+		return 0, fmt.Errorf("余额路径 %q 指向的不是数字", path)
+	}
+}
+
 // ExportNodeSpecs renders a portable, secret-free node list. Every credential
-// is dropped; the receiver supplies their own keys on import.
+// is dropped; the receiver supplies their own keys on import. The balance
+// endpoint is exported, but it is a read-only URL with no key in it.
 func ExportNodeSpecs(providers []Provider) []NodeSpec {
 	out := make([]NodeSpec, 0, len(providers))
 	for _, p := range providers {
@@ -234,15 +357,19 @@ func ExportNodeSpecs(providers []Provider) []NodeSpec {
 			q = &cp
 		}
 		out = append(out, NodeSpec{
-			Name:      p.Name,
-			BaseURL:   p.BaseURL,
-			Protocol:  p.Protocol,
-			Billing:   p.Billing,
-			Quota:     q,
-			Models:    append([]string{}, p.Models...),
-			SignupURL: p.SignupURL,
-			Checkin:   p.Checkin,
-			Note:      p.Note,
+			Name:             p.Name,
+			BaseURL:          p.BaseURL,
+			Protocol:         p.Protocol,
+			Billing:          p.Billing,
+			Quota:            q,
+			Models:           append([]string{}, p.Models...),
+			SignupURL:        p.SignupURL,
+			Checkin:          p.Checkin,
+			CheckinResetHour: p.CheckinResetHour,
+			BalanceURL:       p.BalanceURL,
+			BalancePath:      p.BalancePath,
+			BalanceKind:      p.BalanceKind,
+			Note:             p.Note,
 			// Keys intentionally absent: never export a credential.
 		})
 	}
