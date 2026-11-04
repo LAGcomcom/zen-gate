@@ -271,6 +271,22 @@ type Config struct {
 	Window   WindowState    `json:"window"`
 }
 
+// ChannelStat is one supplier's token ledger for a day. It answers "how many
+// tokens did THIS API burn" — the question an aggregated gateway has to be able
+// to answer before anyone can decide which free/paid lane is worth keeping.
+type ChannelStat struct {
+	Requests   int `json:"requests"`
+	Failed     int `json:"failed"`
+	Input      int `json:"input"`
+	Output     int `json:"output"`
+	CacheRead  int `json:"cacheRead,omitempty"`
+	CacheWrite int `json:"cacheWrite,omitempty"`
+}
+
+// ChannelUnattributed holds records written before channel attribution existed.
+// They are shown as 未标注, never redistributed by a guess.
+const ChannelUnattributed = "unattributed"
+
 // DayStat aggregates one calendar day.
 type DayStat struct {
 	Requests int `json:"requests"`
@@ -284,9 +300,10 @@ type DayStat struct {
 	Output     int            `json:"output"`
 	CacheRead  int            `json:"cacheRead,omitempty"`
 	CacheWrite int            `json:"cacheWrite,omitempty"`
-	Models     map[string]int `json:"models,omitempty"`
-	ModelReqs  map[string]int `json:"modelReqs,omitempty"`
-	Agents     map[string]int `json:"agents,omitempty"`
+	Models     map[string]int             `json:"models,omitempty"`
+	ModelReqs  map[string]int             `json:"modelReqs,omitempty"`
+	Agents     map[string]int             `json:"agents,omitempty"`
+	Channels   map[string]*ChannelStat    `json:"channels,omitempty"`
 }
 
 // Stats is the persisted usage accounting.
@@ -1215,6 +1232,28 @@ func (s *Store) Record(rec lane.CallRecord) {
 		}
 		d.Agents[rec.Agent] += rec.Output
 	}
+	ch := rec.Channel
+	if ch == "" {
+		ch = s.channelForLegacy(rec.Model)
+	}
+	if d.Channels == nil {
+		// Day buckets written before this field existed unmarshal with a nil
+		// map; assigning into it panics the process.
+		d.Channels = map[string]*ChannelStat{}
+	}
+	cs := d.Channels[ch]
+	if cs == nil {
+		cs = &ChannelStat{}
+		d.Channels[ch] = cs
+	}
+	cs.Requests++
+	if !rec.Ok {
+		cs.Failed++
+	}
+	cs.Input += rec.Input
+	cs.Output += rec.Output
+	cs.CacheRead += rec.CacheRead
+	cs.CacheWrite += rec.CacheWrite
 	s.stats.Recent = append(s.stats.Recent, rec)
 	if len(s.stats.Recent) > maxRecent {
 		s.stats.Recent = s.stats.Recent[len(s.stats.Recent)-maxRecent:]
@@ -1250,14 +1289,52 @@ func (s *Store) FlushStats() error {
 	return writeJSON(filepath.Join(s.Home, "stats.json"), s.stats)
 }
 
-// SnapshotStats returns a copy for display.
+// channelForLegacy attributes records written before Channel existed. Custom
+// suppliers namespace their models as "id/model", so a configured provider id
+// is solid evidence; anything else stays unattributed rather than guessed.
+func (s *Store) channelForLegacy(model string) string {
+	if i := strings.IndexByte(model, '/'); i > 0 {
+		id := model[:i]
+		for _, p := range s.Config().Providers {
+			if p.ID == id {
+				return id
+			}
+		}
+	}
+	return ChannelUnattributed
+}
+
+func cloneIntMap(m map[string]int) map[string]int {
+	if m == nil {
+		return nil
+	}
+	out := make(map[string]int, len(m))
+	for k, v := range m {
+		out[k] = v
+	}
+	return out
+}
+
+// SnapshotStats returns a deep copy for display. Day buckets hold maps; a
+// shallow struct copy would hand the UI maps that Record is still writing into,
+// which is a concurrent map read/write panic waiting to happen.
 func (s *Store) SnapshotStats() (map[string]*DayStat, []lane.CallRecord) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	days := map[string]*DayStat{}
 	for k, v := range s.stats.Days {
-		clone := *v
-		days[k] = &clone
+		c := *v
+		c.Models = cloneIntMap(v.Models)
+		c.ModelReqs = cloneIntMap(v.ModelReqs)
+		c.Agents = cloneIntMap(v.Agents)
+		if v.Channels != nil {
+			c.Channels = make(map[string]*ChannelStat, len(v.Channels))
+			for id, st := range v.Channels {
+				cp := *st
+				c.Channels[id] = &cp
+			}
+		}
+		days[k] = &c
 	}
 	recent := make([]lane.CallRecord, len(s.stats.Recent))
 	copy(recent, s.stats.Recent)

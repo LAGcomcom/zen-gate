@@ -59,6 +59,10 @@ var upstreamSem = make(chan struct{}, maxConcurrentUpstream)
 // CallRecord is emitted after every upstream request (physical, not logical).
 type CallRecord struct {
 	Model     string `json:"model"`
+	// Channel names the supplier bucket that served this physical request.
+	// Empty means an older build recorded it before channel attribution existed;
+	// the store keeps those under 未标注 rather than guessing a supplier.
+	Channel   string `json:"channel,omitempty"`
 	Agent     string `json:"agent,omitempty"`
 	Ok        bool   `json:"ok"`
 	Truncated bool   `json:"truncated,omitempty"`
@@ -1535,7 +1539,14 @@ func (l *Lane) attemptModel(ctx context.Context, req Request, model, effort stri
 	// makes one conversation one exit: the same prompt prefix keeps landing on
 	// the same egress, so the upstream has a chance to reuse its prompt cache
 	// instead of re-prefilling the whole conversation on every turn.
-	plan := ExitPlan{Model: base}
+	// The catalog leaves Zen rows untagged (empty Channel). Naming that bucket
+	// explicitly keeps the usage table honest: "zen" is a real source, not a
+	// missing value.
+	channel := entry.Channel
+	if channel == "" {
+		channel = ChannelZen
+	}
+	plan := ExitPlan{Model: base, Channel: channel}
 	if r := CurrentRotator(); r != nil {
 		plan.NodeID = r.Pick(req.SessionSeed, base)
 		plan.ExitKey = r.ExitKey(plan.NodeID)
@@ -1816,6 +1827,9 @@ func (l *Lane) record(ctx context.Context, rec CallRecord, result StreamResult, 
 		return
 	}
 	rec.Trace = TraceFrom(ctx)
+	if p := ExitPlanFrom(ctx); p.Channel != "" {
+		rec.Channel = p.Channel
+	}
 	if ue := asUpstream(err); ue != nil {
 		rec.ErrCode = ue.Code
 		rec.UpstreamRID = ue.UpstreamRID

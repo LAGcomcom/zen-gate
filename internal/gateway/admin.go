@@ -92,6 +92,8 @@ func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request, rest string
 		s.adminLogsDownload(w, r)
 	case rest == "usage.csv" && r.Method == http.MethodGet:
 		s.adminUsageCSV(w, r)
+	case rest == "usage/channels.csv" && r.Method == http.MethodGet:
+		s.adminUsageChannelsCSV(w, r)
 	case rest == "tasks" && r.Method == http.MethodGet:
 		s.adminTasks(w, r)
 	case strings.HasPrefix(rest, "probe/") && r.Method == http.MethodPost:
@@ -1576,6 +1578,39 @@ func (s *Server) adminUsageCSV(w http.ResponseWriter, r *http.Request) {
 			row = append(row, strconv.Itoa(d.Models[m]))
 		}
 		_ = cw.Write(row)
+	}
+	cw.Flush()
+}
+
+// adminUsageChannelsCSV exports one row per (day, channel): the token ledger
+// split by supplier. usage.csv stays as it is (one row per day with model
+// columns), so existing spreadsheets keep their shape.
+func (s *Server) adminUsageChannelsCSV(w http.ResponseWriter, r *http.Request) {
+	days, _ := s.Store.SnapshotStats()
+	w.Header().Set("content-type", "text/csv; charset=utf-8")
+	w.Header().Set("content-disposition", `attachment; filename="zen-gate-usage-by-channel.csv"`)
+	dayKeys := make([]string, 0, len(days))
+	for k := range days {
+		dayKeys = append(dayKeys, k)
+	}
+	sort.Strings(dayKeys)
+	cw := csv.NewWriter(w)
+	_ = cw.Write([]string{"date", "channel", "requests", "failed", "input", "cacheRead", "cacheWrite", "output", "total"})
+	for _, day := range dayKeys {
+		d := days[day]
+		ids := make([]string, 0, len(d.Channels))
+		for id := range d.Channels {
+			ids = append(ids, id)
+		}
+		sort.Strings(ids)
+		for _, id := range ids {
+			c := d.Channels[id]
+			_ = cw.Write([]string{day, id,
+				strconv.Itoa(c.Requests), strconv.Itoa(c.Failed),
+				strconv.Itoa(c.Input), strconv.Itoa(c.CacheRead),
+				strconv.Itoa(c.CacheWrite), strconv.Itoa(c.Output),
+				strconv.Itoa(c.Input + c.Output)})
+		}
 	}
 	cw.Flush()
 }

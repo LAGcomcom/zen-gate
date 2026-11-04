@@ -3996,7 +3996,8 @@ function buildUsage(s){
     const v = s.stats.days[k];
     byDay[k] = { requests:v.requests, failed:v.failed, input:v.input, output:v.output,
       cacheRead:v.cacheRead||0, cacheWrite:v.cacheWrite||0,
-      total:(v.input||0)+(v.output||0), models:v.models||{}, modelReqs:v.modelReqs||{}, agents:v.agents||{} };
+      total:(v.input||0)+(v.output||0), models:v.models||{}, modelReqs:v.modelReqs||{},
+      agents:v.agents||{}, channels:v.channels||{} };
   }
   const life = {};
   for(const k of keys) for(const [m,o] of Object.entries(byDay[k].models)) life[m]=(life[m]||0)+o;
@@ -4060,6 +4061,14 @@ function renderUsage(s){
       <div class="speedgrid" id="speed"></div>
     </div>
 
+    <div class="card" style="margin-bottom:12px">
+      <div class="row" style="justify-content:space-between;align-items:center;margin-bottom:10px">
+        <h3 style="margin:0">按渠道 / 供应商汇总（累计 Token）</h3>
+        <button class="ghost" id="btn-channels-csv">导出渠道明细 CSV</button>
+      </div>
+      <div id="by-channel"></div>
+    </div>
+
     <div class="two" style="margin-bottom:12px">
       <div class="card"><h3>按模型汇总（累计）</h3><div id="by-model"></div></div>
       <div class="card"><h3>按 Agent 汇总（累计输出）</h3><div id="by-agent"></div></div>
@@ -4070,10 +4079,13 @@ function renderUsage(s){
   renderHeat(U, U.keys);
   renderDayDetail(U);
   renderSpeed(recent);
+  renderByChannel(U, s);
   renderByModel(U, grand);
   renderByAgent(U);
   renderRecent(recent);
 
+  const csvChannelBtn = el.querySelector("#btn-channels-csv");
+  if(csvChannelBtn) csvChannelBtn.onclick = ()=>{ window.location.href = "/admin/api/usage/channels.csv"; };
   el.querySelector("#hm-modes").querySelectorAll("button").forEach(b=>b.onclick=()=>{ heatMode=b.dataset.m; renderUsage(s); });
 }
 
@@ -4252,15 +4264,55 @@ function renderByAgent(U){
     }).join("") + '</table>';
 }
 
+const CHANNEL_LABELS = { zen:"Zen 免费池", kilo:"Kilo 免费池", workbuddy:"WorkBuddy 账号渠道",
+  codearts:"CodeArts 账号渠道", zcode:"ZCode 渠道", trae:"TRAE 渠道", qoder:"Qoder 渠道",
+  unattributed:"未标注（升级前记录）" };
+function renderByChannel(U, s){
+  const box = $("#by-channel"); if(!box) return;
+  const providers = {};
+  for(const p of (s.providers||[])) providers[p.id] = p;
+  const life = {};
+  for(const k of U.keys){
+    for(const [id,c] of Object.entries(U.byDay[k].channels||{})){
+      const t = life[id] || (life[id] = {requests:0,failed:0,input:0,output:0,cacheRead:0,total:0});
+      t.requests += c.requests||0; t.failed += c.failed||0;
+      t.input += c.input||0; t.output += c.output||0; t.cacheRead += c.cacheRead||0;
+      t.total += (c.input||0)+(c.output||0);
+    }
+  }
+  const rows = Object.entries(life).sort((a,b)=>b[1].total-a[1].total);
+  if(!rows.length){
+    box.innerHTML = '<div class="muted" style="font-size:12px">还没有按渠道归集的用量。新请求会带上渠道标记；升级前的旧记录归到「未标注」，不会靠猜去分摊。</div>';
+    return;
+  }
+  const peak = rows[0][1].total;
+  const billName = { free:"免费", freemium:"部分免费", paid:"付费", unknown:"计费未声明" };
+  box.innerHTML = '<table><tr><th>渠道 / 供应商</th><th style="width:24%">Token 占比</th><th class="num">合计</th>'+
+      '<th class="num">输入</th><th class="num">输出</th><th class="num">请求</th><th class="num">失败</th><th class="num">缓存命中</th></tr>' +
+    rows.map(([id,t])=>{
+      const p = providers[id];
+      const label = p ? esc(p.name) : esc(CHANNEL_LABELS[id] || id);
+      const tag = p && p.billing ? ' <span class="muted" style="font-size:11px">'+esc(billName[p.billing]||p.billing)+'</span>' : "";
+      const hit = cachePct(t.cacheRead, t.input);
+      return '<tr><td class="mono" style="font-size:11.5px">'+label+tag+'</td>'+
+        '<td><div class="barwrap"><div class="bar" style="width:'+(peak?Math.round(t.total/peak*100):0)+'%"></div></div></td>'+
+        '<td class="num">'+fmtN(t.total)+'</td><td class="num">'+fmtN(t.input)+'</td><td class="num">'+fmtN(t.output)+'</td>'+
+        '<td class="num">'+t.requests+'</td><td class="num'+(t.failed?' bad':'')+'">'+t.failed+'</td>'+
+        '<td class="num">'+(hit!==null?hit+'%':'—')+'</td></tr>';
+    }).join("") + '</table>' +
+    '<div class="muted" style="font-size:11.5px;margin-top:6px">合计 = 输入 + 输出 Token（输入已含缓存命中部分，不重复计）。自定义供应商按自己的 ID 单独成行。</div>';
+}
+
 function renderRecent(recent){
   const box = $("#recent-list");
   if(!recent.length){ box.innerHTML = '<div class="muted" style="font-size:12px">还没有请求。</div>'; return; }
-  box.innerHTML = '<table><tr><th>时间</th><th>模型</th><th>Agent</th><th>档位</th><th>结果</th><th>输入/输出</th><th>缓存</th><th>首字</th></tr>' +
+  box.innerHTML = '<table><tr><th>时间</th><th>模型</th><th>渠道</th><th>Agent</th><th>档位</th><th>结果</th><th>输入/输出</th><th>缓存</th><th>首字</th></tr>' +
     recent.slice().reverse().map(r=>{
       const t = new Date(r.at).toTimeString().slice(0,8);
       const res = r.ok ? '<span class="pill ok">完成'+(r.recovered?" · 已恢复":"")+'</span>'
         : (r.truncated ? '<span class="pill warn">截断</span>' : '<span class="pill bad">失败</span>');
       return '<tr><td class="mono">'+t+'</td><td class="mono">'+esc(r.model)+'</td>'+
+        '<td class="mono">'+esc(r.channel ? (CHANNEL_LABELS[r.channel] || r.channel) : "—")+'</td>'+
         '<td>'+esc(r.agent||"—")+'</td><td class="mono">'+esc(r.effort||"—")+'</td>'+
         '<td>'+res+'</td><td class="num">'+fmtN(r.input||0)+' / '+fmtN(r.output||0)+'</td>'+
         '<td class="num">'+(r.cacheRead?cacheCell(r.cacheRead, r.input):'<span class="muted">—</span>')+'</td>'+

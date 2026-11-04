@@ -95,6 +95,7 @@ func (s *Server) relayError(w http.ResponseWriter, anthropic bool, uerr *lane.Up
 func (s *Server) recordRelay(ctx context.Context, p *store.Provider, upstream, agent string, ok bool, usage lane.Usage, ttftMs int64, finish string, err *lane.UpstreamError) {
 	rec := lane.CallRecord{
 		Model: p.ID + "/" + upstream, Agent: agent, Ok: ok && err == nil,
+		Channel: p.ID, // custom suppliers are their own usage bucket
 		Input: usage.InputTotal(), Output: usage.Output, Reasoning: usage.Reasoning,
 		CacheRead: usage.CacheRead, CacheWrite: usage.CacheWrite,
 		TTFTMs: ttftMs, At: time.Now().UnixMilli(),

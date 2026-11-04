@@ -165,6 +165,11 @@ type ExitPlan struct {
 	NodeID  string
 	ExitKey string
 	Model   string
+	// Channel is the supplier bucket that actually served this attempt (zen,
+	// kilo, workbuddy, …). It rides the same context as the exit so usage
+	// accounting can attribute tokens to a channel without a second catalog
+	// lookup under the lane lock at record time.
+	Channel string
 }
 
 type exitPlanKey struct{}
