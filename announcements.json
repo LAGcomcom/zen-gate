@@ -1,6 +1,15 @@
 {
   "announcements": [
     {
+      "id": "2026-11-05-lamp-guide-refactor",
+      "title": "Lamp Guide 桌面重构版已发布：新界面、模型聚合与完整安装向导",
+      "body": "zen-gate 的 Windows 桌面重构版本 Lamp Guide 已在独立仓库发布。新增聚合模型搜索、渠道参与轮换按钮、按模型批量开关、积分倍率展示、独立 OpenCode 页面及日夜主题动画，并提供完整中文安装向导。\n\n当前支持 Windows 10 / 11 x64。原版与重构版分别维护版本号，原版其他平台发行包和历史记录继续保留。请点击前往新仓库下载安装包；迁移前退出旧版并备份数据，两种程序避免同时运行。",
+      "level": "info",
+      "start": "2026-11-05",
+      "end": "2027-02-05",
+      "url": "https://github.com/LAGcomcom/Lamp-Guide"
+    },
+    {
       "id": "2026-11-02-v1.10.0-release",
       "title": "v1.10.0：渠道账号按钮真的能点了，macOS 也能一键装 sing-box，探测有了进度条，另加 Docker 无头部署",
       "body": "这一版四件事：三个「点了没反应 / 装了没生效」的手感问题，外加一个新的部署方式（#79 Docker 无头）。\n\n🔘 渠道账号按钮点了没反应（#126）\n- 现象：「自定义 API」页里 Qoder / CodeArts / WorkBuddy 的「授权登录、退出登录、优先使用、停用」都在，点下去什么都没发生，只有 Zen 车道的滑块正常\n- 根因：面板改版时账号卡搬进了渠道弹窗（.chan-pane），三个绑定函数却还拿已经删掉的旧卡片 id 当守卫（$(\"#ca-card\") 这类），守卫永远为假，整块 handler 一次都没绑定过——于是按钮渲染得出来，点了没反应\n- 现在：守卫换成真实存在的账号池容器，四个按钮恢复；同时加了一条静态测试——脚本里任何一个 $(\"#id\") 必须在同一份 HTML 里声明过，否则 go test 直接红，这类问题再次发生会当场被拦下\n\n📈 全量探测有了进度（#117）\n- 现象：点「重新探测」，按钮只转，几十个模型要跑好几分钟，中途看不出是在跑还是卡死\n- 现在：工具栏显示「已探测 12/35 · 正在测 xxx」，按钮同时变「探测中…」；分母在轮次开始时按真正要出网的模型数固定（Kilo 行不出网不计入），轮次结束归零\n\n🍎 macOS 也能一键装 sing-box（#127）\n- 现象：macOS 上「下载 sing-box」永远失败，设置页一直显示未安装\n- 根因：下载器只会取 windows-amd64.zip、只会在压缩包里找 sing-box.exe、只会在 <home>/bin/sing-box.exe 找可执行文件——三处都写死 Windows，而 SagerNet 给 macOS / Linux 发的是 tar.gz\n- 现在：按运行平台选资产后缀、解压格式（zip / tar.gz，含归档里的嵌套目录）与可执行名，三处统一读同一张表；设置页文案也从「sing-box.exe 路径」改成「sing-box 路径」，允许直接填本机已装的可执行文件\n\n🐳 Docker 与无头部署（#79）\n- 之前的「无头模式 + /healthz」只做到了运行时不开窗口，二进制本身仍然链着 GTK / WebView2 / appindicator，CGO_ENABLED=0 交叉编译直接失败，容器里根本起不来\n- 现在：窗口与托盘加了 headless 构建标签，GUI 依赖整块编译出去，新增 Dockerfile / docker-compose.yml 与 CI 的交叉编译矩阵；linux amd64/arm64、darwin amd64/arm64、windows amd64 五个目标在 CGO_ENABLED=0 下全部编译通过，/healthz 可直接当容器健康检查\n- 用法见 README「Docker 与无头部署」：面板仍是 loopback-only，用 SSH 隧道或同机反代访问\n\n📋 顺手：模型 id 一键复制\n- 模型卡片与列表行都加了「复制 id」——面板探不到、但手动调用能用的模型，直接把 id 粘进别的 Agent\n\n升级方式：总览页「一键更新」或 Releases 页下载。已有订阅、已登录账号、自定义供应商配置都不需要重填。",
