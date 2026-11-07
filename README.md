@@ -1,3 +1,11 @@
+> **Windows 桌面重构版已发布：Lamp Guide**
+>
+> zen-gate 现有版本与历史发布继续保留。全新桌面界面、模型聚合管理、OpenCode 专页、日夜主题和中文安装向导在独立项目迭代。
+>
+> **[前往 Lamp Guide 新仓库](https://github.com/LAGcomcom/Lamp-Guide) · [下载安装包](https://github.com/LAGcomcom/Lamp-Guide/releases/latest) · [版本关系与迁移说明](docs/LAMP_GUIDE.md)**
+>
+> 当前重构版支持 Windows 10 / 11 x64，版本号与 zen-gate 分别计算。原版其他平台发行包仍在本仓库。
+
 <div align="center">
 
 <img src="assets/icon-256.png" width="88" alt="Zen Gate">
