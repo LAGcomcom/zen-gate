@@ -3,6 +3,7 @@ package lane
 import (
 	"context"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -75,28 +76,42 @@ func (l *Lane) zcodePost(ctx context.Context, body map[string]any, onData func([
 
 // zcodeCoolNote records a park. Kept in a package-level map rather than in the
 // account struct so a restart forgets it: a cooldown is a fact about right now.
-var zcodePark = map[string]int64{} // account id -> unix-milli until usable
+// Requests touch it concurrently (every account rotation and every admin card
+// read), so it needs the same lock discipline as traeRoutes.
+var (
+	zcodeParkMu sync.Mutex
+	zcodePark   = map[string]int64{} // account id -> unix-milli until usable
+)
 
 func (l *Lane) zcodeCool(id string, seconds int) {
 	if seconds <= 0 {
 		seconds = 600
 	}
-	zcodePark[id] = time.Now().UnixMilli() + int64(seconds)*1000
+	until := time.Now().UnixMilli() + int64(seconds)*1000
+	zcodeParkMu.Lock()
+	zcodePark[id] = until
+	zcodeParkMu.Unlock()
 }
 
 func (l *Lane) zcodeMarkOK(id string) {
+	zcodeParkMu.Lock()
 	delete(zcodePark, id)
+	zcodeParkMu.Unlock()
 }
 
 // zcodeMarkAuth benches an account whose login died. It will not fix itself, but
 // the user can log in again, so this only parks it rather than deleting it.
 func (l *Lane) zcodeMarkAuth(id, reason string) {
 	l.logf("ZCode 账号 %s 被停用一轮：%s", id, truncate(strings.TrimSpace(reason), 120))
+	zcodeParkMu.Lock()
 	zcodePark[id] = time.Now().UnixMilli() + 10*60*1000
+	zcodeParkMu.Unlock()
 }
 
 // zcodeParked reports whether an account is currently parked.
 func zcodeParked(id string) bool {
+	zcodeParkMu.Lock()
+	defer zcodeParkMu.Unlock()
 	until, ok := zcodePark[id]
 	if !ok {
 		return false
