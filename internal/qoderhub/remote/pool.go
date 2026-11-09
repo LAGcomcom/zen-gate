@@ -137,17 +137,18 @@ func (p *Pool) Load() error {
 // out: the file carries identity and order only.
 func (p *Pool) SaveIndex() error {
 	p.mu.Lock()
-	accounts := make([]*PoolAccount, len(p.accounts))
-	copy(accounts, p.accounts)
-	p.mu.Unlock()
-
-	clean := make([]*PoolAccount, 0, len(accounts))
-	for _, a := range accounts {
+	// Copy the durable fields while holding the lock: Report writes runtime
+	// state (authBad/cooledUntil/modelCool) under it, so reading account structs
+	// after unlocking would race a concurrent failed turn.
+	clean := make([]*PoolAccount, 0, len(p.accounts))
+	for _, a := range p.accounts {
 		clean = append(clean, &PoolAccount{
 			ID: a.ID, Label: a.Label, UID: a.UID,
 			Enabled: a.Enabled, CreatedAt: a.CreatedAt, ExpiresAt: a.ExpiresAt,
 		})
 	}
+	p.mu.Unlock()
+
 	idx := poolIndex{Version: 1, Accounts: clean}
 	data, err := json.MarshalIndent(idx, "", "  ")
 	if err != nil {
@@ -421,14 +422,16 @@ type PoolCandidate struct {
 // which is exactly what the single-account code path did.
 func (p *Pool) Candidates(model string) []PoolCandidate {
 	now := time.Now()
+	// Snapshot the eligibility fields under the lock. Reading Enabled/authBad/
+	// cooledUntil/modelCool after unlocking raced Report's writes — including a
+	// map write that crashes the whole process, not just the race detector.
+	type row struct {
+		id, uid string
+		acct    *PoolAccount // bookkeeping only, always re-locked
+	}
 	p.mu.Lock()
-	rows := make([]*PoolAccount, len(p.accounts))
-	copy(rows, p.accounts)
-	p.mu.Unlock()
-
-	out := make([]PoolCandidate, 0, len(rows)+1)
-	seen := map[string]bool{}
-	for _, a := range rows {
+	rows := make([]row, 0, len(p.accounts))
+	for _, a := range p.accounts {
 		if !a.Enabled || a.authBad {
 			continue
 		}
@@ -440,20 +443,27 @@ func (p *Pool) Candidates(model string) []PoolCandidate {
 				continue
 			}
 		}
-		cred, err := loadCredentialFile(p.CredentialPath(a.ID))
+		rows = append(rows, row{id: a.ID, uid: a.UID, acct: a})
+	}
+	p.mu.Unlock()
+
+	out := make([]PoolCandidate, 0, len(rows)+1)
+	seen := map[string]bool{}
+	for _, r := range rows {
+		cred, err := loadCredentialFile(p.CredentialPath(r.id))
 		if err != nil {
 			// A file that cannot be read is a dead account, not a fatal error:
 			// note it and move on.
 			p.mu.Lock()
-			a.authBad = true
-			a.lastError = "凭证文件不可读：" + err.Error()
+			r.acct.authBad = true
+			r.acct.lastError = "凭证文件不可读：" + err.Error()
 			p.mu.Unlock()
 			continue
 		}
-		if a.UID != "" {
-			seen[a.UID] = true
+		if r.uid != "" {
+			seen[r.uid] = true
 		}
-		out = append(out, PoolCandidate{ID: a.ID, Cred: cred})
+		out = append(out, PoolCandidate{ID: r.id, Cred: cred})
 	}
 
 	// The live IDE login is always a candidate, last, unless the pool already
