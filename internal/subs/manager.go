@@ -550,7 +550,9 @@ func (m *Manager) Status() map[string]any {
 		if h.Alive {
 			alive++
 		}
-		nodes = append(nodes, h)
+		// Hand out a copy: probeNodes keeps rewriting the live rows after this
+		// lock is released, and the payload is serialized outside the manager.
+		nodes = append(nodes, *h)
 	}
 	return map[string]any{
 		"running":    running,
