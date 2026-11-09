@@ -315,15 +315,14 @@ func main() {
 	}
 	notify.SetEnabled(cfg.Notifications)
 	// Probe first-token samples feed the persisted per-model average.
-	ln.OnProbeResult = func(r lane.ProbeResult) {
-		st.AddTTFTSample(r.Model, r.TTFTMs)
-	}
 	reg := agents.NewRegistry(st)
 	gw := gateway.New(ln, st)
 	// A probe verdict that says available overturns the batch auto-hide that
 	// was standing on the model: healthy models re-enter the pickers without
-	// a restart.
+	// a restart. Both hooks share the one callback slot, so they live in the
+	// same closure — assigning twice dropped every TTFT sample.
 	ln.OnProbeResult = func(r lane.ProbeResult) {
+		st.AddTTFTSample(r.Model, r.TTFTMs)
 		if r.State == lane.StateAvailable {
 			gw.ClearAutoHidden(r.Model)
 		}
