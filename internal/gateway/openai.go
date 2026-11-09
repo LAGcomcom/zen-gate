@@ -923,6 +923,13 @@ func (s *Server) handleResponses(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, errorStatus(uerr), body)
 		return
 	}
+	if uerr != nil {
+		// The lane failed after emitting part of the answer, so the collector
+		// has content and the error branch above did not run. Report the turn
+		// as truncated (the chat path uses finish_reason:"length" for the same
+		// case) instead of claiming a completed response.
+		outcome.Finish = lane.FinishMaxTokens
+	}
 	if req.Stream {
 		s.writeResponsesEvents(w, served, collector, outcome)
 	} else {
