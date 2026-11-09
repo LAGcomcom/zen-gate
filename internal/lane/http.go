@@ -707,6 +707,12 @@ func (s *streamReader) readWithTimeout(p []byte, timeout time.Duration) (int, er
 		case <-timeoutCh:
 			s.Close()
 			return 0, errors.New("upstream idle timeout")
+		case <-s.quit:
+			// The ctx watcher closed the stream (client gone, or an upstream
+			// error chunk lost the race to quit). Without this case the reader
+			// kept waiting for the idle timeout — up to 90s — holding the
+			// upstream semaphore slot the abandoned request no longer needs.
+			return 0, context.Canceled
 		case c := <-s.ch:
 			if c.err != nil {
 				if errors.Is(c.err, io.EOF) {
