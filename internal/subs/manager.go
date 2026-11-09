@@ -261,6 +261,13 @@ func (m *Manager) Refresh(ctx context.Context) error {
 		}
 		return fmt.Errorf("没有启用的订阅")
 	}
+	// BuildConfig only renders MaxNodes inbounds, and startProcess waits for one
+	// port per published node. Truncating here keeps the config, the port wait
+	// and m.nodes/m.health describing the same set — otherwise nodes past the
+	// cap sit in the pool pointing at ports that were never opened.
+	if len(nodes) > MaxNodes {
+		nodes = nodes[:MaxNodes]
+	}
 	configPath, err := WriteConfig(nodes)
 	if err != nil {
 		return err
