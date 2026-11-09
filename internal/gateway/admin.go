@@ -250,13 +250,9 @@ func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request, rest string
 // guard) + loopback remote; mutating requests additionally require a
 // same-origin Origin/Referer when the client supplies one.
 func adminAllowed(w http.ResponseWriter, r *http.Request, mutating bool) bool {
-	host := r.Host
-	if i := strings.LastIndex(host, ":"); i >= 0 && !strings.Contains(host, "]") {
-		hname := host[:i]
-		if hname != "127.0.0.1" && hname != "localhost" && hname != "[::1]" && hname != "::1" {
-			writeJSON(w, 403, map[string]any{"error": "admin is loopback-only"})
-			return false
-		}
+	if !loopbackHost(r.Host) {
+		writeJSON(w, 403, map[string]any{"error": "admin is loopback-only"})
+		return false
 	}
 	remote := r.RemoteAddr
 	if h, _, err := net.SplitHostPort(remote); err == nil {
@@ -272,13 +268,39 @@ func adminAllowed(w http.ResponseWriter, r *http.Request, mutating bool) bool {
 			if v == "" {
 				continue
 			}
-			if !strings.Contains(v, "://127.0.0.1") && !strings.Contains(v, "://localhost") && !strings.Contains(v, "://[::1]") {
+			if !loopbackURL(v) {
 				writeJSON(w, 403, map[string]any{"error": "cross-site admin request rejected"})
 				return false
 			}
 		}
 	}
 	return true
+}
+
+// loopbackHost reports whether a Host header names this machine. Hosts without
+// a port used to skip the check entirely, which let DNS rebinding through on
+// default ports 80/443.
+func loopbackHost(host string) bool {
+	h := host
+	if split, _, err := net.SplitHostPort(host); err == nil {
+		h = split
+	}
+	switch h {
+	case "127.0.0.1", "localhost", "::1", "[::1]":
+		return true
+	}
+	return false
+}
+
+// loopbackURL parses an Origin/Referer value and compares its hostname exactly.
+// A substring test accepted http://127.0.0.1.attacker.com, defeating the CSRF
+// fence for any page served from a domain starting with a loopback name.
+func loopbackURL(v string) bool {
+	u, err := neturl.Parse(v)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") {
+		return false
+	}
+	return loopbackHost(u.Host)
 }
 
 func (s *Server) adminState(w http.ResponseWriter) {
