@@ -595,15 +595,26 @@ func wbPostOnce(ctx context.Context, body map[string]any, acct WBAccount, conver
 // error — the request is the caller's own fingerprint, replaying it more
 // cannot help.
 func PostWorkBuddyStreamed(ctx context.Context, body map[string]any, acct WBAccount, conversationID string, onData func(payload []byte) error) (*Usage, error) {
-	usage, err := wbPostOnce(ctx, body, acct, conversationID, onData)
+	// The gate can reject mid-stream, after some frames reached the client. A
+	// replay would then deliver the whole answer twice and bill the turn twice,
+	// so only retry while nothing has been emitted.
+	emitted := false
+	track := func(payload []byte) error {
+		if err := onData(payload); err != nil {
+			return err
+		}
+		emitted = true
+		return nil
+	}
+	usage, err := wbPostOnce(ctx, body, acct, conversationID, track)
 	if err == nil {
 		return usage, nil
 	}
 	ue := asUpstream(err)
-	if ue == nil || ue.Code != wbCodeSanitize {
+	if ue == nil || ue.Code != wbCodeSanitize || emitted {
 		return usage, err
 	}
-	usage2, err2 := wbPostOnce(ctx, wbSanitizeFingerprints(body), acct, conversationID, onData)
+	usage2, err2 := wbPostOnce(ctx, wbSanitizeFingerprints(body), acct, conversationID, track)
 	if err2 == nil {
 		return usage2, nil
 	}
