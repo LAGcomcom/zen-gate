@@ -481,7 +481,13 @@ func (s *Store) FlushPerf() {
 		snapshot[k] = cp
 	}
 	s.mu.Unlock()
-	_ = writeJSON(filepath.Join(s.Home, "perf.json"), snapshot)
+	if err := writeJSON(filepath.Join(s.Home, "perf.json"), snapshot); err != nil {
+		// Re-arm the flag; samples added meanwhile have already set it, so this
+		// only ever turns a lost batch back into pending work.
+		s.mu.Lock()
+		s.perfDirty = true
+		s.mu.Unlock()
+	}
 }
 
 // Open loads (or seeds) the store.
@@ -1303,8 +1309,13 @@ func (s *Store) FlushStats() error {
 	if !s.stats.dirty {
 		return nil
 	}
+	// Clear the flag only once the write succeeded: a full disk or a renamed
+	// home would otherwise drop this batch silently until the next record.
+	if err := writeJSON(filepath.Join(s.Home, "stats.json"), s.stats); err != nil {
+		return err
+	}
 	s.stats.dirty = false
-	return writeJSON(filepath.Join(s.Home, "stats.json"), s.stats)
+	return nil
 }
 
 // channelForLegacy attributes records written before Channel existed. Custom
