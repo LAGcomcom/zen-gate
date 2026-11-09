@@ -54,6 +54,11 @@ type Server struct {
 	registry AgentRegistry
 	mux      *http.ServeMux
 	srv      *http.Server
+	// srvMu guards srv/ln so a Rebind cannot race Start or Stop: Close only
+	// reclaims listeners Serve has already registered, so the listener must be
+	// tracked here and closed explicitly.
+	srvMu sync.Mutex
+	ln    net.Listener
 	// listen opens the TCP listener; tests swap it to force a bind refusal.
 	listen func(network, addr string) (net.Listener, error)
 	// logger is injected by main; nil-safe helpers fall back to empty.
@@ -344,7 +349,7 @@ func (s *Server) Start() error {
 	// first visibility toggle (issue #103).
 	s.Lane.SetHidden(s.hiddenSet())
 	addr := fmt.Sprintf("%s:%d", s.bindHost(), s.Store.Config().Port)
-	s.srv = &http.Server{
+	srv := &http.Server{
 		Addr:    addr,
 		Handler: s.mux,
 		// Reclaim keep-alive client connections (the AI agents talking to this
@@ -364,12 +369,35 @@ func (s *Server) Start() error {
 	if err != nil {
 		return err
 	}
+	// Publish and serve the SAME server value: capturing s.srv in the goroutine
+	// let a quick Rebind replace it before the goroutine read the field, racing
+	// the old listener's Serve against the new assignment.
+	s.srvMu.Lock()
+	s.srv, s.ln = srv, ln
+	s.srvMu.Unlock()
 	go func() {
-		if err := s.srv.Serve(ln); err != nil && err != http.ErrServerClosed {
+		if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
 			log.Printf("[zen-gate] http serve: %v", err)
 		}
 	}()
 	return nil
+}
+
+// closeListener stops the current server and closes its listener. Closing the
+// listener explicitly covers the window where Serve has not registered it yet
+// (Close alone misses it, then a Rebind's bind fails with "address already in
+// use").
+func (s *Server) closeListener() {
+	s.srvMu.Lock()
+	srv, ln := s.srv, s.ln
+	s.srv, s.ln = nil, nil
+	s.srvMu.Unlock()
+	if srv != nil {
+		_ = srv.Close()
+	}
+	if ln != nil {
+		_ = ln.Close()
+	}
 }
 
 // bindHost is the interface the listener claims.
@@ -386,9 +414,7 @@ func (s *Server) bindHost() string {
 // instead of leaving the gateway with no listener at all.
 func (s *Server) Rebind() error {
 	allowLan := s.Store.Config().AllowLan
-	if s.srv != nil {
-		_ = s.srv.Close()
-	}
+	s.closeListener()
 	err := s.Start()
 	if err == nil || !allowLan {
 		return err
@@ -403,9 +429,7 @@ func (s *Server) Rebind() error {
 
 // Stop shuts the listener down.
 func (s *Server) Stop() {
-	if s.srv != nil {
-		_ = s.srv.Close()
-	}
+	s.closeListener()
 }
 
 // BaseURL is the locally advertised endpoint. It stays on loopback even while
