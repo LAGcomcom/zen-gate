@@ -133,14 +133,39 @@ type pidRecord struct {
 func pidfilePath() string { return filepath.Join(store.SubsDir(), "sing-box.pid") }
 
 func writePidfileAt(pid int, exe string) error {
-	if err := os.MkdirAll(store.SubsDir(), 0o700); err != nil {
+	dir := store.SubsDir()
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}
 	b, err := json.Marshal(pidRecord{PID: pid, Exe: exe})
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(pidfilePath(), b, 0o600)
+	// Write-then-rename: a crash mid-write must not leave a half-written record.
+	// readPidfile treats unparseable JSON as fatal, so a truncated file would stop
+	// reapOrphan from ever reclaiming the sidecar and block Refresh for good.
+	tmp, err := os.CreateTemp(dir, "sing-box.pid.*.tmp")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName)
+	if err := tmp.Chmod(0o600); err != nil {
+		tmp.Close()
+		return err
+	}
+	if _, err := tmp.Write(b); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmpName, pidfilePath())
 }
 
 func readPidfile() (*pidRecord, error) {
