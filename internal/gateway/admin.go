@@ -2151,6 +2151,11 @@ func (s *Server) adminUpdateApply(w http.ResponseWriter) {
 			if s.logger != nil {
 				s.logger.Errorf("重启新版本失败: %v", err)
 			}
+			// The new exe could not start; put the previous binary back so the
+			// next launch is not a broken install.
+			if rbErr := update.Rollback(); rbErr != nil && s.logger != nil {
+				s.logger.Errorf("回滚旧版本失败: %v", rbErr)
+			}
 			return
 		}
 		os.Exit(0)
