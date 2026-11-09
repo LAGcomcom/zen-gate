@@ -841,9 +841,14 @@ func (s *Server) adminSettings(w http.ResponseWriter, r *http.Request) {
 		// The channel has no switch of its own: it serves when any account is
 		// enabled. The settings toggle therefore means "all accounts on/off",
 		// which is what a user expects from one switch on a pool card.
-		for i := range cfg.WorkBuddyAccounts {
-			cfg.WorkBuddyAccounts[i].Enabled = *in.WorkBuddyEnabled
+		// cfg is only a shallow copy of the published snapshot, so the slice is
+		// cloned before element writes: mutating the shared backing array would
+		// race every dashboard read of the live config.
+		accounts := append([]lane.WBAccount(nil), cfg.WorkBuddyAccounts...)
+		for i := range accounts {
+			accounts[i].Enabled = *in.WorkBuddyEnabled
 		}
+		cfg.WorkBuddyAccounts = accounts
 		changed = true
 		dirty["workBuddyEnabled"] = true
 	}
@@ -1140,7 +1145,7 @@ func (s *Server) adminModelVisibility(w http.ResponseWriter, r *http.Request) {
 					dead[id] = true
 				}
 			}
-			keptAuto := cur.HiddenAuto[:0]
+			keptAuto := make([]string, 0, len(cur.HiddenAuto))
 			for _, h := range cur.HiddenAuto {
 				if dead[h] {
 					continue
