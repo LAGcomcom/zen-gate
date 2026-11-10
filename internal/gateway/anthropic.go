@@ -182,7 +182,7 @@ func (s *Server) handleAnthropicMessages(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	agent := s.agentOf(r)
-	unified := convertAnthropicMessages(req.Messages, req.System)
+	unified := s.applyTokenSaver(r, convertAnthropicMessages(req.Messages, req.System))
 	if len(unified) == 0 {
 		writeJSON(w, 400, map[string]any{"type": "error", "error": map[string]any{"type": "invalid_request_error", "message": "messages must not be empty"}})
 		return

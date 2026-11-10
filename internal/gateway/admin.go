@@ -540,6 +540,8 @@ func (s *Server) adminState(w http.ResponseWriter) {
 		"laneFallbackToProviders": cfg.LaneFallbackToProviders,
 		"relayChainEnabled":       cfg.RelayChainEnabled,
 		"relayChain":              cfg.RelayChain,
+		"tokenSaver":              cfg.TokenSaver,
+		"tokenSaverMaxChars":      cfg.TokenSaverMaxChars,
 		"preferFreeProviders":     cfg.PreferFreeProviders,
 		"workBuddyCacheKey":       cfg.WorkBuddyCacheKey,
 		"autoTagEnabled":          cfg.AutoTagEnabled,
@@ -644,6 +646,8 @@ func (s *Server) adminSettings(w http.ResponseWriter, r *http.Request) {
 		LaneFallbackToProviders *bool              `json:"laneFallbackToProviders"`
 		RelayChainEnabled       *bool              `json:"relayChainEnabled"`
 		RelayChain              *[]store.ChainLink `json:"relayChain"`
+		TokenSaver              *bool              `json:"tokenSaver"`
+		TokenSaverMaxChars      *int               `json:"tokenSaverMaxChars"`
 		PreferFreeProviders     *bool              `json:"preferFreeProviders"`
 		WorkBuddyCacheKey       *bool              `json:"workBuddyCacheKey"`
 		AutoTagEnabled          *bool              `json:"autoTagEnabled"`
@@ -824,6 +828,19 @@ func (s *Server) adminSettings(w http.ResponseWriter, r *http.Request) {
 		cfg.RelayChain = normalizeChain(*in.RelayChain)
 		changed = true
 		dirty["relayChain"] = true
+	}
+	if in.TokenSaver != nil {
+		cfg.TokenSaver = *in.TokenSaver
+		changed = true
+		dirty["tokenSaver"] = true
+	}
+	if in.TokenSaverMaxChars != nil {
+		cfg.TokenSaverMaxChars = *in.TokenSaverMaxChars
+		if cfg.TokenSaverMaxChars < 0 {
+			cfg.TokenSaverMaxChars = 0
+		}
+		changed = true
+		dirty["tokenSaverMaxChars"] = true
 	}
 	if in.PreferFreeProviders != nil {
 		cfg.PreferFreeProviders = *in.PreferFreeProviders
@@ -1054,6 +1071,12 @@ func (s *Server) commitSettings(next *store.Config, dirty map[string]bool) {
 		}
 		if dirty["relayChain"] {
 			c.RelayChain = next.RelayChain
+		}
+		if dirty["tokenSaver"] {
+			c.TokenSaver = next.TokenSaver
+		}
+		if dirty["tokenSaverMaxChars"] {
+			c.TokenSaverMaxChars = next.TokenSaverMaxChars
 		}
 		if dirty["preferFreeProviders"] {
 			c.PreferFreeProviders = next.PreferFreeProviders

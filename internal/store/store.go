@@ -210,6 +210,12 @@ type Config struct {
 	// crossing from free-lane models to provider models and back.
 	RelayChainEnabled bool        `json:"relayChainEnabled,omitempty"`
 	RelayChain        []ChainLink `json:"relayChain,omitempty"`
+	// TokenSaver trims oversized tool results before a turn is forwarded, so a
+	// pasted file dump or a long log tail costs fewer upstream tokens. The last
+	// two messages are never touched, and TokenSaverMaxChars is the per-part
+	// character ceiling (0 = the built-in default).
+	TokenSaver         bool `json:"tokenSaver,omitempty"`
+	TokenSaverMaxChars int  `json:"tokenSaverMaxChars,omitempty"`
 	// PreferFreeProviders reorders fallback candidates so a supplier declared
 	// free is tried before a paid one, at the SAME capability rank. It never
 	// promotes an unknown-capability model over a known-capable one: saving a

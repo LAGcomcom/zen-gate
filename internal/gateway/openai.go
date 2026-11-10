@@ -281,7 +281,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	agent := s.agentOf(r)
-	unified := convertOpenAIMessages(req.Messages)
+	unified := s.applyTokenSaver(r, convertOpenAIMessages(req.Messages))
 	if len(unified) == 0 {
 		writeJSON(w, 400, openaiError("messages must not be empty", "invalid_request_error"))
 		return
@@ -879,7 +879,7 @@ func (s *Server) handleResponses(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	agent := s.agentOf(r)
-	unified := convertResponsesInput(req.Input, req.Instructions)
+	unified := s.applyTokenSaver(r, convertResponsesInput(req.Input, req.Instructions))
 	if len(unified) == 0 {
 		writeJSON(w, 400, openaiError("input must not be empty", "invalid_request_error"))
 		return

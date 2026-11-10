@@ -4629,6 +4629,13 @@ function renderSettings(s){
         </div>
       </div>
 
+      <div class="card" id="set-token-saver">
+        <h3>省 Token</h3>
+        <div class="switch"><div><span class="nm">裁剪超长工具输出</span><div class="ds">把历史里过长的工具结果（文件内容、日志、命令输出）截断到上限字符，只保留头尾并标注省略量；最近两条消息不动。单次请求可用请求头 <code class="k">X-ZG-Token-Saver: off</code> 绕过</div></div>
+          <button class="act off" id="tg-tokensaver">关闭</button></div>
+        <label class="dim" style="margin-top:8px;display:inline-flex;align-items:center;gap:8px">每段上限（字符） <input type="number" id="set-tokensaver-max" min="500" step="500" placeholder="6000"></label>
+      </div>
+
       <div class="card" id="set-route">
         <h3>智能路由 <span class="muted" style="font-size:11px">多模态感知 + 候选排序</span></h3>
         <div class="switch"><div><span class="nm">智能路由总开关</span><div class="ds">开启后：限流切换只挑支持本次请求模态（图像 / 音频 / 文件）的模型，并按下方策略排序候选；关闭则完全回到旧行为（目录顺序，不带能力过滤）。你指定的模型永远是第一选择，策略只影响切换</div></div>
@@ -5255,6 +5262,29 @@ function renderSettings(s){
     const btnReload = el.querySelector("#btn-checkin-reload");
     if (btnReload) btnReload.onclick = loadCheckin;
     loadCheckin();
+  }
+  setToggle("#tg-tokensaver", s.settings.tokenSaver);
+  const tsBtn = el.querySelector("#tg-tokensaver");
+  if(tsBtn && !tsBtn.dataset.bound){
+    tsBtn.dataset.bound = "1";
+    tsBtn.onclick = async ()=>{
+      const on = tsBtn.dataset.on !== "1";
+      await api("/settings", { tokenSaver: on });
+      setToggle("#tg-tokensaver", on);
+      toast(on ? "省 Token 已开启" : "省 Token 已关闭");
+      refresh();
+    };
+  }
+  const tsMax = el.querySelector("#set-tokensaver-max");
+  if(tsMax && !tsMax.dataset.bound){
+    tsMax.dataset.bound = "1";
+    tsMax.value = s.settings.tokenSaverMaxChars || "";
+    tsMax.onchange = async ()=>{
+      const v = parseInt(tsMax.value, 10) || 0;
+      await api("/settings", { tokenSaverMaxChars: v });
+      toast(v > 0 ? "每段上限已设为 " + v + " 字符" : "已恢复默认上限");
+      refresh();
+    };
   }
   setToggle("#tg-smart", s.settings.smartRouting);
   setToggle("#tg-fallback", s.settings.laneFallbackToProviders);
