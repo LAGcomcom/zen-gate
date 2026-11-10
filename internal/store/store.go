@@ -127,6 +127,16 @@ type Subscription struct {
 	Enabled bool   `json:"enabled"`
 }
 
+// ChainLink is one step of the user-ordered relay chain. Source is "lane" for
+// a free-lane model or "provider" for a user-added provider; Model is the
+// upstream id in both cases, and Provider names the provider id when Source is
+// "provider". Order in Config.RelayChain is the order the gateway tries them.
+type ChainLink struct {
+	Source   string `json:"source"`
+	Provider string `json:"provider,omitempty"`
+	Model    string `json:"model"`
+}
+
 type Config struct {
 	SchemaVersion int `json:"schemaVersion"`
 	Port          int `json:"port"`
@@ -173,6 +183,13 @@ type Config struct {
 	// back to user-added providers — these bill the user's own keys, so the
 	// default is off.
 	LaneFallbackToProviders bool `json:"laneFallbackToProviders,omitempty"`
+	// RelayChainEnabled replaces the built-in failover order (the lane's own
+	// model switch, then the provider catalog) with the user-ordered
+	// RelayChain below. In this mode the lane never switches models by itself:
+	// an exhausted turn walks the chain exactly as the user arranged it,
+	// crossing from free-lane models to provider models and back.
+	RelayChainEnabled bool        `json:"relayChainEnabled,omitempty"`
+	RelayChain        []ChainLink `json:"relayChain,omitempty"`
 	// WorkBuddyCacheKey adds prompt_cache_key to WorkBuddy turns so the
 	// upstream buckets its prefix cache by our conversation id. Default off:
 	// the field is measured on the reference client for this same backend, but
@@ -848,6 +865,7 @@ func (c *Config) clone() *Config {
 	next.ModelPrefs = cloneMap(c.ModelPrefs)
 	next.HiddenAuto = cloneSlice(c.HiddenAuto)
 	next.Subscriptions = cloneSlice(c.Subscriptions)
+	next.RelayChain = cloneSlice(c.RelayChain)
 	next.WorkBuddyAccounts = cloneSlice(c.WorkBuddyAccounts)
 	next.ZCodeAccounts = cloneSlice(c.ZCodeAccounts)
 	next.TraeAccounts = cloneSlice(c.TraeAccounts)

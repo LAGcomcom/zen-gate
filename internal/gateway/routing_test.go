@@ -295,7 +295,7 @@ func TestProviderFallbackPicks(t *testing.T) {
 	_ = s.Store.Save()
 
 	needs := lane.Needs{Image: true}
-	picks := s.providerFallbackPicks(needs, "some-lane-model")
+	picks := s.fallbackPicks(needs, "some-lane-model")
 	// gpt-4o is vetoed by the probe verdict (vision=false); qwen matches the
 	// heuristics and leads; the unknown text-only-llm trails as a soft pick.
 	if len(picks) != 2 || picks[0].p.ID != "pvb" || picks[0].model != "qwen2.5-vl-72b" ||
@@ -306,8 +306,91 @@ func TestProviderFallbackPicks(t *testing.T) {
 	// The probe veto applies only to smart routing; off, everything is listed
 	// in provider order.
 	s.Store.Config().SmartRouting = false
-	picks = s.providerFallbackPicks(needs, "some-lane-model")
+	picks = s.fallbackPicks(needs, "some-lane-model")
 	if len(picks) != 3 || picks[0].p.ID != "pva" || picks[0].model != "text-only-llm" {
 		t.Fatalf("legacy picks = %+v", picks)
+	}
+}
+
+// setChain publishes a user-ordered relay chain.
+func setChain(t *testing.T, s *Server, links ...store.ChainLink) {
+	t.Helper()
+	s.Store.Mutate(func(c *store.Config) {
+		c.RelayChainEnabled = true
+		c.RelayChain = links
+	})
+	if err := s.Store.Save(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// The requested model is refused while every other lane model answers. With a
+// chain enabled the lane must not rescue itself by switching models: the
+// provider step the user ordered has to serve the turn, and the legacy
+// switch must stay off so the chain is what did it.
+func TestRelayChainOwnsModelOrder(t *testing.T) {
+	laneUp := laneUpstreamByModel(t, map[string]bool{"mimo-v2.6-flash-free": true})
+	defer laneUp.Close()
+	provUp := fakeUpstream(t, []string{
+		`{"choices":[{"delta":{"role":"assistant","content":"from provider"}}]}`,
+		`{"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":3}}`,
+		"[DONE]",
+	})
+	defer provUp.Close()
+	s := newTestServer(t, laneUp)
+	withProvider(t, s, provUp.URL, false)
+	setChain(t, s, store.ChainLink{Source: "provider", Provider: "pv1", Model: "gpt-4o-mini"})
+
+	body := `{"model":"mimo-v2.6-flash-free","stream":false,"messages":[{"role":"user","content":"hi"}]}`
+	resp := postChat(t, s, body)
+	if resp.StatusCode != 200 {
+		t.Fatalf("status = %d, want 200 (the chain must rescue the turn)", resp.StatusCode)
+	}
+	if got := resp.Header.Get("x-zen-gate-served-by"); got != "pv1/gpt-4o-mini" {
+		t.Fatalf("served-by = %q, want pv1/gpt-4o-mini (lane must not switch models)", got)
+	}
+}
+
+// A lane entry is a first-class chain step: it is tried before the provider
+// that follows it, even though the requested model failed.
+func TestRelayChainLaneLinkBeforeProvider(t *testing.T) {
+	laneUp := laneUpstreamByModel(t, map[string]bool{"mimo-v2.6-flash-free": true})
+	defer laneUp.Close()
+	provUp := fakeUpstream(t, []string{
+		`{"choices":[{"delta":{"role":"assistant","content":"from provider"}}]}`,
+		`{"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":3}}`,
+		"[DONE]",
+	})
+	defer provUp.Close()
+	s := newTestServer(t, laneUp)
+	withProvider(t, s, provUp.URL, false)
+	setChain(t, s,
+		store.ChainLink{Source: "lane", Model: "space-bunny-free"},
+		store.ChainLink{Source: "provider", Provider: "pv1", Model: "gpt-4o-mini"},
+	)
+
+	body := `{"model":"mimo-v2.6-flash-free","stream":false,"messages":[{"role":"user","content":"hi"}]}`
+	resp := postChat(t, s, body)
+	if resp.StatusCode != 200 {
+		t.Fatalf("status = %d", resp.StatusCode)
+	}
+	if got := resp.Header.Get("x-zen-gate-served-by"); got != "space-bunny-free" {
+		t.Fatalf("served-by = %q, want space-bunny-free (lane link comes first)", got)
+	}
+}
+
+func TestNormalizeChain(t *testing.T) {
+	in := []store.ChainLink{
+		{Source: " Lane ", Model: " a "},
+		{Source: "provider", Provider: " pv1 ", Model: " m "},
+		{Source: "provider", Model: "no-provider"},
+		{Source: "nope", Model: "x"},
+		{Source: "lane", Model: "  "},
+	}
+	out := normalizeChain(in)
+	if len(out) != 2 ||
+		out[0] != (store.ChainLink{Source: "lane", Model: "a"}) ||
+		out[1] != (store.ChainLink{Source: "provider", Provider: "pv1", Model: "m"}) {
+		t.Fatalf("normalized = %+v", out)
 	}
 }

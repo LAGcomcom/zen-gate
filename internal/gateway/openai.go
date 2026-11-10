@@ -312,6 +312,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 
 	id := randomID("chatcmpl-")
 	created := time.Now().Unix()
+	chain := s.chainMode()
 
 	if !req.Stream {
 		var text strings.Builder
@@ -321,6 +322,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 			Model: model, Effort: effort, Messages: unified,
 			Tools: convertOpenAITools(req.Tools), MaxTokens: maxTok,
 			SessionSeed: seed, TurnSeed: turn, Agent: agent, Needs: needs,
+			NoModelSwitch: chain,
 		}, func(c lane.Chunk) {
 			emit.consume(c, &text, &reasoning, &toolCalls)
 		})
@@ -328,11 +330,12 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 			// Free lane exhausted and the user opted in: offer the turn to
 			// user-added providers before reporting the lane's failure.
 			if uerr.Exhausted && s.fallbackEnabled() {
-				if usage, finish, served, _, ok := s.providerFallback(ctx,
-					s.providerFallbackPicks(needs, base), unified,
-					convertOpenAITools(req.Tools), maxTok, agent,
-					func(c lane.Chunk) { emit.consume(c, &text, &reasoning, &toolCalls) }); ok {
-					w.Header().Set("x-zen-gate-served-by", served)
+				res := s.runChain(ctx, s.fallbackPicks(needs, base), chainTurn{
+					messages: unified, tools: convertOpenAITools(req.Tools), maxTokens: maxTok,
+					agent: agent, needs: needs, sessionSeed: seed, turnSeed: turn,
+				}, func(c lane.Chunk) { emit.consume(c, &text, &reasoning, &toolCalls) })
+				if res.OK {
+					w.Header().Set("x-zen-gate-served-by", res.Served)
 					msg := map[string]any{"role": "assistant", "content": text.String()}
 					if reasoning.Len() > 0 {
 						msg["reasoning_content"] = reasoning.String()
@@ -341,17 +344,22 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 						msg["tool_calls"] = toolCalls
 					}
 					outFinish := "stop"
-					if finish == "" {
+					if res.Finish == "" {
 						outFinish = "length"
 					} else {
-						outFinish = mapFinish(finish)
+						outFinish = mapFinish(res.Finish)
 					}
 					writeJSON(w, 200, map[string]any{
-						"id": id, "object": "chat.completion", "created": created, "model": served,
+						"id": id, "object": "chat.completion", "created": created, "model": res.Served,
 						"choices": []any{map[string]any{"index": 0, "message": msg, "finish_reason": outFinish}},
-						"usage":   usagePayload(usage),
+						"usage":   usagePayload(res.Usage),
 					})
 					return
+				}
+				if res.Err != nil && res.Emitted {
+					// A chain step spoke before failing; report why instead of
+					// the lane error that started the walk.
+					uerr = res.Err
 				}
 			}
 			setRetryAfter(w, uerr)
@@ -414,6 +422,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		Model: model, Effort: effort, Messages: unified,
 		Tools: convertOpenAITools(req.Tools), MaxTokens: maxTok,
 		SessionSeed: seed, TurnSeed: turn, Agent: agent, Needs: needs,
+		NoModelSwitch: chain,
 	}, func(c lane.Chunk) {
 		for _, d := range emit.stream(c) {
 			sendChunk(d.delta, nil, nil)
@@ -422,32 +431,36 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	served := servedModel(outcome, base)
 	if uerr != nil && !emit.hasAny() {
 		// Free lane exhausted and the user opted in: continue the same SSE
-		// stream from a user-added provider.
+		// stream from the next relay step.
 		if uerr.Exhausted && s.fallbackEnabled() {
-			if usage, finish, fbServed, _, ok := s.providerFallback(ctx,
-				s.providerFallbackPicks(needs, base), unified,
-				convertOpenAITools(req.Tools), maxTok, agent,
-				func(c lane.Chunk) {
-					for _, d := range emit.stream(c) {
-						sendChunk(d.delta, nil, nil)
-					}
-				}); ok {
+			res := s.runChain(ctx, s.fallbackPicks(needs, base), chainTurn{
+				messages: unified, tools: convertOpenAITools(req.Tools), maxTokens: maxTok,
+				agent: agent, needs: needs, sessionSeed: seed, turnSeed: turn,
+			}, func(c lane.Chunk) {
+				for _, d := range emit.stream(c) {
+					sendChunk(d.delta, nil, nil)
+				}
+			})
+			if res.OK {
 				outFinish := "stop"
-				if finish == "" {
+				if res.Finish == "" {
 					outFinish = "length"
 				} else {
-					outFinish = mapFinish(finish)
+					outFinish = mapFinish(res.Finish)
 				}
 				sendChunk(map[string]any{}, outFinish, nil)
 				if req.StreamOptions != nil && req.StreamOptions.IncludeUsage {
 					sse.event(map[string]any{
-						"id": id, "object": "chat.completion.chunk", "created": created, "model": fbServed,
+						"id": id, "object": "chat.completion.chunk", "created": created, "model": res.Served,
 						"choices": []any{map[string]any{"index": 0, "delta": map[string]any{}, "finish_reason": nil}},
-						"usage":   usagePayload(usage),
+						"usage":   usagePayload(res.Usage),
 					})
 				}
 				sse.done()
 				return
+			}
+			if res.Err != nil && res.Emitted {
+				uerr = res.Err
 			}
 		}
 		if sse.flushed {
@@ -897,22 +910,27 @@ func (s *Server) handleResponses(w http.ResponseWriter, r *http.Request) {
 		Model: model, Effort: effort, Messages: unified,
 		Tools: convertOpenAITools(req.Tools), MaxTokens: req.MaxOutputTokens,
 		SessionSeed: seed, TurnSeed: turn,
-		Agent: agent, Needs: needs,
+		Agent: agent, Needs: needs, NoModelSwitch: s.chainMode(),
 	}, collector.consume)
 	served := servedModel(outcome, base)
 	if uerr != nil && !collector.hasAnything() {
 		if uerr.Exhausted && s.fallbackEnabled() {
-			if usage, finish, fbServed, _, ok := s.providerFallback(ctx,
-				s.providerFallbackPicks(needs, base), unified,
-				convertOpenAITools(req.Tools), req.MaxOutputTokens, agent, collector.consume); ok {
-				fbOutcome := lane.Outcome{Usage: usage, Finish: finish, ServedModel: fbServed}
-				w.Header().Set("x-zen-gate-served-by", fbServed)
+			res := s.runChain(ctx, s.fallbackPicks(needs, base), chainTurn{
+				messages: unified, tools: convertOpenAITools(req.Tools), maxTokens: req.MaxOutputTokens,
+				agent: agent, needs: needs, sessionSeed: seed, turnSeed: turn,
+			}, collector.consume)
+			if res.OK {
+				fbOutcome := lane.Outcome{Usage: res.Usage, Finish: res.Finish, ServedModel: res.Served}
+				w.Header().Set("x-zen-gate-served-by", res.Served)
 				if req.Stream {
-					s.writeResponsesEvents(w, fbServed, collector, fbOutcome)
+					s.writeResponsesEvents(w, res.Served, collector, fbOutcome)
 				} else {
-					writeJSON(w, 200, collector.finalResponse(fbServed, fbOutcome, false))
+					writeJSON(w, 200, collector.finalResponse(res.Served, fbOutcome, false))
 				}
 				return
+			}
+			if res.Err != nil && res.Emitted {
+				uerr = res.Err
 			}
 		}
 		setRetryAfter(w, uerr)

@@ -4194,6 +4194,84 @@ function logQuery(){
 const settingsDirty = new Set();
 function clearSettingsDirty(){ settingsDirty.clear(); }
 
+function chainOpts(list, cur){
+  return list.map(([v,l])=>`<option value="${esc(v)}"${v===cur?" selected":""}>${esc(l)}</option>`).join("")
+    || `<option value="">（无可用模型）</option>`;
+}
+
+async function saveRelayChain(rows){
+  const clean = rows.filter(r=>r && r.model);
+  const j = await api("/settings", { relayChain: clean });
+  if(!j) return;
+  if(!STATE.settings) STATE.settings = {};
+  STATE.settings.relayChain = clean;
+  toast("接力链已保存");
+  refresh();
+}
+
+// Paint the ordered relay chain. The list is rebuilt only when its data (or
+// the pickable models) changes, so the 10s state poll cannot close a dropdown
+// the user is halfway through.
+function renderRelayChain(){
+  const el = $("#page-settings"); if(!el) return;
+  const box = el.querySelector("#chain-list"); if(!box) return;
+  const s = STATE || {};
+  const rows = (s.settings && s.settings.relayChain) || [];
+  const laneModels = (s.models||[]).map(m=>[m.id, m.name && m.name!==m.id ? `${m.name} · ${m.id}` : m.id]);
+  const pvs = (s.providers||[]).filter(p=>p.enabled);
+  const pvMap = {}; pvs.forEach(p=>pvMap[p.id]=p.models||[]);
+  const sig = JSON.stringify([rows, laneModels, pvs.map(p=>[p.id, pvMap[p.id]])]);
+  if(box.dataset.sig === sig) return;
+  box.dataset.sig = sig;
+  box.innerHTML = rows.map((r,i)=>{
+    let picker;
+    if(r.source === "lane"){
+      picker = `<select data-i="${i}" data-f="model" style="min-width:220px">${chainOpts(laneModels, r.model)}</select>`;
+    }else{
+      const opts = pvs.map(p=>[p.id, p.name||p.id]);
+      if(!pvs.some(p=>p.id===r.provider)) opts.unshift([r.provider, r.provider||"（供应商已删除）"]);
+      picker = `<select data-i="${i}" data-f="provider">${chainOpts(opts, r.provider)}</select>`
+             + `<select data-i="${i}" data-f="model" style="min-width:180px">${chainOpts((pvMap[r.provider]||[]).map(m=>[m,m]), r.model)}</select>`;
+    }
+    return `<div class="chain-row" data-i="${i}" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+      <span class="pill">${i+1}</span>
+      <span class="muted" style="font-size:12px;min-width:58px">${r.source==="lane"?"免费车道":"自定义 API"}</span>
+      ${picker}
+      <button class="ghost" data-act="up" data-i="${i}" ${i===0?"disabled":""} title="上移">↑</button>
+      <button class="ghost" data-act="down" data-i="${i}" ${i===rows.length-1?"disabled":""} title="下移">↓</button>
+      <button class="ghost" data-act="del" data-i="${i}" title="删除">删除</button>
+    </div>`;
+  }).join("") || `<div class="muted" style="font-size:12px">还没有步骤。用下面的按钮添加，链会按这里的顺序尝试。</div>`;
+
+  if(!box.dataset.bound){
+    box.dataset.bound = "1";
+    const cloneRows = ()=>JSON.parse(JSON.stringify((STATE.settings&&STATE.settings.relayChain)||[]));
+    box.onchange = async ev=>{
+      const sel = ev.target.closest("select"); if(!sel) return;
+      const i = +sel.dataset.i, f = sel.dataset.f;
+      const rows = cloneRows(); if(!rows[i]) return;
+      if(f === "provider"){
+        rows[i].provider = sel.value;
+        const p = (STATE.providers||[]).find(x=>x.id===sel.value);
+        rows[i].model = p && p.models && p.models.length ? p.models[0] : "";
+      }else{
+        rows[i].model = sel.value;
+      }
+      await saveRelayChain(rows);
+    };
+    box.onclick = async ev=>{
+      const btn = ev.target.closest("button[data-act]"); if(!btn) return;
+      const i = +btn.dataset.i, act = btn.dataset.act;
+      const rows = cloneRows(); if(!rows[i]) return;
+      if(act === "del") rows.splice(i,1);
+      else if(act === "up" && i > 0) [rows[i-1], rows[i]] = [rows[i], rows[i-1]];
+      else if(act === "down" && i < rows.length-1) [rows[i+1], rows[i]] = [rows[i], rows[i+1]];
+      else return;
+      await saveRelayChain(rows);
+    };
+  }
+}
+
 function renderSettings(s){
   const el = $("#page-settings");
   if(!el.dataset.rendered){
@@ -4235,6 +4313,16 @@ function renderSettings(s){
           </div></div>
         <div class="switch"><div><span class="nm">耗尽后回落自定义 API</span><div class="ds">免费车道所有候选都被限流时，把本次请求交给自定义 API 里同名 / 能力匹配的模型继续完成（会消耗你自己的 Key 额度，默认关闭）</div></div>
           <button class="act off" id="tg-fallback">关闭</button></div>
+        <div class="switch"><div><span class="nm">跨供应商接力链 <span class="muted" style="font-size:11px">有序 · 可混排</span></span><div class="ds">按下面的顺序依次尝试：免费车道模型和自定义 API 模型可以交替排列。开启后车道不再自己换模型，顺序完全由这条链决定；某一步开始输出后就不再切换，避免同一个回答被拼接两遍。请求的模型永远先试一次，失败后才进入这条链，因此开启后「耗尽后回落自定义 API」的自动顺序不再生效</div></div>
+          <button class="act off" id="tg-chain">关闭</button></div>
+        <div id="chain-editor" style="margin:4px 0 14px">
+          <div id="chain-list" style="display:flex;flex-direction:column;gap:8px"></div>
+          <div style="display:flex;gap:8px;margin-top:10px;flex-wrap:wrap">
+            <button class="ghost" id="chain-add-lane">＋ 免费车道模型</button>
+            <button class="ghost" id="chain-add-pv">＋ 自定义 API 模型</button>
+          </div>
+          <div class="muted" style="font-size:12px;margin-top:8px">顺序即尝试顺序；某一步被限流、5xx、超时或空响应时，才进入下一步。</div>
+        </div>
         <div class="switch"><div><span class="nm">AI 能力标注</span><div class="ds">用免费车道模型后台给模型打能力标签（视觉/音频/文件，存本地 tags.json），供路由过滤与模型页徽章使用；几百 token/批，「实测」过的模型不会被覆盖</div></div>
           <div style="display:flex;gap:8px;align-items:center">
             <button class="ghost" id="btn-retag">重新标注</button>
@@ -4574,6 +4662,43 @@ function renderSettings(s){
   };
   bindSettingToggle("#tg-smart", "smartRouting", "智能路由已开启：切换会避开不支持本次模态的模型", "智能路由已关闭：恢复目录顺序、不带能力过滤");
   bindSettingToggle("#tg-fallback", "laneFallbackToProviders", "耗尽后回落自定义 API 已开启（消耗你的 Key 额度）", "耗尽后回落自定义 API 已关闭");
+  setToggle("#tg-chain", s.settings.relayChainEnabled);
+  renderRelayChain();
+  const chainBtn = el.querySelector("#tg-chain");
+  if(chainBtn && !chainBtn.dataset.bound){
+    chainBtn.dataset.bound = "1";
+    chainBtn.onclick = async ()=>{
+      const on = chainBtn.dataset.on !== "1";
+      if(on && !((STATE.settings && STATE.settings.relayChain)||[]).length){ toast("先添加至少一个链路步骤，再开启接力链"); return; }
+      const j = await api("/settings", { relayChainEnabled: on });
+      if(!j) return;
+      setToggle("#tg-chain", on);
+      toast(on ? "跨供应商接力链已开启：顺序由链路决定" : "跨供应商接力链已关闭");
+      refresh();
+    };
+  }
+  const addLLane = el.querySelector("#chain-add-lane");
+  if(addLLane && !addLLane.dataset.bound){
+    addLLane.dataset.bound = "1";
+    addLLane.onclick = async ()=>{
+      const rows = JSON.parse(JSON.stringify((STATE.settings&&STATE.settings.relayChain)||[]));
+      const first = (STATE.models||[])[0];
+      if(!first){ toast("车道暂时没有可用模型"); return; }
+      rows.push({ source: "lane", provider: "", model: first.id });
+      await saveRelayChain(rows);
+    };
+  }
+  const addLPv = el.querySelector("#chain-add-pv");
+  if(addLPv && !addLPv.dataset.bound){
+    addLPv.dataset.bound = "1";
+    addLPv.onclick = async ()=>{
+      const rows = JSON.parse(JSON.stringify((STATE.settings&&STATE.settings.relayChain)||[]));
+      const p = (STATE.providers||[]).find(x=>x.enabled && (x.models||[]).length);
+      if(!p){ toast("先添加并启用一个自定义供应商"); return; }
+      rows.push({ source: "provider", provider: p.id, model: p.models[0] });
+      await saveRelayChain(rows);
+    };
+  }
   bindSettingToggle("#tg-autotag", "autoTagEnabled", "AI 能力标注已开启", "AI 能力标注已暂停");
   bindSettingToggle("#tg-openref", "openRefEnabled", "公开容量参考已开启：新模型将自动获得上游容量", "公开容量参考已暂停");
   bindSettingToggle("#tg-wbcache", "workBuddyCacheKey",

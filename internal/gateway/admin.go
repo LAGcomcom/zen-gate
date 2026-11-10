@@ -471,6 +471,8 @@ func (s *Server) adminState(w http.ResponseWriter) {
 		"smartRouting":            cfg.SmartRouting,
 		"routingStrategy":         cfg.RoutingStrategy,
 		"laneFallbackToProviders": cfg.LaneFallbackToProviders,
+		"relayChainEnabled":       cfg.RelayChainEnabled,
+		"relayChain":              cfg.RelayChain,
 		"workBuddyCacheKey":       cfg.WorkBuddyCacheKey,
 		"autoTagEnabled":          cfg.AutoTagEnabled,
 		"openRefEnabled":          cfg.OpenRefEnabled,
@@ -569,6 +571,8 @@ func (s *Server) adminSettings(w http.ResponseWriter, r *http.Request) {
 		SmartRouting            *bool            `json:"smartRouting"`
 		RoutingStrategy         *string          `json:"routingStrategy"`
 		LaneFallbackToProviders *bool            `json:"laneFallbackToProviders"`
+		RelayChainEnabled       *bool            `json:"relayChainEnabled"`
+		RelayChain              *[]store.ChainLink `json:"relayChain"`
 		WorkBuddyCacheKey       *bool            `json:"workBuddyCacheKey"`
 		AutoTagEnabled          *bool            `json:"autoTagEnabled"`
 		OpenRefEnabled          *bool            `json:"openRefEnabled"`
@@ -727,6 +731,16 @@ func (s *Server) adminSettings(w http.ResponseWriter, r *http.Request) {
 		changed = true
 		dirty["laneFallbackToProviders"] = true
 	}
+	if in.RelayChainEnabled != nil {
+		cfg.RelayChainEnabled = *in.RelayChainEnabled
+		changed = true
+		dirty["relayChainEnabled"] = true
+	}
+	if in.RelayChain != nil {
+		cfg.RelayChain = normalizeChain(*in.RelayChain)
+		changed = true
+		dirty["relayChain"] = true
+	}
 	if in.WorkBuddyCacheKey != nil {
 		cfg.WorkBuddyCacheKey = *in.WorkBuddyCacheKey
 		s.Lane.SetWorkBuddyCacheKey(cfg.WorkBuddyCacheKey)
@@ -839,6 +853,39 @@ func (s *Server) adminSettings(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, out)
 }
 
+// normalizeChain trims a submitted relay chain, drops links that cannot be
+// resolved, and caps its length so a hand-written request cannot grow the
+// config without bound. A lane link needs only a model id; a provider link
+// must also name a provider. Provider existence is checked at request time,
+// not here, so a chain survives the provider being edited or re-added.
+func normalizeChain(in []store.ChainLink) []store.ChainLink {
+	const maxLinks = 32
+	out := make([]store.ChainLink, 0, len(in))
+	for _, link := range in {
+		if len(out) >= maxLinks {
+			break
+		}
+		link.Source = strings.ToLower(strings.TrimSpace(link.Source))
+		link.Provider = strings.TrimSpace(link.Provider)
+		link.Model = strings.TrimSpace(link.Model)
+		if link.Model == "" {
+			continue
+		}
+		switch link.Source {
+		case "lane":
+			link.Provider = ""
+		case "provider":
+			if link.Provider == "" {
+				continue
+			}
+		default:
+			continue
+		}
+		out = append(out, link)
+	}
+	return out
+}
+
 // commitSettings publishes exactly the fields this request validated (dirty).
 // Publishing the whole snapshot instead — every field the handler owns, plus
 // SubsEnabled/SingBoxPath it never even parses — meant two overlapping
@@ -901,6 +948,12 @@ func (s *Server) commitSettings(next *store.Config, dirty map[string]bool) {
 		}
 		if dirty["laneFallbackToProviders"] {
 			c.LaneFallbackToProviders = next.LaneFallbackToProviders
+		}
+		if dirty["relayChainEnabled"] {
+			c.RelayChainEnabled = next.RelayChainEnabled
+		}
+		if dirty["relayChain"] {
+			c.RelayChain = next.RelayChain
 		}
 		// Without this branch the WorkBuddy cache toggle was a phantom: the
 		// handler set the lane flag, answered {"changed":true}, and the next

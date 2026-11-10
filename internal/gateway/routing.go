@@ -105,19 +105,31 @@ func capsSatisfy(c modalityCaps, needs lane.Needs) bool {
 	return true
 }
 
-// fallbackPick is one candidate provider model for cross-lane fallback.
+// fallbackPick is one step of the relay order: a free-lane model or a
+// user-added provider's model.
 type fallbackPick struct {
-	p     *store.Provider
-	model string // upstream id
+	source string // "lane" | "provider"
+	p      *store.Provider
+	model  string // upstream id
 }
 
-// providerFallbackPicks orders user-added provider models for a turn the
-// free lane exhausted: the same upstream id as the requested lane model
-// first, then known-capable models, then unknown-capability ones; provider
-// catalog order breaks ties. With smart routing off no capability filter or
-// ranking applies — plain provider order.
-func (s *Server) providerFallbackPicks(needs lane.Needs, requestedBase string) []fallbackPick {
+// chainMode reports whether the user-ordered relay chain replaces the built-in
+// failover order. An enabled-but-empty chain counts as off so a half-configured
+// switch cannot silently take the lane's own failover away.
+func (s *Server) chainMode() bool {
 	cfg := s.Store.Config()
+	return cfg.RelayChainEnabled && len(cfg.RelayChain) > 0
+}
+
+// fallbackPicks orders the steps a failed turn walks. With the relay chain on,
+// it is the user's order verbatim — lane and provider entries interleaved.
+// Otherwise the legacy behaviour: provider catalog order, optionally ranked by
+// capability for smart routing.
+func (s *Server) fallbackPicks(needs lane.Needs, requestedBase string) []fallbackPick {
+	cfg := s.Store.Config()
+	if cfg.RelayChainEnabled && len(cfg.RelayChain) > 0 {
+		return s.chainPicks(cfg)
+	}
 	smart := cfg.SmartRouting
 	picks := make([]fallbackPick, 0, 8)
 	late := make([]fallbackPick, 0, 8)
@@ -127,7 +139,7 @@ func (s *Server) providerFallbackPicks(needs lane.Needs, requestedBase string) [
 			continue
 		}
 		for _, m := range p.Models {
-			pick := fallbackPick{p: p, model: m}
+			pick := fallbackPick{source: "provider", p: p, model: m}
 			if !smart {
 				picks = append(picks, pick)
 				continue
@@ -153,35 +165,154 @@ func (s *Server) providerFallbackPicks(needs lane.Needs, requestedBase string) [
 	return append(picks, late...)
 }
 
-// providerFallback offers a free-lane-exhausted turn to user-added providers
-// in pick order, emitting lane chunks exactly like a relay turn. Returns the
-// served namespaced id and outcome of the first provider that answered; ok is
-// false when every provider refused (the caller then reports the original
-// lane error).
-func (s *Server) providerFallback(ctx context.Context, picks []fallbackPick, unified []lane.Message, tools []lane.ToolDef, maxTokens int, agent string, emit func(lane.Chunk)) (lane.Usage, string, string, *lane.UpstreamError, bool) {
-	for _, pick := range picks {
-		usage, finish, uerr := relay.Complete(ctx, relay.Turn{
-			Provider: pick.p, Model: pick.model, Messages: unified,
-			Tools: tools, MaxTokens: maxTokens, Agent: agent,
-			// No rung is forwarded here on purpose: the fallback serves a
-			// different vendor's model than the one the caller picked, and a
-			// thinking level chosen for that model is not a statement about
-			// this one. The direct relay path carries the caller's own word.
-		}, emit)
-		s.recordRelay(ctx, pick.p, pick.model, agent, finish != "", usage, 0, finish, uerr)
-		if uerr == nil {
-			s.logCat(logx.CatRouting, "info", "免费车道耗尽，已回落自定义 API: %s/%s", pick.p.ID, pick.model)
-			return usage, finish, pick.p.ID + "/" + pick.model, nil, true
+// chainPicks resolves the configured chain into concrete steps, preserving the
+// user's order. Invalid entries (blank model, unknown or disabled provider)
+// are skipped with a log line; duplicates are dropped so one misconfiguration
+// cannot cost the same upstream call twice.
+func (s *Server) chainPicks(cfg *store.Config) []fallbackPick {
+	picks := make([]fallbackPick, 0, len(cfg.RelayChain))
+	seen := make(map[string]bool, len(cfg.RelayChain))
+	for _, link := range cfg.RelayChain {
+		model := strings.TrimSpace(link.Model)
+		if model == "" {
+			continue
 		}
-		s.logCat(logx.CatRouting, "warn", "回落候选 %s/%s 失败: %s", pick.p.ID, pick.model, uerr.Message)
+		var pick fallbackPick
+		switch link.Source {
+		case "lane":
+			pick = fallbackPick{source: "lane", model: model}
+		case "provider":
+			var p *store.Provider
+			for i := range cfg.Providers {
+				if cfg.Providers[i].ID == link.Provider {
+					p = &cfg.Providers[i]
+					break
+				}
+			}
+			if p == nil || !p.Enabled {
+				s.logCat(logx.CatRouting, "warn", "接力链跳过不可用的供应商: %s", link.Provider)
+				continue
+			}
+			pick = fallbackPick{source: "provider", p: p, model: model}
+		default:
+			continue
+		}
+		key := pick.source + "\x00" + pick.model
+		if pick.p != nil {
+			key = pick.source + "\x00" + pick.p.ID + "\x00" + pick.model
+		}
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		picks = append(picks, pick)
 	}
-	return lane.Usage{}, "", "", nil, false
+	return picks
 }
 
-// fallbackEnabled reports whether the one-way lane→provider fallback may run
-// for this request.
+// chainTurn carries the request facts every relay step re-issues on a
+// different model or provider.
+type chainTurn struct {
+	messages    []lane.Message
+	tools       []lane.ToolDef
+	maxTokens   int
+	agent       string
+	needs       lane.Needs
+	sessionSeed string
+	turnSeed    string
+}
+
+// chainResult is the outcome of walking the relay order.
+type chainResult struct {
+	Usage  lane.Usage
+	Finish string
+	Served string
+	// Err is the last step's failure, so the caller can report why the chain
+	// gave up instead of the original lane error.
+	Err *lane.UpstreamError
+	// Emitted means some step put output on the wire before failing: the turn
+	// is committed and must not be replayed on the next step.
+	Emitted bool
+	OK      bool
+}
+
+// runChain walks the relay steps in order, emitting lane chunks exactly like a
+// normal turn. It stops at the first step that answers, and also at the first
+// step that starts emitting and then fails — replaying the request elsewhere
+// would splice two answers together.
+func (s *Server) runChain(ctx context.Context, picks []fallbackPick, t chainTurn, emit func(lane.Chunk)) chainResult {
+	var res chainResult
+	for i, pick := range picks {
+		if ctx.Err() != nil {
+			break
+		}
+		saw := false
+		wrapped := func(c lane.Chunk) {
+			saw = true
+			emit(c)
+		}
+		if pick.source == "lane" {
+			out, uerr := s.Lane.Complete(ctx, lane.Request{
+				Model: pick.model, Messages: t.messages, Tools: t.tools,
+				MaxTokens: t.maxTokens, SessionSeed: t.sessionSeed, TurnSeed: t.turnSeed,
+				Agent: t.agent, Needs: t.needs, NoModelSwitch: true,
+			}, wrapped)
+			if uerr == nil {
+				served := out.ServedModel
+				if served == "" {
+					served = pick.model
+				}
+				s.logCat(logx.CatRouting, "info", "接力链第 %d 步已接管: %s", i+1, served)
+				return chainResult{Usage: out.Usage, Finish: out.Finish, Served: served, OK: true}
+			}
+			res.Err = uerr
+			if saw {
+				res.Emitted = true
+				return res
+			}
+			s.logCat(logx.CatRouting, "warn", "接力链第 %d 步 %s 失败: %s", i+1, pick.model, uerr.Message)
+			continue
+		}
+		usage, finish, uerr := relay.Complete(ctx, relay.Turn{
+			Provider: pick.p, Model: pick.model, Messages: t.messages,
+			Tools: t.tools, MaxTokens: t.maxTokens, Agent: t.agent,
+			// No thinking rung is forwarded: the step serves a different
+			// vendor's model than the caller picked, and a level chosen for
+			// that model says nothing about this one.
+		}, wrapped)
+		s.recordRelay(ctx, pick.p, pick.model, t.agent, finish != "", usage, 0, finish, uerr)
+		if uerr == nil {
+			if s.chainMode() {
+				s.logCat(logx.CatRouting, "info", "接力链第 %d 步已接管: %s/%s", i+1, pick.p.ID, pick.model)
+			} else {
+				// Keep the legacy wording for the one-way fallback: it is what
+				// the dashboard and the log docs describe.
+				s.logCat(logx.CatRouting, "info", "免费车道耗尽，已回落自定义 API: %s/%s", pick.p.ID, pick.model)
+			}
+			return chainResult{Usage: usage, Finish: finish, Served: pick.p.ID + "/" + pick.model, OK: true}
+		}
+		res.Err = uerr
+		if saw {
+			res.Emitted = true
+			return res
+		}
+		if s.chainMode() {
+			s.logCat(logx.CatRouting, "warn", "接力链第 %d 步 %s/%s 失败: %s", i+1, pick.p.ID, pick.model, uerr.Message)
+		} else {
+			s.logCat(logx.CatRouting, "warn", "回落候选 %s/%s 失败: %s", pick.p.ID, pick.model, uerr.Message)
+		}
+	}
+	return res
+}
+
+// fallbackEnabled reports whether any cross-source rescue may run for this
+// request: the user-ordered chain, or the legacy one-way lane→provider
+// fallback.
 func (s *Server) fallbackEnabled() bool {
 	cfg := s.Store.Config()
+	if cfg.RelayChainEnabled && len(cfg.RelayChain) > 0 {
+		return true
+	}
 	return cfg.LaneFallbackToProviders && len(cfg.Providers) > 0
 }
 

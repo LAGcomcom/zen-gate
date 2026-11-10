@@ -1073,13 +1073,25 @@ func (l *Lane) Complete(ctx context.Context, req Request, emit func(Chunk)) (Out
 			l.MarkThrottled(model, uerr.RetryAfter)
 		}
 		// No switch after content reached the caller (it would duplicate
-		// output), on egress-wide failures, or when the caller's own model
-		// error can't plausibly be answered by another model.
-		if !failover || sawAny || !switchableFailure(uerr) {
+		// output), or when the caller's own model error can't plausibly be
+		// answered by another model.
+		if sawAny || !switchableFailure(uerr) {
 			return out, uerr
 		}
-		next := l.nextSameModel(req.Needs, model, tried, req.Needs.PromptTokens)
-		if next == "" {
+		// With NoModelSwitch the gateway owns the cross-model order (its relay
+		// chain), so the lane must not pick a replacement model. It may still
+		// use the same-model channel twins when failover is on — that does not
+		// change what the user asked for — and otherwise reports the turn as
+		// exhausted so the chain can take over. Chain mode therefore works even
+		// when 限流自动切换 is off.
+		if !failover && !req.NoModelSwitch {
+			return out, uerr
+		}
+		next := ""
+		if failover {
+			next = l.nextSameModel(req.Needs, model, tried, req.Needs.PromptTokens)
+		}
+		if next == "" && !req.NoModelSwitch {
 			// No same-model channel left: fall back to the old behaviour of
 			// switching to whatever model can answer. That changes the model
 			// the user asked for, so it stays the second choice.
