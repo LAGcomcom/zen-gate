@@ -58,7 +58,7 @@ var upstreamSem = make(chan struct{}, maxConcurrentUpstream)
 
 // CallRecord is emitted after every upstream request (physical, not logical).
 type CallRecord struct {
-	Model     string `json:"model"`
+	Model string `json:"model"`
 	// Channel names the supplier bucket that served this physical request.
 	// Empty means an older build recorded it before channel attribution existed;
 	// the store keeps those under 未标注 rather than guessing a supplier.
@@ -146,11 +146,11 @@ type Lane struct {
 	// enabled rule that matches a request constrains which channels the lane may
 	// route that request through; the lane unions every match's allow/deny sets
 	// while picking a failover target. SetRouteWall replaces the whole slice.
-	routeWall []RouteRule
-	smartRouting       bool
-	strategy         string
-	ttft             TTFTSource
-	throttle         *ThrottleBook
+	routeWall    []RouteRule
+	smartRouting bool
+	strategy     string
+	ttft         TTFTSource
+	throttle     *ThrottleBook
 
 	// wbCacheKey asks the WorkBuddy gateways to bucket their prefix cache by
 	// our conversation id (prompt_cache_key). Off by default: the field is
@@ -1181,19 +1181,30 @@ func (l *Lane) Complete(ctx context.Context, req Request, emit func(Chunk)) (Out
 			l.MarkThrottled(model, uerr.RetryAfter)
 		}
 		// No switch after content reached the caller (it would duplicate
-		// output), on egress-wide failures, or when the caller's own model
-		// error can't plausibly be answered by another model.
-		if !failover || sawAny || !switchableFailure(uerr) {
+		// output), or when the caller's own model error can't plausibly be
+		// answered by another model.
+		if sawAny || !switchableFailure(uerr) {
+			return out, uerr
+		}
+		// With NoModelSwitch the gateway owns the cross-model order (its relay
+		// chain), so the lane must not pick a replacement model. It may still
+		// use the same-model channel twins when failover is on — that does not
+		// change what the user asked for — and otherwise reports the turn as
+		// exhausted so the chain can take over.
+		if !failover && !req.NoModelSwitch {
 			return out, uerr
 		}
 		allow, deny := l.routeAllowDeny(model)
-		next := l.nextSameModel(req.Needs, model, tried, req.Needs.PromptTokens, allow, deny)
-		if next == "" {
+		next := ""
+		if failover {
+			next = l.nextSameModel(req.Needs, model, tried, req.Needs.PromptTokens, allow, deny)
+		}
+		if next == "" && !req.NoModelSwitch {
 			// User-authored catch chain (issue #25): an explicit ranking beats
 			// the lane's own pick, but only after a same-model twin is ruled out.
 			next = l.nextChainModel(req.Needs, tried, allow, deny)
 		}
-		if next == "" {
+		if next == "" && !req.NoModelSwitch {
 			// No same-model channel and no user chain hit: fall back to the old
 			// behaviour of switching to whatever model can answer. That changes
 			// the model the user asked for, so it stays the last choice.

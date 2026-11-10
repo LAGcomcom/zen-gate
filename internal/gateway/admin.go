@@ -413,7 +413,7 @@ func (s *Server) adminState(w http.ResponseWriter) {
 		row := modelRow{
 			ID: m.ID, Name: m.Name, Blurb: m.Blurb, State: stateOrDefault(p), Detail: p.Detail, QuotaResetAt: p.QuotaResetAt,
 			Billing: laneBilling(m.ID),
-			TTFTMs: p.TTFTMs, LatencyMs: p.LatencyMs,
+			TTFTMs:  p.TTFTMs, LatencyMs: p.LatencyMs,
 			Vision: m.Vision, AudioInput: m.AudioInput, FileInput: m.FileInput,
 			Reasoning:     m.Reasoning,
 			SystemOne:     m.SystemOne,
@@ -538,6 +538,8 @@ func (s *Server) adminState(w http.ResponseWriter) {
 		"smartRouting":            cfg.SmartRouting,
 		"routingStrategy":         cfg.RoutingStrategy,
 		"laneFallbackToProviders": cfg.LaneFallbackToProviders,
+		"relayChainEnabled":       cfg.RelayChainEnabled,
+		"relayChain":              cfg.RelayChain,
 		"preferFreeProviders":     cfg.PreferFreeProviders,
 		"workBuddyCacheKey":       cfg.WorkBuddyCacheKey,
 		"autoTagEnabled":          cfg.AutoTagEnabled,
@@ -620,36 +622,38 @@ func todayTokens(days map[string]*store.DayStat, model string) int {
 
 func (s *Server) adminSettings(w http.ResponseWriter, r *http.Request) {
 	var in struct {
-		Port                    *int             `json:"port"`
-		DefaultMaxTokens        *int             `json:"defaultMaxTokens"`
-		DefaultEffort           *string          `json:"defaultEffort"`
-		DefaultModel            *string          `json:"defaultModel"`
-		ProbeIntervalMinutes    *int             `json:"probeIntervalMinutes"`
-		ExposeRegion            *bool            `json:"exposeRegion"`
-		CloseToTray             *bool            `json:"closeToTray"`
-		Notifications           *bool            `json:"notifications"`
-		ProxyMode               *string          `json:"proxyMode"`
-		ProxyURL                *string          `json:"proxyUrl"`
-		UpdateFeed              *string          `json:"updateFeed"`
-		AnnouncementFeed        *string          `json:"announcementFeed"`
-		StatsServerURL          *string          `json:"statsServerUrl"`
-		FailoverEnabled         *bool            `json:"failoverEnabled"`
-		FailoverMax             *int             `json:"failoverMax"`
-		ModelFallbackChain      []string        `json:"modelFallbackChain"`
-		RouteWall               []lane.RouteRule `json:"routeWall"`
-		SmartRouting            *bool            `json:"smartRouting"`
-		RoutingStrategy         *string          `json:"routingStrategy"`
-		LaneFallbackToProviders *bool            `json:"laneFallbackToProviders"`
-		PreferFreeProviders     *bool            `json:"preferFreeProviders"`
-		WorkBuddyCacheKey       *bool            `json:"workBuddyCacheKey"`
-		AutoTagEnabled          *bool            `json:"autoTagEnabled"`
-		OpenRefEnabled          *bool            `json:"openRefEnabled"`
-		WorkBuddyEnabled        *bool            `json:"workBuddyEnabled"`
-		CodeArtsEnabled         *bool            `json:"codeArtsEnabled"`
-		AllowLan                *bool            `json:"allowLan"`
-		LogCategories           *map[string]bool `json:"logCategories"`
-		LogLevel                *string          `json:"logLevel"`
-		LogKeepDays             *int             `json:"logKeepDays"`
+		Port                    *int               `json:"port"`
+		DefaultMaxTokens        *int               `json:"defaultMaxTokens"`
+		DefaultEffort           *string            `json:"defaultEffort"`
+		DefaultModel            *string            `json:"defaultModel"`
+		ProbeIntervalMinutes    *int               `json:"probeIntervalMinutes"`
+		ExposeRegion            *bool              `json:"exposeRegion"`
+		CloseToTray             *bool              `json:"closeToTray"`
+		Notifications           *bool              `json:"notifications"`
+		ProxyMode               *string            `json:"proxyMode"`
+		ProxyURL                *string            `json:"proxyUrl"`
+		UpdateFeed              *string            `json:"updateFeed"`
+		AnnouncementFeed        *string            `json:"announcementFeed"`
+		StatsServerURL          *string            `json:"statsServerUrl"`
+		FailoverEnabled         *bool              `json:"failoverEnabled"`
+		FailoverMax             *int               `json:"failoverMax"`
+		ModelFallbackChain      []string           `json:"modelFallbackChain"`
+		RouteWall               []lane.RouteRule   `json:"routeWall"`
+		SmartRouting            *bool              `json:"smartRouting"`
+		RoutingStrategy         *string            `json:"routingStrategy"`
+		LaneFallbackToProviders *bool              `json:"laneFallbackToProviders"`
+		RelayChainEnabled       *bool              `json:"relayChainEnabled"`
+		RelayChain              *[]store.ChainLink `json:"relayChain"`
+		PreferFreeProviders     *bool              `json:"preferFreeProviders"`
+		WorkBuddyCacheKey       *bool              `json:"workBuddyCacheKey"`
+		AutoTagEnabled          *bool              `json:"autoTagEnabled"`
+		OpenRefEnabled          *bool              `json:"openRefEnabled"`
+		WorkBuddyEnabled        *bool              `json:"workBuddyEnabled"`
+		CodeArtsEnabled         *bool              `json:"codeArtsEnabled"`
+		AllowLan                *bool              `json:"allowLan"`
+		LogCategories           *map[string]bool   `json:"logCategories"`
+		LogLevel                *string            `json:"logLevel"`
+		LogKeepDays             *int               `json:"logKeepDays"`
 	}
 	if err := decodeBody(r, &in); err != nil {
 		writeJSON(w, 400, map[string]any{"error": err.Error()})
@@ -811,6 +815,16 @@ func (s *Server) adminSettings(w http.ResponseWriter, r *http.Request) {
 		changed = true
 		dirty["laneFallbackToProviders"] = true
 	}
+	if in.RelayChainEnabled != nil {
+		cfg.RelayChainEnabled = *in.RelayChainEnabled
+		changed = true
+		dirty["relayChainEnabled"] = true
+	}
+	if in.RelayChain != nil {
+		cfg.RelayChain = normalizeChain(*in.RelayChain)
+		changed = true
+		dirty["relayChain"] = true
+	}
 	if in.PreferFreeProviders != nil {
 		cfg.PreferFreeProviders = *in.PreferFreeProviders
 		changed = true
@@ -933,6 +947,39 @@ func (s *Server) adminSettings(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, out)
 }
 
+// normalizeChain trims a submitted relay chain, drops links that cannot be
+// resolved, and caps its length so a hand-written request cannot grow the
+// config without bound. A lane link needs only a model id; a provider link
+// must also name a provider. Provider existence is checked at request time,
+// not here, so a chain survives the provider being edited or re-added.
+func normalizeChain(in []store.ChainLink) []store.ChainLink {
+	const maxLinks = 32
+	out := make([]store.ChainLink, 0, len(in))
+	for _, link := range in {
+		if len(out) >= maxLinks {
+			break
+		}
+		link.Source = strings.ToLower(strings.TrimSpace(link.Source))
+		link.Provider = strings.TrimSpace(link.Provider)
+		link.Model = strings.TrimSpace(link.Model)
+		if link.Model == "" {
+			continue
+		}
+		switch link.Source {
+		case "lane":
+			link.Provider = ""
+		case "provider":
+			if link.Provider == "" {
+				continue
+			}
+		default:
+			continue
+		}
+		out = append(out, link)
+	}
+	return out
+}
+
 // commitSettings publishes exactly the fields this request validated (dirty).
 // Publishing the whole snapshot instead — every field the handler owns, plus
 // SubsEnabled/SingBoxPath it never even parses — meant two overlapping
@@ -1001,6 +1048,12 @@ func (s *Server) commitSettings(next *store.Config, dirty map[string]bool) {
 		}
 		if dirty["laneFallbackToProviders"] {
 			c.LaneFallbackToProviders = next.LaneFallbackToProviders
+		}
+		if dirty["relayChainEnabled"] {
+			c.RelayChainEnabled = next.RelayChainEnabled
+		}
+		if dirty["relayChain"] {
+			c.RelayChain = next.RelayChain
 		}
 		if dirty["preferFreeProviders"] {
 			c.PreferFreeProviders = next.PreferFreeProviders

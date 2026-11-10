@@ -49,15 +49,15 @@ const (
 // model. It is the provider's claim, not a measurement: a live capability
 // probe outranks it, and an empty value means the provider published nothing.
 type ModelMeta struct {
-	Name           string   `json:"name,omitempty"` // the provider's display name
-	ContextWindow  int      `json:"contextWindow,omitempty"`
-	MaxOutput      int      `json:"maxOutput,omitempty"`
-	Vision         bool     `json:"vision,omitempty"`
-	Audio          bool     `json:"audio,omitempty"`
-	File           bool     `json:"file,omitempty"`
-	Reasoning      bool     `json:"reasoning,omitempty"`
-	InputDeclared  bool     `json:"inputDeclared,omitempty"`
-	OutputDeclared bool     `json:"outputDeclared,omitempty"`
+	Name           string `json:"name,omitempty"` // the provider's display name
+	ContextWindow  int    `json:"contextWindow,omitempty"`
+	MaxOutput      int    `json:"maxOutput,omitempty"`
+	Vision         bool   `json:"vision,omitempty"`
+	Audio          bool   `json:"audio,omitempty"`
+	File           bool   `json:"file,omitempty"`
+	Reasoning      bool   `json:"reasoning,omitempty"`
+	InputDeclared  bool   `json:"inputDeclared,omitempty"`
+	OutputDeclared bool   `json:"outputDeclared,omitempty"`
 	// Efforts are the thinking rungs the provider itself publishes, in the
 	// names that provider understands (QoderCN: low / medium / xhigh). A
 	// provider that states them owns the picker: the gateway advertises these
@@ -143,6 +143,16 @@ type Subscription struct {
 	Enabled bool   `json:"enabled"`
 }
 
+// ChainLink is one step of the user-ordered relay chain. Source is "lane" for
+// a free-lane model or "provider" for a user-added provider; Model is the
+// upstream id in both cases, and Provider names the provider id when Source is
+// "provider". Order in Config.RelayChain is the order the gateway tries them.
+type ChainLink struct {
+	Source   string `json:"source"`
+	Provider string `json:"provider,omitempty"`
+	Model    string `json:"model"`
+}
+
 type Config struct {
 	SchemaVersion int `json:"schemaVersion"`
 	Port          int `json:"port"`
@@ -193,6 +203,13 @@ type Config struct {
 	// back to user-added providers — these bill the user's own keys, so the
 	// default is off.
 	LaneFallbackToProviders bool `json:"laneFallbackToProviders,omitempty"`
+	// RelayChainEnabled replaces the built-in failover order (the lane's own
+	// model switch, then the provider catalog) with the user-ordered
+	// RelayChain below. In this mode the lane never switches models by itself:
+	// an exhausted turn walks the chain exactly as the user arranged it,
+	// crossing from free-lane models to provider models and back.
+	RelayChainEnabled bool        `json:"relayChainEnabled,omitempty"`
+	RelayChain        []ChainLink `json:"relayChain,omitempty"`
 	// PreferFreeProviders reorders fallback candidates so a supplier declared
 	// free is tried before a paid one, at the SAME capability rank. It never
 	// promotes an unknown-capability model over a known-capable one: saving a
@@ -281,7 +298,7 @@ type Config struct {
 	// the lane may route that request through. The lane applies the union of
 	// every matching rule's allow/deny sets while picking a failover target.
 	RouteWall []lane.RouteRule `json:"routeWall,omitempty"`
-	Window   WindowState    `json:"window"`
+	Window    WindowState      `json:"window"`
 }
 
 // ChannelStat is one supplier's token ledger for a day. It answers "how many
@@ -309,14 +326,14 @@ type DayStat struct {
 	// it that hit the upstream's prefix cache, and it used to live only in the
 	// 40-row Recent ring: the day buckets dropped it, so the only place a cache
 	// hit could ever be seen was a scrollback that ages out within the hour.
-	Input      int            `json:"input"`
-	Output     int            `json:"output"`
-	CacheRead  int            `json:"cacheRead,omitempty"`
-	CacheWrite int            `json:"cacheWrite,omitempty"`
-	Models     map[string]int             `json:"models,omitempty"`
-	ModelReqs  map[string]int             `json:"modelReqs,omitempty"`
-	Agents     map[string]int             `json:"agents,omitempty"`
-	Channels   map[string]*ChannelStat    `json:"channels,omitempty"`
+	Input      int                     `json:"input"`
+	Output     int                     `json:"output"`
+	CacheRead  int                     `json:"cacheRead,omitempty"`
+	CacheWrite int                     `json:"cacheWrite,omitempty"`
+	Models     map[string]int          `json:"models,omitempty"`
+	ModelReqs  map[string]int          `json:"modelReqs,omitempty"`
+	Agents     map[string]int          `json:"agents,omitempty"`
+	Channels   map[string]*ChannelStat `json:"channels,omitempty"`
 }
 
 // Stats is the persisted usage accounting.
@@ -914,6 +931,7 @@ func (c *Config) clone() *Config {
 	next.ModelPrefs = cloneMap(c.ModelPrefs)
 	next.HiddenAuto = cloneSlice(c.HiddenAuto)
 	next.Subscriptions = cloneSlice(c.Subscriptions)
+	next.RelayChain = cloneSlice(c.RelayChain)
 	next.WorkBuddyAccounts = cloneSlice(c.WorkBuddyAccounts)
 	next.ZCodeAccounts = cloneSlice(c.ZCodeAccounts)
 	next.TraeAccounts = cloneSlice(c.TraeAccounts)
@@ -1133,7 +1151,8 @@ func (s *Store) SetExtAccountEnabled(kind, id string, enabled bool) {
 }
 
 // UpsertWorkBuddyAccount inserts or replaces one account, matched by ID.
-func (s *Store) UpsertWorkBuddyAccount(acct lane.WBAccount) {	if strings.TrimSpace(acct.ID) == "" {
+func (s *Store) UpsertWorkBuddyAccount(acct lane.WBAccount) {
+	if strings.TrimSpace(acct.ID) == "" {
 		acct.ID = lane.WBAccountID(acct)
 	}
 	s.Mutate(func(c *Config) {
