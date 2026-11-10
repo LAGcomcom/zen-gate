@@ -92,6 +92,8 @@ func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request, rest string
 		s.adminLogsDownload(w, r)
 	case rest == "usage.csv" && r.Method == http.MethodGet:
 		s.adminUsageCSV(w, r)
+	case rest == "usage/channels.csv" && r.Method == http.MethodGet:
+		s.adminUsageChannelsCSV(w, r)
 	case rest == "tasks" && r.Method == http.MethodGet:
 		s.adminTasks(w, r)
 	case strings.HasPrefix(rest, "probe/") && r.Method == http.MethodPost:
@@ -132,6 +134,14 @@ func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request, rest string
 		s.adminWorkBuddyLoginPoll(w)
 	case rest == "workbuddy/checkin" && r.Method == http.MethodPost:
 		s.adminWorkBuddyCheckin(w)
+	case rest == "checkin/status" && r.Method == http.MethodGet:
+		s.adminCheckinStatus(w, r)
+	case rest == "checkin/all" && r.Method == http.MethodPost:
+		s.adminCheckinAll(w, r)
+	case rest == "checkin/one" && r.Method == http.MethodPost:
+		s.adminCheckinOne(w, r)
+	case rest == "checkin/refresh" && r.Method == http.MethodPost:
+		s.adminCheckinRefresh(w, r)
 	case rest == "workbuddy/logout" && r.Method == http.MethodPost:
 		s.adminWorkBuddyLogout(w, r)
 	case rest == "workbuddy/account/toggle" && r.Method == http.MethodPost:
@@ -182,6 +192,12 @@ func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request, rest string
 		s.adminProviderDelete(w, r)
 	case rest == "providers/models" && r.Method == http.MethodPost:
 		s.adminProviderModels(w, r)
+	case rest == "nodes/import" && r.Method == http.MethodPost:
+		s.adminNodesImport(w, r)
+	case rest == "nodes/health" && r.Method == http.MethodGet:
+		s.adminNodesHealth(w, r)
+	case rest == "nodes/export" && r.Method == http.MethodGet:
+		s.adminNodesExport(w, r)
 	case rest == "models/visibility" && r.Method == http.MethodPost:
 		s.adminModelVisibility(w, r)
 	case rest == "models/pref" && r.Method == http.MethodPost:
@@ -190,6 +206,16 @@ func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request, rest string
 		s.adminRetag(w)
 	case rest == "tags/probe" && r.Method == http.MethodPost:
 		s.adminCapabilityProbe(w, r)
+	case rest == "capability/audit" && r.Method == http.MethodGet:
+		s.adminCapabilityAudit(w, r)
+	case rest == "capability/lock" && r.Method == http.MethodPost:
+		s.adminCapabilityLock(w, r)
+	case rest == "capability/rollback" && r.Method == http.MethodPost:
+		s.adminCapabilityRollback(w, r)
+	case rest == "capability/calibrate" && r.Method == http.MethodPost:
+		s.adminCapabilityCalibrate(w, r)
+	case rest == "capability/refresh" && r.Method == http.MethodPost:
+		s.adminCapabilityRefresh(w, r)
 	case rest == "announcements/read" && r.Method == http.MethodPost:
 		s.adminAnnouncementRead(w, r)
 	case rest == "announcements/refresh" && r.Method == http.MethodPost:
@@ -224,13 +250,9 @@ func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request, rest string
 // guard) + loopback remote; mutating requests additionally require a
 // same-origin Origin/Referer when the client supplies one.
 func adminAllowed(w http.ResponseWriter, r *http.Request, mutating bool) bool {
-	host := r.Host
-	if i := strings.LastIndex(host, ":"); i >= 0 && !strings.Contains(host, "]") {
-		hname := host[:i]
-		if hname != "127.0.0.1" && hname != "localhost" && hname != "[::1]" && hname != "::1" {
-			writeJSON(w, 403, map[string]any{"error": "admin is loopback-only"})
-			return false
-		}
+	if !loopbackHost(r.Host) {
+		writeJSON(w, 403, map[string]any{"error": "admin is loopback-only"})
+		return false
 	}
 	remote := r.RemoteAddr
 	if h, _, err := net.SplitHostPort(remote); err == nil {
@@ -246,13 +268,39 @@ func adminAllowed(w http.ResponseWriter, r *http.Request, mutating bool) bool {
 			if v == "" {
 				continue
 			}
-			if !strings.Contains(v, "://127.0.0.1") && !strings.Contains(v, "://localhost") && !strings.Contains(v, "://[::1]") {
+			if !loopbackURL(v) {
 				writeJSON(w, 403, map[string]any{"error": "cross-site admin request rejected"})
 				return false
 			}
 		}
 	}
 	return true
+}
+
+// loopbackHost reports whether a Host header names this machine. Hosts without
+// a port used to skip the check entirely, which let DNS rebinding through on
+// default ports 80/443.
+func loopbackHost(host string) bool {
+	h := host
+	if split, _, err := net.SplitHostPort(host); err == nil {
+		h = split
+	}
+	switch h {
+	case "127.0.0.1", "localhost", "::1", "[::1]":
+		return true
+	}
+	return false
+}
+
+// loopbackURL parses an Origin/Referer value and compares its hostname exactly.
+// A substring test accepted http://127.0.0.1.attacker.com, defeating the CSRF
+// fence for any page served from a domain starting with a loopback name.
+func loopbackURL(v string) bool {
+	u, err := neturl.Parse(v)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") {
+		return false
+	}
+	return loopbackHost(u.Host)
 }
 
 func (s *Server) adminState(w http.ResponseWriter) {
@@ -281,6 +329,10 @@ func (s *Server) adminState(w http.ResponseWriter) {
 		QuotaEstimate int   `json:"quotaEstimate,omitempty"`
 		ThrottledAt   int64 `json:"throttledAt,omitempty"`
 		RecoverEta    int64 `json:"recoverEta,omitempty"`
+		// QuotaResetAt is the unix second a throttled model's free window
+		// reopens (parsed from the 429 reset clock). Separates a quota wall
+		// from a connectivity fault in the UI.
+		QuotaResetAt int64 `json:"quotaResetAt,omitempty"`
 		// Median of the persisted first-token ring (survives restarts).
 		TTFTMedMs int64 `json:"ttftMedMs,omitempty"`
 		TTFTCount int   `json:"ttftCount,omitempty"`
@@ -291,6 +343,14 @@ func (s *Server) adminState(w http.ResponseWriter) {
 		// empty-channel lane). Two channels may carry the same id; this is the
 		// attribution the merged list cannot show.
 		Channel string `json:"channel,omitempty"`
+		// Billing is the tier of the source serving this published id: free /
+		// freemium / paid / unknown. unknown is a first-class answer, never a
+		// missing field to fill with a guess.
+		Billing string `json:"billing,omitempty"`
+		// Family is the model identity this row shares with every other door
+		// to the same weights (lane channel, -free variant, provider prefix).
+		// The page groups by it: one card per model, sources inside.
+		Family string `json:"family,omitempty"`
 		// Hidden marks a model the user unchecked: servable but not advertised
 		// to agent pickers.
 		Hidden bool `json:"hidden,omitempty"`
@@ -351,8 +411,9 @@ func (s *Server) adminState(w http.ResponseWriter) {
 			continue
 		}
 		row := modelRow{
-			ID: m.ID, Name: m.Name, Blurb: m.Blurb, State: stateOrDefault(p), Detail: p.Detail,
-			TTFTMs: p.TTFTMs, LatencyMs: p.LatencyMs,
+			ID: m.ID, Name: m.Name, Blurb: m.Blurb, State: stateOrDefault(p), Detail: p.Detail, QuotaResetAt: p.QuotaResetAt,
+			Billing: laneBilling(m.ID),
+			TTFTMs:  p.TTFTMs, LatencyMs: p.LatencyMs,
 			Vision: m.Vision, AudioInput: m.AudioInput, FileInput: m.FileInput,
 			Reasoning:     m.Reasoning,
 			SystemOne:     m.SystemOne,
@@ -364,9 +425,10 @@ func (s *Server) adminState(w http.ResponseWriter) {
 				lv, _ := effortLadder(m, s.modalityCapsOf(m.ID), cfg)
 				return lv
 			}(),
-			Hidden:  hidden[m.ID],
-			Channel: ch,
+			Hidden:   hidden[m.ID],
+			Channel:  ch,
 			Channels: []string{ch},
+			Family:   lane.ModelFamily(m.ID),
 		}
 		if tag, ok := s.Store.ModelTagOf(m.ID); ok {
 			row.TagSource = tag.Source
@@ -406,6 +468,8 @@ func (s *Server) adminState(w http.ResponseWriter) {
 			row := modelRow{
 				ID: id, Name: mid, State: "custom", Custom: true,
 				ProviderID: p.ID,
+				Billing:    billingForModel(id, false, cfg),
+				Family:     lane.ModelFamily(id),
 				Blurb:      "自定义供应商「" + p.Name + "」",
 				Hidden:     hidden[id],
 			}
@@ -468,9 +532,17 @@ func (s *Server) adminState(w http.ResponseWriter) {
 		"autostart":               s.autostartState(),
 		"failoverEnabled":         cfg.FailoverEnabled,
 		"failoverMax":             cfg.FailoverMax,
+		"modelFallbackChain":      cfg.ModelFallbackChain,
+		"routeWall":               cfg.RouteWall,
+		"routeChannels":           lane.Channels(),
 		"smartRouting":            cfg.SmartRouting,
 		"routingStrategy":         cfg.RoutingStrategy,
 		"laneFallbackToProviders": cfg.LaneFallbackToProviders,
+		"relayChainEnabled":       cfg.RelayChainEnabled,
+		"relayChain":              cfg.RelayChain,
+		"tokenSaver":              cfg.TokenSaver,
+		"tokenSaverMaxChars":      cfg.TokenSaverMaxChars,
+		"preferFreeProviders":     cfg.PreferFreeProviders,
 		"workBuddyCacheKey":       cfg.WorkBuddyCacheKey,
 		"autoTagEnabled":          cfg.AutoTagEnabled,
 		"openRefEnabled":          cfg.OpenRefEnabled,
@@ -499,6 +571,7 @@ func (s *Server) adminState(w http.ResponseWriter) {
 		"channels":            s.Store.ChannelViews(),
 		"modelPrefs":          s.Store.Config().ModelPrefs,
 		"providerPresets":     relay.Presets,
+		"smallwebPresets":     relay.SmallwebPresets(),
 		"subscriptions":       s.subsState(),
 		"announcements":       activeAnnouncements,
 		"announcementArchive": endedAnnouncements,
@@ -551,33 +624,40 @@ func todayTokens(days map[string]*store.DayStat, model string) int {
 
 func (s *Server) adminSettings(w http.ResponseWriter, r *http.Request) {
 	var in struct {
-		Port                    *int             `json:"port"`
-		DefaultMaxTokens        *int             `json:"defaultMaxTokens"`
-		DefaultEffort           *string          `json:"defaultEffort"`
-		DefaultModel            *string          `json:"defaultModel"`
-		ProbeIntervalMinutes    *int             `json:"probeIntervalMinutes"`
-		ExposeRegion            *bool            `json:"exposeRegion"`
-		CloseToTray             *bool            `json:"closeToTray"`
-		Notifications           *bool            `json:"notifications"`
-		ProxyMode               *string          `json:"proxyMode"`
-		ProxyURL                *string          `json:"proxyUrl"`
-		UpdateFeed              *string          `json:"updateFeed"`
-		AnnouncementFeed        *string          `json:"announcementFeed"`
-		StatsServerURL          *string          `json:"statsServerUrl"`
-		FailoverEnabled         *bool            `json:"failoverEnabled"`
-		FailoverMax             *int             `json:"failoverMax"`
-		SmartRouting            *bool            `json:"smartRouting"`
-		RoutingStrategy         *string          `json:"routingStrategy"`
-		LaneFallbackToProviders *bool            `json:"laneFallbackToProviders"`
-		WorkBuddyCacheKey       *bool            `json:"workBuddyCacheKey"`
-		AutoTagEnabled          *bool            `json:"autoTagEnabled"`
-		OpenRefEnabled          *bool            `json:"openRefEnabled"`
-		WorkBuddyEnabled        *bool            `json:"workBuddyEnabled"`
-		CodeArtsEnabled         *bool            `json:"codeArtsEnabled"`
-		AllowLan                *bool            `json:"allowLan"`
-		LogCategories           *map[string]bool `json:"logCategories"`
-		LogLevel                *string          `json:"logLevel"`
-		LogKeepDays             *int             `json:"logKeepDays"`
+		Port                    *int               `json:"port"`
+		DefaultMaxTokens        *int               `json:"defaultMaxTokens"`
+		DefaultEffort           *string            `json:"defaultEffort"`
+		DefaultModel            *string            `json:"defaultModel"`
+		ProbeIntervalMinutes    *int               `json:"probeIntervalMinutes"`
+		ExposeRegion            *bool              `json:"exposeRegion"`
+		CloseToTray             *bool              `json:"closeToTray"`
+		Notifications           *bool              `json:"notifications"`
+		ProxyMode               *string            `json:"proxyMode"`
+		ProxyURL                *string            `json:"proxyUrl"`
+		UpdateFeed              *string            `json:"updateFeed"`
+		AnnouncementFeed        *string            `json:"announcementFeed"`
+		StatsServerURL          *string            `json:"statsServerUrl"`
+		FailoverEnabled         *bool              `json:"failoverEnabled"`
+		FailoverMax             *int               `json:"failoverMax"`
+		ModelFallbackChain      []string           `json:"modelFallbackChain"`
+		RouteWall               []lane.RouteRule   `json:"routeWall"`
+		SmartRouting            *bool              `json:"smartRouting"`
+		RoutingStrategy         *string            `json:"routingStrategy"`
+		LaneFallbackToProviders *bool              `json:"laneFallbackToProviders"`
+		RelayChainEnabled       *bool              `json:"relayChainEnabled"`
+		RelayChain              *[]store.ChainLink `json:"relayChain"`
+		TokenSaver              *bool              `json:"tokenSaver"`
+		TokenSaverMaxChars      *int               `json:"tokenSaverMaxChars"`
+		PreferFreeProviders     *bool              `json:"preferFreeProviders"`
+		WorkBuddyCacheKey       *bool              `json:"workBuddyCacheKey"`
+		AutoTagEnabled          *bool              `json:"autoTagEnabled"`
+		OpenRefEnabled          *bool              `json:"openRefEnabled"`
+		WorkBuddyEnabled        *bool              `json:"workBuddyEnabled"`
+		CodeArtsEnabled         *bool              `json:"codeArtsEnabled"`
+		AllowLan                *bool              `json:"allowLan"`
+		LogCategories           *map[string]bool   `json:"logCategories"`
+		LogLevel                *string            `json:"logLevel"`
+		LogKeepDays             *int               `json:"logKeepDays"`
 	}
 	if err := decodeBody(r, &in); err != nil {
 		writeJSON(w, 400, map[string]any{"error": err.Error()})
@@ -710,6 +790,18 @@ func (s *Server) adminSettings(w http.ResponseWriter, r *http.Request) {
 		changed = true
 		dirty["failoverMax"] = true
 	}
+	if in.ModelFallbackChain != nil {
+		cfg.ModelFallbackChain = in.ModelFallbackChain
+		s.Lane.SetModelFallbackChain(cfg.ModelFallbackChain)
+		changed = true
+		dirty["modelFallbackChain"] = true
+	}
+	if in.RouteWall != nil {
+		cfg.RouteWall = in.RouteWall
+		s.Lane.SetRouteWall(cfg.RouteWall)
+		changed = true
+		dirty["routeWall"] = true
+	}
 	if in.SmartRouting != nil {
 		cfg.SmartRouting = *in.SmartRouting
 		s.Lane.SetSmartRouting(cfg.SmartRouting)
@@ -726,6 +818,34 @@ func (s *Server) adminSettings(w http.ResponseWriter, r *http.Request) {
 		cfg.LaneFallbackToProviders = *in.LaneFallbackToProviders
 		changed = true
 		dirty["laneFallbackToProviders"] = true
+	}
+	if in.RelayChainEnabled != nil {
+		cfg.RelayChainEnabled = *in.RelayChainEnabled
+		changed = true
+		dirty["relayChainEnabled"] = true
+	}
+	if in.RelayChain != nil {
+		cfg.RelayChain = normalizeChain(*in.RelayChain)
+		changed = true
+		dirty["relayChain"] = true
+	}
+	if in.TokenSaver != nil {
+		cfg.TokenSaver = *in.TokenSaver
+		changed = true
+		dirty["tokenSaver"] = true
+	}
+	if in.TokenSaverMaxChars != nil {
+		cfg.TokenSaverMaxChars = *in.TokenSaverMaxChars
+		if cfg.TokenSaverMaxChars < 0 {
+			cfg.TokenSaverMaxChars = 0
+		}
+		changed = true
+		dirty["tokenSaverMaxChars"] = true
+	}
+	if in.PreferFreeProviders != nil {
+		cfg.PreferFreeProviders = *in.PreferFreeProviders
+		changed = true
+		dirty["preferFreeProviders"] = true
 	}
 	if in.WorkBuddyCacheKey != nil {
 		cfg.WorkBuddyCacheKey = *in.WorkBuddyCacheKey
@@ -752,9 +872,14 @@ func (s *Server) adminSettings(w http.ResponseWriter, r *http.Request) {
 		// The channel has no switch of its own: it serves when any account is
 		// enabled. The settings toggle therefore means "all accounts on/off",
 		// which is what a user expects from one switch on a pool card.
-		for i := range cfg.WorkBuddyAccounts {
-			cfg.WorkBuddyAccounts[i].Enabled = *in.WorkBuddyEnabled
+		// cfg is only a shallow copy of the published snapshot, so the slice is
+		// cloned before element writes: mutating the shared backing array would
+		// race every dashboard read of the live config.
+		accounts := append([]lane.WBAccount(nil), cfg.WorkBuddyAccounts...)
+		for i := range accounts {
+			accounts[i].Enabled = *in.WorkBuddyEnabled
 		}
+		cfg.WorkBuddyAccounts = accounts
 		changed = true
 		dirty["workBuddyEnabled"] = true
 	}
@@ -839,6 +964,39 @@ func (s *Server) adminSettings(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, out)
 }
 
+// normalizeChain trims a submitted relay chain, drops links that cannot be
+// resolved, and caps its length so a hand-written request cannot grow the
+// config without bound. A lane link needs only a model id; a provider link
+// must also name a provider. Provider existence is checked at request time,
+// not here, so a chain survives the provider being edited or re-added.
+func normalizeChain(in []store.ChainLink) []store.ChainLink {
+	const maxLinks = 32
+	out := make([]store.ChainLink, 0, len(in))
+	for _, link := range in {
+		if len(out) >= maxLinks {
+			break
+		}
+		link.Source = strings.ToLower(strings.TrimSpace(link.Source))
+		link.Provider = strings.TrimSpace(link.Provider)
+		link.Model = strings.TrimSpace(link.Model)
+		if link.Model == "" {
+			continue
+		}
+		switch link.Source {
+		case "lane":
+			link.Provider = ""
+		case "provider":
+			if link.Provider == "" {
+				continue
+			}
+		default:
+			continue
+		}
+		out = append(out, link)
+	}
+	return out
+}
+
 // commitSettings publishes exactly the fields this request validated (dirty).
 // Publishing the whole snapshot instead — every field the handler owns, plus
 // SubsEnabled/SingBoxPath it never even parses — meant two overlapping
@@ -893,6 +1051,12 @@ func (s *Server) commitSettings(next *store.Config, dirty map[string]bool) {
 		if dirty["failoverMax"] {
 			c.FailoverMax = next.FailoverMax
 		}
+		if dirty["modelFallbackChain"] {
+			c.ModelFallbackChain = next.ModelFallbackChain
+		}
+		if dirty["routeWall"] {
+			c.RouteWall = next.RouteWall
+		}
 		if dirty["smartRouting"] {
 			c.SmartRouting = next.SmartRouting
 		}
@@ -901,6 +1065,21 @@ func (s *Server) commitSettings(next *store.Config, dirty map[string]bool) {
 		}
 		if dirty["laneFallbackToProviders"] {
 			c.LaneFallbackToProviders = next.LaneFallbackToProviders
+		}
+		if dirty["relayChainEnabled"] {
+			c.RelayChainEnabled = next.RelayChainEnabled
+		}
+		if dirty["relayChain"] {
+			c.RelayChain = next.RelayChain
+		}
+		if dirty["tokenSaver"] {
+			c.TokenSaver = next.TokenSaver
+		}
+		if dirty["tokenSaverMaxChars"] {
+			c.TokenSaverMaxChars = next.TokenSaverMaxChars
+		}
+		if dirty["preferFreeProviders"] {
+			c.PreferFreeProviders = next.PreferFreeProviders
 		}
 		// Without this branch the WorkBuddy cache toggle was a phantom: the
 		// handler set the lane flag, answered {"changed":true}, and the next
@@ -1042,7 +1221,7 @@ func (s *Server) adminModelVisibility(w http.ResponseWriter, r *http.Request) {
 					dead[id] = true
 				}
 			}
-			keptAuto := cur.HiddenAuto[:0]
+			keptAuto := make([]string, 0, len(cur.HiddenAuto))
 			for _, h := range cur.HiddenAuto {
 				if dead[h] {
 					continue
@@ -1532,6 +1711,39 @@ func (s *Server) adminUsageCSV(w http.ResponseWriter, r *http.Request) {
 	cw.Flush()
 }
 
+// adminUsageChannelsCSV exports one row per (day, channel): the token ledger
+// split by supplier. usage.csv stays as it is (one row per day with model
+// columns), so existing spreadsheets keep their shape.
+func (s *Server) adminUsageChannelsCSV(w http.ResponseWriter, r *http.Request) {
+	days, _ := s.Store.SnapshotStats()
+	w.Header().Set("content-type", "text/csv; charset=utf-8")
+	w.Header().Set("content-disposition", `attachment; filename="zen-gate-usage-by-channel.csv"`)
+	dayKeys := make([]string, 0, len(days))
+	for k := range days {
+		dayKeys = append(dayKeys, k)
+	}
+	sort.Strings(dayKeys)
+	cw := csv.NewWriter(w)
+	_ = cw.Write([]string{"date", "channel", "requests", "failed", "input", "cacheRead", "cacheWrite", "output", "total"})
+	for _, day := range dayKeys {
+		d := days[day]
+		ids := make([]string, 0, len(d.Channels))
+		for id := range d.Channels {
+			ids = append(ids, id)
+		}
+		sort.Strings(ids)
+		for _, id := range ids {
+			c := d.Channels[id]
+			_ = cw.Write([]string{day, id,
+				strconv.Itoa(c.Requests), strconv.Itoa(c.Failed),
+				strconv.Itoa(c.Input), strconv.Itoa(c.CacheRead),
+				strconv.Itoa(c.CacheWrite), strconv.Itoa(c.Output),
+				strconv.Itoa(c.Input + c.Output)})
+		}
+	}
+	cw.Flush()
+}
+
 // adminExport downloads config.json. Keys are masked unless the caller asks
 // for ?secrets=1, because this file is the one people attach to a bug report —
 // migrating to another machine is the only case that needs the real ones.
@@ -2014,6 +2226,11 @@ func (s *Server) adminUpdateApply(w http.ResponseWriter) {
 		if err := update.Relaunch(); err != nil {
 			if s.logger != nil {
 				s.logger.Errorf("重启新版本失败: %v", err)
+			}
+			// The new exe could not start; put the previous binary back so the
+			// next launch is not a broken install.
+			if rbErr := update.Rollback(); rbErr != nil && s.logger != nil {
+				s.logger.Errorf("回滚旧版本失败: %v", rbErr)
 			}
 			return
 		}

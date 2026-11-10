@@ -133,9 +133,14 @@ func TestStickyConversationMovesOnQuotaBan(t *testing.T) {
 	// Once the ban expires the conversation keeps its rebound exit (sticky is
 	// sticky until the exit becomes unusable again) — but the lifted exit is
 	// back in rotation for fresh conversations.
+	//
+	// The comparison is by exit identity, not by node id: sticky is pinned to
+	// the egress IP, so a sibling behind the same IP may take over inside the
+	// exit without the conversation ever moving.
 	m.bans[banKey(first, "m")] = time.Now().Add(-time.Second)
-	if got := m.Pick("conv-1", "m"); got != second {
-		t.Errorf("conversation moved off its rebound exit: %s -> %s", second, got)
+	if got := m.Pick("conv-1", "m"); m.ExitKey(got) != m.ExitKey(second) {
+		t.Errorf("conversation moved off its rebound exit: %s (%s) -> %s (%s)",
+			second, m.ExitKey(second), got, m.ExitKey(got))
 	}
 	returned := false
 	for i := 0; i < 80; i++ {

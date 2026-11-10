@@ -490,6 +490,19 @@
   .mcard .mfoot { display:flex; justify-content:space-between; align-items:center; gap:8px;
     border-top:1px dashed var(--hairline-soft); padding-top:8px; margin-top:auto; }
 
+  /* 同名合并：一张卡 = 一个模型，来源在卡里展开。合并的是展示，
+     每条来源仍是可单独操作的实体（设为主用 / 复制 id）。 */
+  .msrcbtn { padding:1px 7px; font-size:11px; line-height:1.6; margin-left:6px;
+    border-radius:6px; color:var(--ink-dim); border:1px solid var(--hairline); }
+  .msrcbtn:hover { color:var(--accent); border-color:var(--accent); }
+  .msrclist { display:flex; flex-direction:column; gap:4px; margin:6px 0 2px;
+    padding:6px 8px; border-radius:8px; background:var(--panel-2, rgba(127,127,127,.07));
+    border:1px solid var(--hairline-soft); }
+  .msrcrow { display:flex; align-items:center; gap:6px; font-size:11.5px; min-width:0; flex-wrap:wrap; }
+  .msrcrow code { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; max-width:46%; }
+  .msrcrow .spacer { flex:1; }
+  .msrcrow .ghost { padding:1px 6px; font-size:11px; }
+
   /* ---- v1.9.1 模型页：吸顶 / 最佳选择 / 选用开关 / 主用 / 列表视图 ---- */
   .msticky { position:sticky; top:0; z-index:30; padding:8px 0 8px;
     background:color-mix(in srgb, var(--bg) 88%, transparent);
@@ -1045,8 +1058,8 @@ async function withButtonBusy(button, busyLabel, task){
   }
 }
 function statePill(st){ const c={available:"ok",unknown:"unknown","region-blocked":"region",throttled:"warn",unavailable:"bad",custom:"custom"}[st]||"unknown";
-  const t={available:"可用",unknown:"未探测","region-blocked":"地区受限",throttled:"限流中",unavailable:"不可用",custom:"自定义"}[st]||st;
-  const tip=st==="throttled"?" title=\"暂时限流，过一会儿可重试\"":"";
+  const t={available:"可用",unknown:"未探测","region-blocked":"地区受限",throttled:"额度用尽",unavailable:"不可用",custom:"自定义"}[st]||st;
+  const tip=st==="throttled"?" title=\"免费额度用尽（不是网关故障）—— 等窗口刷新或切其他模型\"":"";
   return `<span class="pill ${c}"${tip}>${t}</span>`; }
 const cssVar = (n,f) => (getComputedStyle(document.documentElement).getPropertyValue(n)||f).trim();
 
@@ -1599,11 +1612,17 @@ async function openTaskDrawer(model){
 document.addEventListener("keydown", e=>{ if(e.key === "Escape" && drawerFor) closeTaskDrawer(); });
 
 // 模型页筛选状态：渠道 × 状态 × 搜索词，纯前端过滤，跨刷新保留。
-let mf = { q: "", chan: "", state: "" };
+let mf = { q: "", chan: "", state: "", bill: "" };
 // 已展开的说明卡（key = 模型id+blurb前缀）：10s 轮询重渲染不塌回。
 const openBlurbs = new Set();
 // 视图模式：grid | list，记忆在 localStorage。
 let mview = localStorage.getItem("zengate.mview") || "grid";
+// 同名合并：一个模型在免费车道、-free 变体、自定义供应商各有一个 id，
+// 平铺出来就是七八条看着像不同模型的记录。合并后一张卡 = 一个模型，
+// 来源在卡里展开。默认开，关掉可看原始逐条清单。
+let mMerge = localStorage.getItem("zengate.mmerge") !== "0";
+// 展开了来源列表的模型族（key = family）。
+const openSrc = new Set();
 // 折叠的渠道节：CN 出口下可用为 0 的整组默认收起，手动展开记住。
 const foldedChans = new Set(JSON.parse(localStorage.getItem("zengate.mfold") || "[]"));
 
@@ -1648,17 +1667,39 @@ const CHAN_ICONS = {
 
 
 // 上游原始错误 → 一句人话；原文收进 title，不再把 JSON 印在卡片上。
+// fmtReset 把后端下发的重置时间戳转成「今天 09:10 / 明天 09:10」这类人话。
+function fmtReset(ts){
+  if(!ts) return "";
+  const d = new Date(ts*1000), now = new Date();
+  const pad = n => String(n).padStart(2,"0");
+  const hhmm = pad(d.getHours())+":"+pad(d.getMinutes());
+  if(d.toDateString()===now.toDateString()) return "今天 "+hhmm;
+  const tom = new Date(now); tom.setDate(now.getDate()+1);
+  if(d.toDateString()===tom.toDateString()) return "明天 "+hhmm;
+  return (d.getMonth()+1)+"/"+d.getDate()+" "+hhmm;
+}
+// 上游原始错误 → 一句人话；配额故障与连接故障在此明确分道扬镳：
+// 额度类（429 / 6004 / 窗口用尽）→ 橙色「额度用尽，X 点重置 · 建议切其他模型」
+// 连接类（节点死 / 代理拒 / 传输错）→ 红色「不可用」，由 statePill 红字承托。
 function humanDetail(m){
   const d = String(m.detail || "");
+  const rt = fmtReset(m.quotaResetAt);
+  const quotaTip = rt
+    ? `额度用尽，${rt} 重置 · 建议切其他模型`
+    : `额度用尽，等限额窗口刷新或换出口再试 · 建议切其他模型`;
+  if(d || rt){
+    const map = [
+      [/FreeUsageLimitError/i, quotaTip],
+      [/FreeTierError/i,       "上游客户端门拦下了这次请求"],
+      [/RegionError/i,         "当前出口被上游地区门拦下（海外出口可用）"],
+      [/\b6?00?4\b|60A4|window exceeded|窗口用尽/i, quotaTip],
+      [/quota|rate.?limit|额度|限流|频率|too many requests/i, quotaTip],
+      [/实时限额（等待恢复）/,   "暂时限流，等它恢复或手动重测"],
+      [/在列（免费池名单即判定）/, ""],
+    ];
+    for(const [re, msg] of map) if(re.test(d)) return msg;
+  }
   if(!d) return "";
-  const map = [
-    [/FreeUsageLimitError/i, "本出口的免费额度已用完，等限额窗口刷新或换出口再试"],
-    [/FreeTierError/i,       "上游客户端门拦下了这次请求"],
-    [/RegionError/i,         "当前出口被上游地区门拦下（海外出口可用）"],
-    [/实时限额（等待恢复）/,   "暂时限流，等它恢复或手动重测"],
-    [/在列（免费池名单即判定）/, ""],
-  ];
-  for(const [re, msg] of map) if(re.test(d)) return msg;
   if(d.trim().startsWith("{")){
     const t = (d.match(/"type"\s*:\s*"([A-Za-z]+(?:Error|Exception))"/) || [])[1];
     return t ? "上游返回 " + t + " · 悬浮看原文" : "上游返回了非预期响应 · 悬浮看原文";
@@ -1688,13 +1729,44 @@ async function setPrimary(id){
   if(j){ toast("已设为主用模型：" + id + "，正在重新注入已开启的 Agent"); refresh(); }
 }
 
-function renderModels(s){
+// 一条记录在「按名字合并」里的排序：先看状态（可用 > 未测 > 已被判死），
+// 同状态时自有车道优先于自定义供应商——车道那条会做跨模型故障转移。
+function famRank(m){
+  const st = m.state === "available" ? 0 : ((m.state === "unavailable" || m.state === "region-blocked") ? 2 : 1);
+  return st * 2 + (m.custom ? 1 : 0) + (m.hidden ? 0.5 : 0);
+}
+
+// mergeFamilies 把同一个模型的多条记录收成一条，代表条目带 sources。
+// 合并的只是「展示」：每个来源 id 仍然各自可点、可设为主用、可单独测试，
+// 后端路由也照旧认任何一个 id。
+function mergeFamilies(state){
+  const byFam = new Map();
+  for(const m of state.models || []){
+    const fam = m.family || m.id;
+    let g = byFam.get(fam);
+    if(!g){ g = { fam, best: m, srcs: [] }; byFam.set(fam, g); }
+    g.srcs.push(m);
+    if(famRank(m) < famRank(g.best)) g.best = m;
+  }
+  const models = [];
+  for(const g of byFam.values()){
+    const rep = Object.assign({}, g.best, { family: g.fam, sources: g.srcs.slice().sort((a,b)=>famRank(a)-famRank(b)) });
+    models.push(rep);
+  }
+  // 顺序仍按状态排：代表条目被打乱会让列表每次刷新都跳。
+  models.sort((a,b)=>(STATE_ORDER[a.state]??1)-(STATE_ORDER[b.state]??1));
+  return Object.assign({}, state, { models });
+}
+
+function renderModels(state){
+  const s = mMerge ? mergeFamilies(state) : state;
   const el = $("#page-models");
   // 任何输入没变就不重画：任务运行时的 1s 轮询只动数字的话，整页 innerHTML
   // 重建会闪、还会丢滚动位置。
-  const sig = JSON.stringify([mf, mview, [...foldedChans], s.probingModel, s.probeDone, s.probeTotal, s.channels,
+  const sig = JSON.stringify([mf, mview, mMerge, [...foldedChans], [...openSrc], s.probingModel, s.probeDone, s.probeTotal, s.channels,
     s.settings.defaultModel, s.models.map(m => [m.id, m.state, m.hidden, m.ttftMs, m.ttftMedMs,
-      m.quotaUsed, m.quotaEstimate, m.throttledAt, m.task && m.task.status, m.detail])]);
+      m.quotaUsed, m.quotaEstimate, m.throttledAt, m.task && m.task.status, m.detail,
+      (m.sources||[]).map(x=>x.id+":"+x.state).join(",")])]);
   if(el.dataset.sig === sig) return;
   const scrollY = window.scrollY;
   el.dataset.sig = sig;
@@ -1765,7 +1837,7 @@ function renderModels(s){
   // ---- 单行吸顶控制条：搜索/默认/筛选/批量/视图一行收完（窄窗自然折行） ----
   const chip = (kind, id, label, n) =>
     `<span class="mchip ${mf[kind]===id?"on":""}${n===0?" zero":""}" data-${kind}="${id}">${label}${n!=null?`<span class="cnt">${n}</span>`:""}</span>`;
-  const active = mf.q || mf.chan || mf.state;
+  const active = mf.q || mf.chan || mf.state || mf.bill;
   const toolbar = `<div class="msticky">
     <h2 class="pt">模型 <span class="sub">${avail}/${laneModels.length} 可用${customModels.length?` · 自定义 ${customProbed}/${customModels.length} 已实测`:""}${hiddenCount?` · 已隐藏 ${hiddenCount}`:""}</span></h2>
     <div class="mbar">
@@ -1782,6 +1854,11 @@ function renderModels(s){
       ${chip("state","throttled","限流",stateCounts.throttled)}
       ${chip("state","region-blocked","地区受限",stateCounts["region-blocked"])}
       ${chip("state","unavailable","不可用",stateCounts.unavailable)}
+      <span class="mchip ${!mf.bill?"on":""}" data-bill="" title="按提供该模型的渠道声明筛选；未声明不猜成免费">计费</span>
+      ${chip("bill","free","免费",cnt(s.models,m=>m.billing==="free"))}
+      ${chip("bill","freemium","部分免费",cnt(s.models,m=>m.billing==="freemium"))}
+      ${chip("bill","paid","付费",cnt(s.models,m=>m.billing==="paid"))}
+      ${chip("bill","unknown","未声明",cnt(s.models,m=>!m.billing||m.billing==="unknown"))}
       <span class="spacer"></span>
       <button class="ghost" id="hide-dead" title="把探测为不可用 / 地区受限的模型从 Agent 选择器隐藏；探到可用会自动解除">隐藏全部不可用</button>
       <button class="ghost" id="show-all" title="恢复全部隐藏的模型${hiddenCount?`（当前 ${hiddenCount} 个）`:""}">恢复显示</button>
@@ -1789,6 +1866,7 @@ function renderModels(s){
       <span class="muted" id="m-count" style="font-size:11.5px"></span>
       ${s.probeTotal ? `<span class="muted" id="m-progress" style="font-size:11.5px">已探测 <b>${s.probeDone}/${s.probeTotal}</b>${s.probingModel?` · 正在测 <code class="k">${esc(s.probingModel)}</code>`:""}</span>` : ""}
       ${active?`<span class="mchip on" id="m-clear" style="cursor:pointer">✕ 清除</span>`:""}
+      <span class="mchip ${mMerge?"on":""}" id="m-merge" title="同一个模型在免费车道、-free 变体和自定义供应商里各有一个 id。打开后一张卡=一个模型，来源在卡里展开；关掉看原始逐条清单（会看到 deepseek-v4.1-flash 出现四五次）">${mMerge?"✓ 同名合并":"同名合并"}</span>
       <span class="vtoggle" title="卡片看细节，列表快扫全量">
         <button data-view="grid" class="${mview==="grid"?"on":""}">卡片</button>
         <button data-view="list" class="${mview==="list"?"on":""}">列表</button>
@@ -1802,7 +1880,8 @@ function renderModels(s){
   const match = (m) =>
     (!mf.q || (m.id+" "+(m.name||"")).toLowerCase().includes(mf.q.toLowerCase()))
     && (!mf.chan || mf.chan === (m.custom ? "custom" : (m.channel || "zen")))
-    && (!mf.state || m.state === mf.state);
+    && (!mf.state || m.state === mf.state)
+    && (!mf.bill || mf.bill === (m.billing || "unknown"));
 
   const groups = [];
   // 每个渠道一组，顺序与名单都来自后端的 state.channels（与 lane.Channels 同源）。
@@ -1827,12 +1906,19 @@ function renderModels(s){
       <th>状态</th><th>模型</th><th>渠道</th><th>首字</th><th>典型</th><th>上下文</th><th>输出</th><th>能力</th><th style="text-align:right">操作</th>
     </tr></thead><tbody>`;
     for(const m of rows){
-      const chans2 = m.channels && m.channels.length ? m.channels : [m.custom?"custom":(m.channel||"zen")];
+      const chans2 = (() => {
+        const set = new Set();
+        for(const x of ((m.sources && m.sources.length) ? m.sources : [m])){
+          const cs = x.channels && x.channels.length ? x.channels : [x.custom ? "custom" : (x.channel || "zen")];
+          for(const c of cs) set.add(c);
+        }
+        return [...set];
+      })();
       const caps = [m.vision?"视":"", m.audioInput?"音":"", m.fileInput?"文":"", m.reasoning?"思":""].filter(Boolean).join(" ");
       const hd = humanDetail(m);
       listBody += `<tr>
         <td>${m.id === s.probingModel ? '<span class="pill warn">探测中</span>' : statePill(m.state)}${m.hidden?' <span class="pill hidsync">隐</span>':""}</td>
-        <td><b>${esc(m.name)}</b><div class="mono" style="opacity:.75">${esc(m.id)}</div>${hd?`<div style="font-size:11px;color:var(--ink-mute)">${esc(hd)}</div>`:""}</td>
+        <td><b>${esc(m.name)}</b><div class="mono" style="opacity:.75">${esc(m.id)}</div>${(m.sources||[]).length>1?`<div style="font-size:11px;color:var(--ink-mute)" title="同一份权重在这些 id 下都能用">同模型 ${m.sources.length} 个来源：${m.sources.map(x=>esc(x.id)).join(" · ")}</div>`:""}${hd?`<div style="font-size:11px;color:var(--ink-mute)">${esc(hd)}</div>`:""}</td>
         <td>${chans2.map(chanBadge).join(" ")}</td>
         <td>${m.ttftMs?(m.ttftMs/1000).toFixed(1)+"s":"—"}</td>
         <td>${m.ttftMedMs?(m.ttftMedMs/1000).toFixed(1)+"s":"—"}</td>
@@ -1858,10 +1944,10 @@ function renderModels(s){
       const shown = g.cards.filter(match);
       const disabled = !g.enabled;
       const availInGroup = g.cards.filter(m => m.state === "available" && !m.hidden).length;
-      if(!shown.length && (mf.q || mf.state || (mf.chan && mf.chan !== g.ch))) continue;
+      if(!shown.length && (mf.q || mf.state || mf.bill || (mf.chan && mf.chan !== g.ch))) continue;
       anyShown = anyShown || shown.length > 0;
       // 可用为 0 的渠道默认折叠（手动展开记住）；明确筛选时不折叠
-      const folded = !disabled && availInGroup === 0 && !mf.state && (!mf.chan || mf.chan === g.ch) && foldedChans.has(g.ch);
+      const folded = !disabled && availInGroup === 0 && !mf.state && !mf.bill && (!mf.chan || mf.chan === g.ch) && foldedChans.has(g.ch);
       body += `<div class="msec">
         <span class="dot ${disabled?"off":"on"}"></span>
         <span class="chname">${esc(g.meta.name)}</span>
@@ -1869,7 +1955,7 @@ function renderModels(s){
         <span class="chdesc">${esc(g.meta.desc)}</span>
         ${disabled?`<span class="pill region">已停用</span><button class="ghost" data-en="${g.ch}">启用</button>`
           :`<span class="chcount">${shown.length}/${g.cards.length} 个${availInGroup?` · 可用 ${availInGroup}`:""}${g.ch!=="custom"&&g.roster?` · 名单 ${g.roster}${g.refreshedAt?` · 更新 ${new Date(g.refreshedAt*1000).toTimeString().slice(0,5)}`:""}`:""}</span>
-            ${!disabled && availInGroup === 0 && !mf.state && (!mf.chan || mf.chan === g.ch) ? `<button class="ghost fold" data-fold="${g.ch}">${folded?"展开":"收起"}</button>`:""}`}
+            ${!disabled && availInGroup === 0 && !mf.state && !mf.bill && (!mf.chan || mf.chan === g.ch) ? `<button class="ghost fold" data-fold="${g.ch}">${folded?"展开":"收起"}</button>`:""}`}
       </div>`;
       if(disabled && !shown.length){
         body += `<div class="mempty">渠道已停用 —— 它的 ${g.roster||0} 个模型已从所有 Agent 选择器撤下；点「启用」按渠道文件里的名单恢复。</div>`;
@@ -1918,7 +2004,11 @@ function renderModels(s){
           }
           if(parts.length) quotaRow = `<div class="mquota">${parts.join("")}</div>`;
         }
-        const tags = (m.systemOne?'<span class="pill warn">判断模型</span>':"")
+        const billName = { free:"免费", freemium:"部分免费", paid:"付费", unknown:"计费未声明" };
+        const billTag = m.billing
+          ? `<span class="tag" title="来自提供该模型的渠道声明；未声明 = 不猜，别当成免费">${esc(billName[m.billing] || m.billing)}</span>`
+          : "";
+        const tags = billTag + (m.systemOne?'<span class="pill warn">判断模型</span>':"")
           + (m.vision?'<span class="tag">视觉</span>':"")
           + (m.audioInput?'<span class="tag">音频</span>':"")
           + (m.fileInput?'<span class="tag">文件</span>':"")
@@ -1933,11 +2023,41 @@ function renderModels(s){
         const hd = humanDetail(m);
         const rawTitle = rawDetailTitle(m);
         const isPrimary = s.settings.defaultModel === m.id;
+        // 同一份权重的其他入口。合并卡只代表「这个模型」，来源才是「从哪走」：
+        // 每条来源保留自己的 id、渠道、状态与操作，合并不隐藏任何一条。
+        const srcs = m.sources || [];
+        const chanUnion = (() => {
+          const set = new Set();
+          for(const x of (srcs.length ? srcs : [m])){
+            const cs = x.channels && x.channels.length ? x.channels : [x.custom ? "custom" : (x.channel || "zen")];
+            for(const c of cs) set.add(c);
+          }
+          return [...set];
+        })();
+        const srcKey = m.family || m.id;
+        const srcOpen = openSrc.has(srcKey);
+        const srcChip = srcs.length > 1
+          ? `<button class="ghost msrcbtn" data-src="${esc(srcKey)}" title="同一份模型权重还有哪些入口。点开可看每条来源的 id 与状态，单独设为主用或测试">${srcs.length} 个来源 ${srcOpen?"▲":"▼"}</button>`
+          : "";
+        const srcList = srcs.length > 1 && srcOpen
+          ? `<div class="msrclist">${srcs.map(x=>{
+              const xch = x.channels && x.channels.length ? x.channels : [x.custom?"custom":(x.channel||"zen")];
+              return `<div class="msrcrow">
+                ${xch.map(chanBadge).join(" ")}
+                <code class="mono">${esc(x.id)}</code>
+                ${statePill(x.state)}${x.hidden?'<span class="pill hidsync">隐</span>':""}
+                <span class="spacer"></span>
+                ${s.settings.defaultModel === x.id ? '<span class="pill ok">主用中</span>' : `<button class="ghost" data-primary="${esc(x.id)}">设为主用</button>`}
+                <button class="ghost mcopy" data-copy="${esc(x.id)}">复制 id</button>
+              </div>`;
+            }).join("")}</div>`
+          : "";
         card.innerHTML = `
           <div class="mhead">
             <button class="starbtn ${isPrimary?"on":""}" data-primary="${esc(m.id)}" title="${isPrimary?"当前主用模型，点一下取消":"设为主用（默认模型 + 出现在选择器）"}">★</button>
             <span class="mname" title="${esc(m.name)}">${esc(m.name)}</span>${pill}</div>
-          <div class="mid">${(m.channels&&m.channels.length?m.channels:[m.custom?"custom":(m.channel||"zen")]).map(chanBadge).join(" ")} <span style="opacity:.85">${esc(m.id)}</span></div>
+          <div class="mid">${chanUnion.map(chanBadge).join(" ")} <span style="opacity:.85">${esc(m.id)}</span>${srcChip}</div>
+          ${srcList}
           ${m.blurb && !sharedBlurbSet.has(m.blurb)?`<div class="mblurb${openBlurbs.has(m.id+"|"+m.blurb.slice(0,20))?" open":""}" data-bk="${esc(m.id)}|${esc(m.blurb.slice(0,20))}" title="${esc(m.blurb)}">${esc(m.blurb)}</div>`:""}
           ${meta.length?`<div class="mmeta">${meta.join("")}</div>`:""}
           ${(tags||eff)?`<div class="mtags">${tags}${eff?`<span class="meff">${eff}</span>`:""}</div>`:""}
@@ -1956,7 +2076,7 @@ function renderModels(s){
       }
       body += `</div>`;
     }
-    if(!anyShown && (mf.q || mf.chan || mf.state)){
+    if(!anyShown && (mf.q || mf.chan || mf.state || mf.bill)){
       body += `<div class="mempty">没有匹配的模型 —— 换个筛选条件试试</div>`;
     }
   }
@@ -1966,41 +2086,55 @@ function renderModels(s){
 
   el.querySelector("#reprobe").onclick = async ()=>{ toast("探测中，稍后刷新…"); await api("/reprobe", {}); setTimeout(refresh, 4000); };
   el.querySelector("#hide-dead").onclick = async ()=>{
-    const ids = s.models.filter(m=>!m.hidden && (m.state==="unavailable"||m.state==="region-blocked")).map(m=>m.id);
+    // 用未合并的原始清单：合并视图里被并掉的来源也得一起隐藏，否则它们
+    // 会从别的分组里冒出来。
+    const ids = state.models.filter(m=>!m.hidden && (m.state==="unavailable"||m.state==="region-blocked")).map(m=>m.id);
     if(!ids.length){ toast("没有探测为不可用的模型"); return; }
     const j = await api("/models/visibility", { ids, hidden: true, auto: true });
     if(j){ toast("已隐藏 " + ids.length + " 个（探到可用会自动恢复）；正在重新注入已开启的 Agent"); refresh(); }
   };
   el.querySelector("#show-all").onclick = async ()=>{
-    const ids = s.models.filter(m=>m.hidden).map(m=>m.id);
+    const ids = state.models.filter(m=>m.hidden).map(m=>m.id);
     if(!ids.length){ toast("没有隐藏中的模型"); return; }
     const j = await api("/models/visibility", { ids, hidden: false });
     if(j){ toast("已全部恢复显示"); refresh(); }
   };
   el.querySelectorAll(".mchip[data-chan]").forEach(ch=>{
-    ch.onclick = ()=>{ mf.chan = ch.dataset.chan; renderModels(s); };
+    ch.onclick = ()=>{ mf.chan = ch.dataset.chan; renderModels(state); };
   });
   el.querySelectorAll(".mchip[data-state]").forEach(ch=>{
-    ch.onclick = ()=>{ mf.state = ch.dataset.state; renderModels(s); };
+    ch.onclick = ()=>{ mf.state = ch.dataset.state; renderModels(state); };
+  });
+  el.querySelectorAll(".mchip[data-bill]").forEach(ch=>{
+    ch.onclick = ()=>{ mf.bill = ch.dataset.bill; renderModels(state); };
   });
   const clearEl = el.querySelector("#m-clear");
-  if(clearEl) clearEl.onclick = ()=>{ mf = { q:"", chan:"", state:"" }; renderModels(s); };
+  if(clearEl) clearEl.onclick = ()=>{ mf = { q:"", chan:"", state:"", bill:"" }; renderModels(state); };
   el.querySelectorAll(".vtoggle button").forEach(b=>{
-    b.onclick = ()=>{ mview = b.dataset.view; localStorage.setItem("zengate.mview", mview); renderModels(s); };
+    b.onclick = ()=>{ mview = b.dataset.view; localStorage.setItem("zengate.mview", mview); renderModels(state); };
   });
+  const mergeEl = el.querySelector("#m-merge");
+  if(mergeEl) mergeEl.onclick = ()=>{ mMerge = !mMerge; localStorage.setItem("zengate.mmerge", mMerge?"1":"0"); renderModels(state); };
   el.querySelectorAll("[data-fold]").forEach(b=>{
     b.onclick = ()=>{
       const ch = b.dataset.fold;
       if(foldedChans.has(ch)) foldedChans.delete(ch); else foldedChans.add(ch);
       localStorage.setItem("zengate.mfold", JSON.stringify([...foldedChans]));
-      renderModels(s);
+      renderModels(state);
     };
   });
   el.querySelectorAll("[data-primary]").forEach(b=>{
     b.onclick = ()=>setPrimary(b.dataset.primary);
   });
+  el.querySelectorAll(".msrcbtn").forEach(b=>{
+    b.onclick = ()=>{
+      const k = b.dataset.src;
+      if(openSrc.has(k)) openSrc.delete(k); else openSrc.add(k);
+      renderModels(state);
+    };
+  });
   const qEl = el.querySelector("#m-q");
-  qEl.oninput = ()=>{ mf.q = qEl.value; renderModels(s); const n = el.querySelector("#m-q"); n.focus(); n.setSelectionRange(n.value.length, n.value.length); };
+  qEl.oninput = ()=>{ mf.q = qEl.value; renderModels(state); const n = el.querySelector("#m-q"); n.focus(); n.setSelectionRange(n.value.length, n.value.length); };
   el.querySelector("#m-def").onchange = async (ev)=>{
     const j = await api("/settings", { defaultModel: ev.target.value });
     if(j) toast(ev.target.value ? "默认模型已更新，正在重新注入已开启的 Agent" : "已恢复按列表第一个作为默认");
@@ -2044,7 +2178,7 @@ function renderModels(s){
         const r = j.result;
         const sec = r.ttftMs ? "首字 " + (r.ttftMs/1000).toFixed(1) + "s" : "";
         if(r.state==="available") toast("✓ 可用" + (sec?" · "+sec:""));
-        else if(r.state==="throttled") toast("暂时限流·可重试 —— 请求在生成前就被拒绝，没有首字数据" + (r.detail?" · "+humanDetail({detail:r.detail}):""));
+        else if(r.state==="throttled") toast("额度用尽·可重试或切其他模型 —— 免费额度窗口已满，不是网关故障" + (r.quotaResetAt?(" · "+fmtReset(r.quotaResetAt)+" 重置"):(r.detail?" · "+humanDetail({detail:r.detail}):"")));
         else if(r.state==="unavailable") toast("不可用 · " + (r.detail||""));
         else toast("探测未成功 · " + (r.detail||"上游无响应，稍后再试"));
       }
@@ -2080,8 +2214,9 @@ let pvSelected = new Set();  // 勾选要入库的模型
 let pvEditSaved = [];        // 编辑前的已保存模型（用于预勾选）
 /* 预设区状态：常用/全部 + 搜索。16 个预设不再同时全铺，
    10 秒轮询重绘 chips 时靠这两个变量保持用户眼前的视图。 */
-let pvTab = "fav";
+let pvTab = "discover";   // 本地发现优先：挂小众、不挂大众
 let pvQ = "";
+let pvSmallwebAll = [];   // 本地爬取发现的小众候选（待验证）
 let pvPresetsAll = [];
 let pvPresetsSig = "";
 const PV_FAVS = ["nvidia-nim", "gemini", "github-models", "groq", "siliconflow", "modelscope"];
@@ -2362,13 +2497,39 @@ function renderProviders(s){
         <div class="row" style="row-gap:8px">
           <input class="msearch" id="pv-psearch" placeholder="搜索预设名称 / 域名…">
           <div class="seg" id="pv-ptab">
-            <button data-v="fav" class="on">常用</button>
+            <button data-v="discover" class="on">本地发现</button>
+            <button data-v="fav">常用</button>
             <button data-v="all">全部</button>
           </div>
           <span class="muted" style="font-size:12px" id="pv-pcount"></span>
         </div>
         <div class="pchips" id="pv-presets" style="margin-top:10px"></div>
         <div class="muted" style="font-size:11.5px;margin-top:8px" id="pv-preset-hint"></div>
+      </div>
+
+      <div class="card" id="set-nodes">
+        <h3>节点清单批量注入 <span class="muted" style="font-size:11px">一次粘贴多个 API · 免费/付费与额度结构化 · 导出永不带密钥</span></h3>
+        <div class="muted" style="font-size:12px;margin-bottom:8px">
+          「接更多 API」是数据活，不是写代码：把清单贴进来一次入库。三种写法可混用 ——
+          ① <code class="k">名称 | Base URL | 协议 | 计费 | API Key</code>（后面几列可省，制表符同样作分隔，<code class="k">#</code> 开头是注释）；
+          ② 一行一个裸 URL，名称取域名；③ 导出的 JSON 数组（额度、模型清单、注册页、签到与余额声明这些字段只有 JSON 形式带得进来）。
+          计费取 <code class="k">free / freemium / paid / unknown</code> 或「免费 / 部分免费 / 付费 / 未知」，不写就是 unknown，绝不猜；额度数字一律可选，0 表示「未声明」而不是「无限」。
+          签到与余额也是声明：<code class="k">checkin:"daily"</code>（登记为待接入，绝不假装已签）、<code class="k">checkinResetHour:8</code>（重置点，默认 0 点）、
+          <code class="k">balanceUrl</code> + <code class="k">balancePath</code>（只读 GET 与点分取数路径，如 <code class="k">data.credits</code>）、<code class="k">balanceKind</code>（显示口径，如「积分余额」）。
+          余额端点只做 GET、永不签到；声明了 balanceUrl 就必须给 balancePath，字段名不猜。只有与 Base URL 同源的余额端点才会携带 API Key，外部 URL 一律不带密钥。
+          同一端点重复导入只刷新声明字段，名称、Key、模型、启用状态一律保持原样；坏行单独报告，好行照常入库。导出清单刻意不含任何密钥，可以直接复制到另一台机器再粘回来。
+          <b>节点切换无感</b>：同一个模型在多个节点都有时，某节点在吐出内容前失败，请求内自动改道到下一个节点，客户端只会收到一次正常回答；失败节点短时冷却，后续请求直接绕开，恢复后自动回到首选。已输出内容后不再切换（避免重复输出）。
+        </div>
+        <textarea id="nodes-text" rows="7" placeholder="# 名称 | Base URL | 协议 | 计费 | API Key&#10;Groq | https://api.groq.com/openai/v1 | openai | free&#10;https://api.cerebras.ai/v1" style="width:100%;box-sizing:border-box;background:var(--panel-2);border:1px solid var(--hairline);color:var(--ink);border-radius:6px;padding:8px 10px;font-family:var(--mono);font-size:12px;line-height:1.55;resize:vertical"></textarea>
+        <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:8px">
+          <button class="ghost" id="btn-nodes-preview">预览（不写入）</button>
+          <button class="act" id="btn-nodes-import">导入清单</button>
+          <button class="ghost" id="btn-nodes-export">导出当前清单</button>
+          <button class="ghost" id="btn-nodes-clear">清空输入框</button>
+          <span class="muted" id="nodes-hint" style="font-size:12px"></span>
+        </div>
+        <div id="nodes-result" style="margin-top:10px"></div>
+        <div id="nodes-health" style="margin-top:10px"></div>
       </div>
 
       <!-- 渠道弹窗：一张卡 = 一个渠道。每个渠道的管理面常驻在 .chan-pane 里
@@ -2580,6 +2741,69 @@ function renderProviders(s){
         pvRenderPresets();
       };
     });
+    // 节点清单批量注入：一次绑定。预览是真·零写入（后端在 Mutate 之前返回），
+    // 导入只增量刷新声明字段，坏行单独列出、不影响好行。
+    const nodesCard = el.querySelector("#set-nodes");
+    if (nodesCard && !nodesCard.dataset.bound) {
+      nodesCard.dataset.bound = "1";
+      const nodesText = el.querySelector("#nodes-text");
+      const nodesResult = el.querySelector("#nodes-result");
+      const nodesHint = el.querySelector("#nodes-hint");
+      const nodesHealth = el.querySelector("#nodes-health");
+      const actLabel = { add:"新增", update:"刷新声明", skip:"跳过" };
+      // 无感切换的运行状态：哪个节点在冷却、被切走过几次、什么时候恢复。
+      // 冷却只存在内存里，重启即清零，不会永久停用任何节点。
+      const loadNodesHealth = async () => {
+        const j = await api("/nodes/health");
+        if (!j || !nodesHealth) return;
+        const rows = j.rows || [];
+        const cooling = rows.filter(x => !x.healthy);
+        const bits = cooling.map(x => `<code class="k">${esc(x.name)}</code> 连续失败 ${x.fails} 次 · 剩余 ${Math.ceil(x.coolingMs/1000)}s · 累计被切走 ${x.switchesAway||0} 次${x.lastError ? " · "+esc(x.lastError) : ""}`);
+        nodesHealth.innerHTML = `<div style="border-top:1px solid var(--hairline);padding-top:8px;font-size:12px">
+          节点健康：<b>${rows.length}</b> 个节点 · 健康 <b>${rows.length-cooling.length}</b> · 冷却 <b>${cooling.length}</b>
+          <span class="muted" style="font-size:11.5px">（单请求最多切换 ${j.maxSwitches} 次 · 失败预算 ${j.budgetSeconds}s · 冷却上限 ${Math.round(j.cooldownMaxSeconds/60)} 分钟 · 已输出内容后不切换）</span>
+        </div>` + (bits.length ? `<div style="font-size:11.5px;margin-top:5px">${bits.join("<br>")}</div>` : "");
+      };
+      loadNodesHealth();
+      const showNodesResult = (j, preview) => {
+        const items = j.items || [], problems = j.problems || [];
+        const rows = items.slice(0, 20).map(it => `
+          <div style="display:flex;gap:8px;align-items:baseline;font-size:12px;padding:3px 0;border-bottom:1px solid var(--hairline)">
+            <span style="min-width:60px;color:var(--ink-mute)">${esc(actLabel[it.action] || it.action)}</span>
+            <code class="k">${esc(it.name)}</code>
+            <span class="muted" style="font-size:11.5px">${esc(it.reason || "")}</span>
+          </div>`).join("");
+        const more = items.length > 20 ? `<div class="muted" style="font-size:11.5px;margin-top:4px">…另有 ${items.length - 20} 条</div>` : "";
+        const bad = problems.length ? `<div style="margin-top:8px;color:var(--bad);font-size:12px">
+            <b>${problems.length} 行未入库</b>（好行不受影响）：<br>${problems.map(x=>esc(x)).join("<br>")}</div>` : "";
+        nodesResult.innerHTML = `<div style="font-size:12px;margin-bottom:6px">
+            ${preview ? "预览结果（未写入）" : "已写入"}：新增 <b>${Number(j.added)||0}</b> · 刷新 <b>${Number(j.updated)||0}</b> · 跳过 <b>${Number(j.skipped)||0}</b></div>
+          ${rows}${more}${bad}`;
+      };
+      const runNodes = async (preview) => {
+        const text = nodesText.value;
+        if (!text.trim()) { toast("先粘贴节点清单"); return; }
+        const j = await api("/nodes/import", { text, dryRun: !!preview });
+        if (!j) return;
+        showNodesResult(j, preview);
+        nodesHint.textContent = preview ? "仅为预览，配置没有任何改动" : "清单已合并入库";
+        if (!preview) { toast("节点清单已导入"); refresh(); loadNodesHealth(); }
+      };
+      el.querySelector("#btn-nodes-preview").onclick = ()=> runNodes(true);
+      el.querySelector("#btn-nodes-import").onclick = ()=> runNodes(false);
+      el.querySelector("#btn-nodes-clear").onclick = ()=>{
+        nodesText.value = ""; nodesResult.innerHTML = ""; nodesHint.textContent = "";
+      };
+      el.querySelector("#btn-nodes-export").onclick = async ()=>{
+        const j = await api("/nodes/export");
+        if (!j) return;
+        const nodes = j.nodes || [];
+        nodesText.value = JSON.stringify(nodes, null, 2);
+        nodesResult.innerHTML = "";
+        nodesHint.textContent = "已导出 " + nodes.length + " 个节点的无密钥清单，可直接复制或在别的机器粘贴回导";
+        toast("清单已填入输入框（不含密钥）");
+      };
+    }
     el.querySelector("#pv-form-toggle").onclick = ()=>{ pvResetForm(); pvSetFormOpen(true); };
     el.querySelector("#pv-fetch").onclick = async ()=>{
       const name = el.querySelector("#pv-name").value.trim();
@@ -2655,6 +2879,7 @@ function renderProviders(s){
   }
   // 预设（后端下发，前端不写死）：归「供应商预设」节，搜索 / 常用切换见 pvRenderPresets
   pvPresetsAll = s.providerPresets || [];
+  pvSmallwebAll = s.smallwebPresets || [];
   pvRenderPresets();
   renderProviderList(s);
   renderWorkBuddyCard();
@@ -3301,25 +3526,38 @@ function paintLanePane(key){
 function pvRenderPresets(){
   const el = $("#page-providers"); if(!el) return;
   const box = el.querySelector("#pv-presets"); if(!box) return;
-  const presets = pvPresetsAll;
   const q = pvQ.trim().toLowerCase();
+  const isDiscover = (pvTab === "discover");
+  const presets = isDiscover ? pvSmallwebAll : pvPresetsAll;
   const list = q
     ? presets.filter(p => (p.name + " " + p.id + " " + hostOf(p.baseUrl)).toLowerCase().includes(q))
     : (pvTab === "fav" ? presets.filter(p => PV_FAVS.includes(p.id)) : presets);
   const sig = pvTab + "|" + q + "|" + presets.map(p=>p.id).join(",");
   if(sig !== pvPresetsSig){
     pvPresetsSig = sig;
-    box.innerHTML = list.map(p=>`
-      <div class="pchip" data-pid="${esc(p.id)}" title="点击填充表单 · ${esc(p.note||"")}">
+    const badge = (txt,col)=>`<span style="font-size:10px;color:${col};border:1px solid ${col};border-radius:4px;padding:0 4px;margin-left:4px">${txt}</span>`;
+    box.innerHTML = list.map(p=>{
+      if(isDiscover){
+        const conf = p.confidence || "low";
+        const col = conf==="high"?"var(--ok)":conf==="medium"?"var(--warn)":"var(--ink-mute)";
+        return `<div class="pchip" data-pid="${esc(p.id)}" title="本地爬取发现 · 可用性未验证 · 添加后先点「探测」确认">
+          <span class="pn">${esc(p.name)}</span><span class="pu">${esc(hostOf(p.baseUrl))}</span>
+          ${badge("待验证·"+conf, col)}</div>`;
+      }
+      const tTxt = p.tier==="niche"?"小众":p.tier==="common"?"常见":"";
+      const tCol = p.tier==="niche"?"var(--ok)":"var(--ink-mute)";
+      return `<div class="pchip" data-pid="${esc(p.id)}" title="点击填充表单 · ${esc(p.note||"")}">
         <span class="pn">${esc(p.name)}</span><span class="pu">${esc(hostOf(p.baseUrl))}</span>
+        ${tTxt?badge(tTxt,tCol):""}
         ${p.note?`<span class="pnote">${esc(p.note)}</span>`:""}
-      </div>`).join("")
-      || `<div class="muted" style="font-size:12.5px">${q ? "没有匹配的预设——换个词试试，或直接在上方表单填 Base URL" : "这一组暂时没有预设"}</div>`;
+      </div>`;
+    }).join("")
+      || `<div class="muted" style="font-size:12.5px">${q ? "没有匹配的预设——换个词试试，或直接在上方表单填 Base URL" : isDiscover ? "本地爬取暂未发现疑似小众 AI 源——netforce 在持续爬，过一会儿刷新就有" : "这一组暂时没有预设"}</div>`;
     box.querySelectorAll(".pchip").forEach(c=>{
       c.onclick = ()=>{
-        const p = presets.find(x=>x.id===c.dataset.pid); if(!p) return;
+        const p = (isDiscover?pvSmallwebAll:pvPresetsAll).find(x=>x.id===c.dataset.pid); if(!p) return;
         pvEditing = ""; pvFetched = []; pvCatalog = []; pvSelected = new Set(); pvEditSaved = [];
-        el.querySelector("#pv-form-title").textContent = "添加供应商";
+        el.querySelector("#pv-form-title").textContent = "添加供应商" + (isDiscover?"（本地发现·待验证）":"");
         el.querySelector("#pv-name").value = p.name;
         el.querySelector("#pv-url").value = p.baseUrl;
         el.querySelector("#pv-key").value = "";
@@ -3328,7 +3566,8 @@ function pvRenderPresets(){
           [["openai","OpenAI 兼容"],["anthropic","Anthropic 兼容"]], p.protocol||"openai", null);
         el.querySelector("#pv-preset-hint").innerHTML =
           esc(p.name) + "：" + esc(p.note||"") +
-          (p.keyUrl ? ` · <a href="${esc(safeHref(p.keyUrl))}" target="_blank" style="color:var(--accent)">申请 Key →</a>` : "");
+          (p.keyUrl ? ` · <a href="${esc(safeHref(p.keyUrl))}" target="_blank" style="color:var(--accent)">申请 Key →</a>` : "") +
+          (isDiscover ? ` · <span style="color:var(--warn)">本地发现，添加后先点「探测」验证</span>` : "");
         pvRenderPicker();
         pvSetFormOpen(true);
       };
@@ -3336,7 +3575,7 @@ function pvRenderPresets(){
   }
   el.querySelectorAll("#pv-ptab button").forEach(b=>b.classList.toggle("on", b.dataset.v===pvTab));
   const cnt = el.querySelector("#pv-pcount");
-  if(cnt) cnt.textContent = q ? `${list.length}/${presets.length} 个匹配` : `${list.length} 个预设`;
+  if(cnt) cnt.textContent = q ? `${list.length}/${presets.length} 个匹配` : `${list.length} 个` + (isDiscover?" 个发现":" 个预设");
 }
 
 /* WorkBuddy 账号渠道卡：状态读 /admin/api/workbuddy/status，登录走 state 轮询
@@ -3647,6 +3886,25 @@ function renderProviderList(s){
     const models = p.models || [];
     const chips = models.slice(0,12).map(m=>`<span class="pm">${esc(m)}</span>`).join("")
       + (models.length>12 ? `<span class="pm">+${models.length-12} …</span>` : "");
+    // 节点清单带进来的声明字段：计费档位 / 公开额度 / 签到 / 注册页。
+    // 一律只读展示，编辑仍走「添加供应商」弹窗，避免两处状态互相覆盖。
+    const billName = { free:"免费", freemium:"部分免费", paid:"付费", unknown:"计费未声明" };
+    const q = p.quota || {};
+    const quotaBits = [q.rpm ? q.rpm+" 次/分" : "", q.rpd ? q.rpd+" 次/日" : "", q.tpd ? q.tpd+" token/日" : ""].filter(Boolean).join(" · ");
+    const tagStyle = 'font-size:11px;padding:1px 6px;border:1px solid var(--hairline);border-radius:5px;color:var(--ink-dim);text-decoration:none';
+    const nodeTag = (txt, href) => href
+      ? `<a style="${tagStyle}" href="${esc(safeHref(href))}" target="_blank" rel="noopener noreferrer">${esc(txt)} ↗</a>`
+      : `<span style="${tagStyle}">${esc(txt)}</span>`;
+    const nodeTags = [];
+    if (p.billing) nodeTags.push(nodeTag(billName[p.billing] || p.billing));
+    if (quotaBits) nodeTags.push(nodeTag(quotaBits + (q.source ? " · " + q.source : "")));
+    if (p.checkin === "daily") {
+      nodeTags.push(nodeTag("每日签到" + (p.checkinResetHour ? " · " + String(p.checkinResetHour).padStart(2,"0") + ":00 重置" : "")));
+    }
+    if (p.balancePath) nodeTags.push(nodeTag("只读" + (p.balanceKind || "余额") + " · " + p.balancePath));
+    if (p.signupUrl) nodeTags.push(nodeTag("注册页", p.signupUrl));
+    const nodeMetaRow = nodeTags.length
+      ? `<div style="display:flex;gap:5px;flex-wrap:wrap;margin:0 0 8px">${nodeTags.join("")}</div>` : "";
     d.innerHTML = `
       <div class="pvhead">
         <span class="pvdot ${p.enabled?"on":""}" title="${p.enabled?"已启用":"已停用"}"></span>
@@ -3661,6 +3919,7 @@ function renderProviderList(s){
         <span class="pvcount">${models.length} 模型</span>
         <div class="pmodels">${chips || '<span class="muted" style="font-size:11.5px">还没有模型 —— 点下方「挑选模型」拉取并勾选</span>'}</div>
       </div>
+      ${nodeMetaRow}
       <div class="pvfoot">
         <span class="u" title="${esc(p.baseUrl)}">${esc(p.baseUrl)}</span>
         <span class="pvops">
@@ -3773,7 +4032,8 @@ function buildUsage(s){
     const v = s.stats.days[k];
     byDay[k] = { requests:v.requests, failed:v.failed, input:v.input, output:v.output,
       cacheRead:v.cacheRead||0, cacheWrite:v.cacheWrite||0,
-      total:(v.input||0)+(v.output||0), models:v.models||{}, modelReqs:v.modelReqs||{}, agents:v.agents||{} };
+      total:(v.input||0)+(v.output||0), models:v.models||{}, modelReqs:v.modelReqs||{},
+      agents:v.agents||{}, channels:v.channels||{} };
   }
   const life = {};
   for(const k of keys) for(const [m,o] of Object.entries(byDay[k].models)) life[m]=(life[m]||0)+o;
@@ -3837,6 +4097,14 @@ function renderUsage(s){
       <div class="speedgrid" id="speed"></div>
     </div>
 
+    <div class="card" style="margin-bottom:12px">
+      <div class="row" style="justify-content:space-between;align-items:center;margin-bottom:10px">
+        <h3 style="margin:0">按渠道 / 供应商汇总（累计 Token）</h3>
+        <button class="ghost" id="btn-channels-csv">导出渠道明细 CSV</button>
+      </div>
+      <div id="by-channel"></div>
+    </div>
+
     <div class="two" style="margin-bottom:12px">
       <div class="card"><h3>按模型汇总（累计）</h3><div id="by-model"></div></div>
       <div class="card"><h3>按 Agent 汇总（累计输出）</h3><div id="by-agent"></div></div>
@@ -3847,10 +4115,13 @@ function renderUsage(s){
   renderHeat(U, U.keys);
   renderDayDetail(U);
   renderSpeed(recent);
+  renderByChannel(U, s);
   renderByModel(U, grand);
   renderByAgent(U);
   renderRecent(recent);
 
+  const csvChannelBtn = el.querySelector("#btn-channels-csv");
+  if(csvChannelBtn) csvChannelBtn.onclick = ()=>{ window.location.href = "/admin/api/usage/channels.csv"; };
   el.querySelector("#hm-modes").querySelectorAll("button").forEach(b=>b.onclick=()=>{ heatMode=b.dataset.m; renderUsage(s); });
 }
 
@@ -4029,15 +4300,55 @@ function renderByAgent(U){
     }).join("") + '</table>';
 }
 
+const CHANNEL_LABELS = { zen:"Zen 免费池", kilo:"Kilo 免费池", workbuddy:"WorkBuddy 账号渠道",
+  codearts:"CodeArts 账号渠道", zcode:"ZCode 渠道", trae:"TRAE 渠道", qoder:"Qoder 渠道",
+  unattributed:"未标注（升级前记录）" };
+function renderByChannel(U, s){
+  const box = $("#by-channel"); if(!box) return;
+  const providers = {};
+  for(const p of (s.providers||[])) providers[p.id] = p;
+  const life = {};
+  for(const k of U.keys){
+    for(const [id,c] of Object.entries(U.byDay[k].channels||{})){
+      const t = life[id] || (life[id] = {requests:0,failed:0,input:0,output:0,cacheRead:0,total:0});
+      t.requests += c.requests||0; t.failed += c.failed||0;
+      t.input += c.input||0; t.output += c.output||0; t.cacheRead += c.cacheRead||0;
+      t.total += (c.input||0)+(c.output||0);
+    }
+  }
+  const rows = Object.entries(life).sort((a,b)=>b[1].total-a[1].total);
+  if(!rows.length){
+    box.innerHTML = '<div class="muted" style="font-size:12px">还没有按渠道归集的用量。新请求会带上渠道标记；升级前的旧记录归到「未标注」，不会靠猜去分摊。</div>';
+    return;
+  }
+  const peak = rows[0][1].total;
+  const billName = { free:"免费", freemium:"部分免费", paid:"付费", unknown:"计费未声明" };
+  box.innerHTML = '<table><tr><th>渠道 / 供应商</th><th style="width:24%">Token 占比</th><th class="num">合计</th>'+
+      '<th class="num">输入</th><th class="num">输出</th><th class="num">请求</th><th class="num">失败</th><th class="num">缓存命中</th></tr>' +
+    rows.map(([id,t])=>{
+      const p = providers[id];
+      const label = p ? esc(p.name) : esc(CHANNEL_LABELS[id] || id);
+      const tag = p && p.billing ? ' <span class="muted" style="font-size:11px">'+esc(billName[p.billing]||p.billing)+'</span>' : "";
+      const hit = cachePct(t.cacheRead, t.input);
+      return '<tr><td class="mono" style="font-size:11.5px">'+label+tag+'</td>'+
+        '<td><div class="barwrap"><div class="bar" style="width:'+(peak?Math.round(t.total/peak*100):0)+'%"></div></div></td>'+
+        '<td class="num">'+fmtN(t.total)+'</td><td class="num">'+fmtN(t.input)+'</td><td class="num">'+fmtN(t.output)+'</td>'+
+        '<td class="num">'+t.requests+'</td><td class="num'+(t.failed?' bad':'')+'">'+t.failed+'</td>'+
+        '<td class="num">'+(hit!==null?hit+'%':'—')+'</td></tr>';
+    }).join("") + '</table>' +
+    '<div class="muted" style="font-size:11.5px;margin-top:6px">合计 = 输入 + 输出 Token（输入已含缓存命中部分，不重复计）。自定义供应商按自己的 ID 单独成行。</div>';
+}
+
 function renderRecent(recent){
   const box = $("#recent-list");
   if(!recent.length){ box.innerHTML = '<div class="muted" style="font-size:12px">还没有请求。</div>'; return; }
-  box.innerHTML = '<table><tr><th>时间</th><th>模型</th><th>Agent</th><th>档位</th><th>结果</th><th>输入/输出</th><th>缓存</th><th>首字</th></tr>' +
+  box.innerHTML = '<table><tr><th>时间</th><th>模型</th><th>渠道</th><th>Agent</th><th>档位</th><th>结果</th><th>输入/输出</th><th>缓存</th><th>首字</th></tr>' +
     recent.slice().reverse().map(r=>{
       const t = new Date(r.at).toTimeString().slice(0,8);
       const res = r.ok ? '<span class="pill ok">完成'+(r.recovered?" · 已恢复":"")+'</span>'
         : (r.truncated ? '<span class="pill warn">截断</span>' : '<span class="pill bad">失败</span>');
       return '<tr><td class="mono">'+t+'</td><td class="mono">'+esc(r.model)+'</td>'+
+        '<td class="mono">'+esc(r.channel ? (CHANNEL_LABELS[r.channel] || r.channel) : "—")+'</td>'+
         '<td>'+esc(r.agent||"—")+'</td><td class="mono">'+esc(r.effort||"—")+'</td>'+
         '<td>'+res+'</td><td class="num">'+fmtN(r.input||0)+' / '+fmtN(r.output||0)+'</td>'+
         '<td class="num">'+(r.cacheRead?cacheCell(r.cacheRead, r.input):'<span class="muted">—</span>')+'</td>'+
@@ -4194,6 +4505,84 @@ function logQuery(){
 const settingsDirty = new Set();
 function clearSettingsDirty(){ settingsDirty.clear(); }
 
+function chainOpts(list, cur){
+  return list.map(([v,l])=>`<option value="${esc(v)}"${v===cur?" selected":""}>${esc(l)}</option>`).join("")
+    || `<option value="">（无可用模型）</option>`;
+}
+
+async function saveRelayChain(rows){
+  const clean = rows.filter(r=>r && r.model);
+  const j = await api("/settings", { relayChain: clean });
+  if(!j) return;
+  if(!STATE.settings) STATE.settings = {};
+  STATE.settings.relayChain = clean;
+  toast("接力链已保存");
+  refresh();
+}
+
+// Paint the ordered relay chain. The list is rebuilt only when its data (or
+// the pickable models) changes, so the 10s state poll cannot close a dropdown
+// the user is halfway through.
+function renderRelayChain(){
+  const el = $("#page-settings"); if(!el) return;
+  const box = el.querySelector("#chain-list"); if(!box) return;
+  const s = STATE || {};
+  const rows = (s.settings && s.settings.relayChain) || [];
+  const laneModels = (s.models||[]).map(m=>[m.id, m.name && m.name!==m.id ? `${m.name} · ${m.id}` : m.id]);
+  const pvs = (s.providers||[]).filter(p=>p.enabled);
+  const pvMap = {}; pvs.forEach(p=>pvMap[p.id]=p.models||[]);
+  const sig = JSON.stringify([rows, laneModels, pvs.map(p=>[p.id, pvMap[p.id]])]);
+  if(box.dataset.sig === sig) return;
+  box.dataset.sig = sig;
+  box.innerHTML = rows.map((r,i)=>{
+    let picker;
+    if(r.source === "lane"){
+      picker = `<select data-i="${i}" data-f="model" style="min-width:220px">${chainOpts(laneModels, r.model)}</select>`;
+    }else{
+      const opts = pvs.map(p=>[p.id, p.name||p.id]);
+      if(!pvs.some(p=>p.id===r.provider)) opts.unshift([r.provider, r.provider||"（供应商已删除）"]);
+      picker = `<select data-i="${i}" data-f="provider">${chainOpts(opts, r.provider)}</select>`
+             + `<select data-i="${i}" data-f="model" style="min-width:180px">${chainOpts((pvMap[r.provider]||[]).map(m=>[m,m]), r.model)}</select>`;
+    }
+    return `<div class="chain-row" data-i="${i}" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+      <span class="pill">${i+1}</span>
+      <span class="muted" style="font-size:12px;min-width:58px">${r.source==="lane"?"免费车道":"自定义 API"}</span>
+      ${picker}
+      <button class="ghost" data-act="up" data-i="${i}" ${i===0?"disabled":""} title="上移">↑</button>
+      <button class="ghost" data-act="down" data-i="${i}" ${i===rows.length-1?"disabled":""} title="下移">↓</button>
+      <button class="ghost" data-act="del" data-i="${i}" title="删除">删除</button>
+    </div>`;
+  }).join("") || `<div class="muted" style="font-size:12px">还没有步骤。用下面的按钮添加，链会按这里的顺序尝试。</div>`;
+
+  if(!box.dataset.bound){
+    box.dataset.bound = "1";
+    const cloneRows = ()=>JSON.parse(JSON.stringify((STATE.settings&&STATE.settings.relayChain)||[]));
+    box.onchange = async ev=>{
+      const sel = ev.target.closest("select"); if(!sel) return;
+      const i = +sel.dataset.i, f = sel.dataset.f;
+      const rows = cloneRows(); if(!rows[i]) return;
+      if(f === "provider"){
+        rows[i].provider = sel.value;
+        const p = (STATE.providers||[]).find(x=>x.id===sel.value);
+        rows[i].model = p && p.models && p.models.length ? p.models[0] : "";
+      }else{
+        rows[i].model = sel.value;
+      }
+      await saveRelayChain(rows);
+    };
+    box.onclick = async ev=>{
+      const btn = ev.target.closest("button[data-act]"); if(!btn) return;
+      const i = +btn.dataset.i, act = btn.dataset.act;
+      const rows = cloneRows(); if(!rows[i]) return;
+      if(act === "del") rows.splice(i,1);
+      else if(act === "up" && i > 0) [rows[i-1], rows[i]] = [rows[i], rows[i-1]];
+      else if(act === "down" && i < rows.length-1) [rows[i+1], rows[i]] = [rows[i], rows[i+1]];
+      else return;
+      await saveRelayChain(rows);
+    };
+  }
+}
+
 function renderSettings(s){
   const el = $("#page-settings");
   if(!el.dataset.rendered){
@@ -4206,6 +4595,7 @@ function renderSettings(s){
         <span class="mchip" data-g="set-desktop">桌面</span>
         <span class="mchip" data-g="set-net">网络</span>
         <span class="mchip" data-g="set-data">数据</span>
+        <span class="mchip" data-g="set-checkin">签到</span>
         <span class="mchip" data-g="set-update">更新</span>
       </div>
       <div class="card" id="set-base"><div class="row" style="row-gap:14px">
@@ -4222,6 +4612,28 @@ function renderSettings(s){
         <h3>模型切换</h3>
         <div class="switch"><div><span class="nm">限流自动切换</span><div class="ds">请求的模型被限流或拒绝时，自动换下一个可用模型接住本次请求（最多再试 <span id="fo-max-label">2</span> 次）；实际服务的模型通过响应头 x-zen-gate-served-by 和最终 usage chunk 标注</div></div>
           <button class="act off" id="tg-failover">关闭</button></div>
+        <div class="switch"><div><span class="nm">模型兜底链（限流/拒绝时按序接住）</span><div class="ds">请求的模型被限流/拒绝/区域屏蔽/服务端错误时，按你排列的顺序依次尝试接住本次请求。排在「同模型换通道」之后、「车道自动选」之前。每行一个模型 id，或逗号分隔；写错/不存在/被隐藏的 id 会被自动跳过。留空则回落到车道默认候选</div></div></div>
+        <textarea id="fo-chain" rows="3" placeholder="claude-sonnet-4-6&#10;gpt-5&#10;gemini-3-pro" style="width:100%;background:var(--panel-2);border:1px solid var(--hairline);color:var(--ink);border-radius:6px;padding:8px 10px;font-family:var(--mono);font-size:12px;resize:vertical"></textarea>
+        <div style="margin-top:8px"><button class="ghost" id="btn-fo-chain">保存兜底链</button><span class="muted" id="fo-chain-result" style="font-size:12px;margin-left:8px"></span></div>
+      </div>
+
+      <div class="card" id="set-routewall">
+        <h3>选路规则墙（渠道墙）</h3>
+        <div class="muted" style="font-size:12px;margin-bottom:8px">按规则约束每个请求能走哪些供应商通道（渠道）。规则按优先级从高到低匹配，命中规则的「允许/禁止通道」合并生效，<b>禁止优先于允许</b>。匹配类型=全局 对全部请求生效；=按模型 仅对模型名含匹配词的请求生效。每条规则一行编辑，多个通道用逗号分隔。</div>
+        <div class="muted" style="font-size:11.5px;margin-bottom:8px">可用通道：<code id="rw-chans"></code></div>
+        <div id="rw-rules"></div>
+        <div style="margin-top:10px;display:flex;gap:8px;align-items:center">
+          <button class="ghost" id="btn-rw-add">+ 添加规则</button>
+          <button class="act" id="btn-rw-save">保存规则墙</button>
+          <span class="muted" id="rw-result" style="font-size:12px"></span>
+        </div>
+      </div>
+
+      <div class="card" id="set-token-saver">
+        <h3>省 Token</h3>
+        <div class="switch"><div><span class="nm">裁剪超长工具输出</span><div class="ds">把历史里过长的工具结果（文件内容、日志、命令输出）截断到上限字符，只保留头尾并标注省略量；最近两条消息不动。单次请求可用请求头 <code class="k">X-ZG-Token-Saver: off</code> 绕过</div></div>
+          <button class="act off" id="tg-tokensaver">关闭</button></div>
+        <label class="dim" style="margin-top:8px;display:inline-flex;align-items:center;gap:8px">每段上限（字符） <input type="number" id="set-tokensaver-max" min="500" step="500" placeholder="6000"></label>
       </div>
 
       <div class="card" id="set-route">
@@ -4235,6 +4647,18 @@ function renderSettings(s){
           </div></div>
         <div class="switch"><div><span class="nm">耗尽后回落自定义 API</span><div class="ds">免费车道所有候选都被限流时，把本次请求交给自定义 API 里同名 / 能力匹配的模型继续完成（会消耗你自己的 Key 额度，默认关闭）</div></div>
           <button class="act off" id="tg-fallback">关闭</button></div>
+        <div class="switch"><div><span class="nm">跨供应商接力链 <span class="muted" style="font-size:11px">有序 · 可混排</span></span><div class="ds">按下面的顺序依次尝试：免费车道模型和自定义 API 模型可以交替排列。开启后车道不再自己换模型，顺序完全由这条链决定；某一步开始输出后就不再切换，避免同一个回答被拼接两遍。请求的模型永远先试一次，失败后才进入这条链，因此开启后「耗尽后回落自定义 API」的自动顺序不再生效</div></div>
+          <button class="act off" id="tg-chain">关闭</button></div>
+        <div id="chain-editor" style="margin:4px 0 14px">
+          <div id="chain-list" style="display:flex;flex-direction:column;gap:8px"></div>
+          <div style="display:flex;gap:8px;margin-top:10px;flex-wrap:wrap">
+            <button class="ghost" id="chain-add-lane">＋ 免费车道模型</button>
+            <button class="ghost" id="chain-add-pv">＋ 自定义 API 模型</button>
+          </div>
+          <div class="muted" style="font-size:12px;margin-top:8px">顺序即尝试顺序；某一步被限流、5xx、超时或空响应时，才进入下一步。</div>
+        </div>
+        <div class="switch"><div><span class="nm">回落时免费优先</span><div class="ds">回落自定义 API 时先试节点清单里声明「免费」的供应商，同级再试付费的；只为省额度改顺序，不会把不支持当前请求（视觉 / 长上下文）的模型提前。默认关闭，保持原有目录顺序</div></div>
+          <button class="act off" id="tg-freefirst">关闭</button></div>
         <div class="switch"><div><span class="nm">AI 能力标注</span><div class="ds">用免费车道模型后台给模型打能力标签（视觉/音频/文件，存本地 tags.json），供路由过滤与模型页徽章使用；几百 token/批，「实测」过的模型不会被覆盖</div></div>
           <div style="display:flex;gap:8px;align-items:center">
             <button class="ghost" id="btn-retag">重新标注</button>
@@ -4244,6 +4668,45 @@ function renderSettings(s){
           <button class="act off" id="tg-openref">关闭</button></div>
         <div class="switch"><div><span class="nm">WorkBuddy 前缀缓存</span><div class="ds">给 WorkBuddy 的请求体加 <code class="k">prompt_cache_key</code>（= 本会话 id），让上游按会话复用已算过的前缀。实测依据：同后端参考实现在 8k 前缀上把命中量从 0 提到 7808、计费从 0.34 降到 0.02。默认关闭——这条渠道的风控会看请求体，没有本机实测前不加。CodeArts 与自定义供应商不受此开关影响，它们的缓存提示一直开着</div></div>
           <button class="act off" id="tg-wbcache">关闭</button></div>
+      </div>
+
+      <div class="card" id="set-capa">
+        <h3>能力校准审计台 <span class="muted" style="font-size:11px">外部目录写入留痕 · 逐行否决 · 一键回滚</span></h3>
+        <div class="muted" style="font-size:12px;margin-bottom:8px">公开目录同步照常每 6 小时自动跑，但每一次外部改动都记下「改前 → 改后 / 来源 / 时间」。不认同就给该模型上锁（此后自动同步一律跳过），或按某条记录回滚（回滚即上锁）。手动校准记为「人工校准」，与实测同级、自动锁定。信任顺序：实测 / 人工校准 &gt; 上游声明 &gt; AI标注 &gt; 规则。</div>
+        <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:10px">
+          <button class="ghost" id="btn-capa-refresh">立即同步目录</button>
+          <button class="ghost" id="btn-capa-reload">刷新审计台</button>
+          <span class="muted" id="capa-at" style="font-size:12px"></span>
+        </div>
+        <div class="muted" style="font-size:12px;margin:8px 0 4px">目录现值 vs 本地现值（来自上次成功同步的快照，无需联网）</div>
+        <div id="capa-diff"></div>
+        <div class="muted" style="font-size:12px;margin:12px 0 4px">变更记录（最新在前）</div>
+        <div id="capa-entries"></div>
+        <div style="margin-top:12px;border-top:1px solid var(--hairline);padding-top:10px">
+          <div class="muted" style="font-size:12px;margin-bottom:6px">手动校准（写入后自动锁定该模型，不再被自动同步改动）</div>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+            <input id="capa-model" placeholder="模型 id，如 space-bunny-free" style="flex:2;min-width:190px;background:var(--panel-2);border:1px solid var(--hairline);color:var(--ink);border-radius:6px;padding:6px 9px;font-family:var(--mono);font-size:12px">
+            <input id="capa-ctx" type="number" min="0" placeholder="上下文窗口" style="width:130px;background:var(--panel-2);border:1px solid var(--hairline);color:var(--ink);border-radius:6px;padding:6px 9px;font-size:12px">
+            <input id="capa-out" type="number" min="0" placeholder="最大输出" style="width:120px;background:var(--panel-2);border:1px solid var(--hairline);color:var(--ink);border-radius:6px;padding:6px 9px;font-size:12px">
+            <button class="act" id="btn-capa-save">写入并锁定</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="card" id="set-checkin">
+        <h3>自动签到 <span class="muted" style="font-size:11px">积分增量确认 · 确认后零写请求 · 6 小时只读复核</span></h3>
+        <div class="muted" style="font-size:12px;margin-bottom:8px">
+          成功判据不是「接口说成功」，而是账号积分真的涨了：优先用领取响应里的奖励金额，其次是签到前后余额增量，两者都读不到才退回幂等的接口成功并标注证据强度。
+          一个周期确认后<b>不再发送任何签到请求</b>，每 6 小时只做一次只读余额复核；国内按本地 00:00 重置，国外按 08:00 估计，重置点猜错也能被复核兜住。
+          节点清单里声明 <code class="k">checkin: daily</code> 的供应商会自动出现在这里并标成「待接入」——声明只是登记，不会假装已经签到。
+        </div>
+        <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:10px">
+          <button class="ghost" id="btn-checkin-all">立即全部签到</button>
+          <button class="ghost" id="btn-checkin-probe">只读查余额</button>
+          <button class="ghost" id="btn-checkin-reload">刷新状态</button>
+          <span class="muted" id="checkin-at" style="font-size:12px"></span>
+        </div>
+        <div id="checkin-list"></div>
       </div>
 
       <div class="card" id="set-desktop">
@@ -4511,7 +4974,10 @@ function renderSettings(s){
     if (!sub.enabled) {
       stEl.innerHTML = `<span class="pill hidsync">未启用</span>`;
     } else if (sb.running) {
-      stEl.innerHTML = `<span class="pill ok">侧车运行中${sb.version ? " · sing-box "+esc(sb.version) : ""}</span> <span class="muted" style="font-size:11px">${sb.alive||0}/${(sb.nodes||[]).length} 节点健康</span>${sb.lastErr?` <span class="muted" style="font-size:11px">部分订阅失败: ${esc(sb.lastErr)}</span>`:""}`;
+      const ns = sb.nodes || [];
+      const stale = ns.filter(n => n.alive && n.egressStale).length;
+      const drift = ns.filter(n => n.drifts).length;
+      stEl.innerHTML = `<span class="pill ok">侧车运行中${sb.version ? " · sing-box "+esc(sb.version) : ""}</span> <span class="muted" style="font-size:11px">${sb.alive||0}/${ns.length} 节点可用</span>${sb.probeTotal?` <span class="pill warn">探测中 ${sb.probeDone||0}/${sb.probeTotal}</span>`:""}${stale?` <span class="pill warn" title="节点能连通但读不到出口 IP：这不算死亡，仍在轮转中">${stale} 个出口未知</span>`:""}${drift?` <span class="pill unknown" title="节点换了出口 IP：相关会话已重新固定，避免身份漂移">${drift} 个漂移</span>`:""}${sb.lastErr?` <span class="muted" style="font-size:11px">部分订阅失败: ${esc(sb.lastErr)}</span>`:""}`;
     } else {
       stEl.innerHTML = `<span class="pill warn">侧车未运行</span>${sb.lastErr?` <span class="muted" style="font-size:11px">${esc(sb.lastErr)}</span>`:""}`;
     }
@@ -4519,8 +4985,25 @@ function renderSettings(s){
   const ndEl = el.querySelector("#subs-nodes");
   if (ndEl) {
     const nodes = sb.nodes || [];
-    ndEl.innerHTML = nodes.length ? `<div style="display:grid; grid-template-columns:1fr 60px 1fr 90px 70px; gap:4px 10px; font-size:12px">
-      ${nodes.map(n=>`<span>${esc(n.name||n.id)}</span><span class="muted">${esc(n.proto)}</span><span class="mono" style="font-size:11px">${esc(n.ip||"—")} ${esc(n.country||"")}</span><span class="muted">${n.latencyMs?n.latencyMs+"ms":"—"}</span><span>${n.alive?'<span class="pill ok">可用</span>':'<span class="pill bad">失败</span>'}</span>`).join("")}
+    // Three states, not two. "出口未知" (the node carries traffic but no echo
+    // service answered) is neither healthy nor dead, and showing it as 失败
+    // was what made an echo outage look like a pool-wide node failure.
+    const statePill = (n) => {
+      let out = "";
+      if (!n.alive) {
+        out = `<span class="pill bad" title="${esc(n.failReason||"探测失败")}">失败</span>`;
+      } else if (n.egressStale) {
+        out = `<span class="pill warn" title="${esc(n.failReason||"出口回显不可用")}">出口未知</span>`;
+      } else {
+        out = `<span class="pill ok">可用</span>`;
+      }
+      if (n.drifts) {
+        out += `<span class="pill unknown" title="出口 IP 已变更 ${n.drifts} 次（上次 ${esc(n.driftFrom||"?")}）">漂移</span>`;
+      }
+      return out;
+    };
+    ndEl.innerHTML = nodes.length ? `<div style="display:grid; grid-template-columns:1fr 60px 1fr 90px 110px; gap:4px 10px; font-size:12px">
+      ${nodes.map(n=>`<span>${esc(n.name||n.id)}</span><span class="muted">${esc(n.proto)}</span><span class="mono" style="font-size:11px">${esc(n.ip||"—")} ${esc(n.country||"")}</span><span class="muted">${n.latencyMs?n.latencyMs+"ms":"—"}</span><span>${statePill(n)}</span>`).join("")}
     </div>` : `<div class="muted" style="font-size:12px">${sub.enabled?"尚未拉取到节点——点「刷新订阅」试试。":"停用中。"}</div>`;
   }
   const curVer = el.querySelector("#cur-ver");
@@ -4541,8 +5024,271 @@ function renderSettings(s){
       refresh();
     };
   }
+  // 模型兜底链（issue #25）：初次渲染填入，保存后回填，不覆盖用户正在编辑的内容
+  const chainEl = el.querySelector("#fo-chain");
+  if (chainEl && !chainEl.dataset.bound) {
+    chainEl.value = (s.settings.modelFallbackChain || []).join("\n");
+    chainEl.dataset.bound = "1";
+    const chainBtn = el.querySelector("#btn-fo-chain");
+    chainBtn.onclick = async () => {
+      const raw = chainEl.value || "";
+      const arr = raw.split(/[\n,]/).map(x => x.trim()).filter(x => x.length > 0);
+      const j = await api("/settings", { modelFallbackChain: arr });
+      if (j) {
+        const saved = (j.modelFallbackChain && j.modelFallbackChain.length) ? j.modelFallbackChain : arr;
+        chainEl.value = saved.join("\n");
+        el.querySelector("#fo-chain-result").textContent = "已保存 " + saved.length + " 个模型";
+        toast("模型兜底链已保存（限流/拒绝时按此顺序接住）");
+      }
+    };
+  }
+  // 选路规则墙（渠道墙）：初次渲染填入 state，编辑存本地 dataset，不覆盖正在编辑的内容
+  const rwChans = el.querySelector("#rw-chans");
+  if (rwChans) rwChans.textContent = (s.routeChannels || []).join(", ");
+  const rwRules = el.querySelector("#rw-rules");
+  if (rwRules && !rwRules.dataset.bound) {
+    rwRules.dataset.bound = "1";
+    const chans = (s.routeChannels || []);
+    function renderRW() {
+      const rules = JSON.parse(rwRules.dataset.rules || "null") || s.settings.routeWall || [];
+      rwRules.dataset.rules = JSON.stringify(rules);
+      if (!rules.length) {
+        rwRules.innerHTML = `<div class="muted" style="font-size:12px">暂无规则——点「添加规则」开始编排。例如：把 claude 系列强制走 kilo 通道、或把 gemini 禁止走代理通道。</div>`;
+        return;
+      }
+      rwRules.innerHTML = rules.map((r, i) => {
+        const allow = (r.allowChannels || []).join(",");
+        const deny = (r.denyChannels || []).join(",");
+        return `<div class="rw-rule" style="border:1px solid var(--hairline);border-radius:8px;padding:10px;margin-bottom:8px">
+          <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+            <input data-i="${i}" data-f="name" value="${r.name || ""}" placeholder="规则名" style="width:110px;background:var(--panel-2);border:1px solid var(--hairline);color:var(--ink);border-radius:6px;padding:5px 8px;font-size:12px">
+            <select data-i="${i}" data-f="matchType" style="background:var(--panel-2);border:1px solid var(--hairline);color:var(--ink);border-radius:6px;padding:5px 8px;font-size:12px">
+              <option value="any" ${r.matchType === "any" ? "selected" : ""}>全局</option>
+              <option value="model" ${r.matchType === "model" ? "selected" : ""}>按模型名</option>
+            </select>
+            <input data-i="${i}" data-f="match" value="${r.match || ""}" placeholder="模型名含…" style="width:120px;background:var(--panel-2);border:1px solid var(--hairline);color:var(--ink);border-radius:6px;padding:5px 8px;font-size:12px">
+            <label style="display:inline-flex;gap:4px;align-items:center;font-size:12px"><input type="checkbox" data-i="${i}" data-f="enabled" ${r.enabled ? "checked" : ""}>启用</label>
+            <button class="ghost" data-del="${i}" style="margin-left:auto">删除</button>
+          </div>
+          <div style="display:flex;gap:8px;margin-top:6px;flex-wrap:wrap;align-items:center">
+            <span class="dim" style="font-size:12px">允许通道</span>
+            <input data-i="${i}" data-f="allowChannels" value="${allow}" placeholder="逗号分隔，留空=不限" style="flex:1;min-width:150px;background:var(--panel-2);border:1px solid var(--hairline);color:var(--ink);border-radius:6px;padding:5px 8px;font-size:12px">
+            <span class="dim" style="font-size:12px">禁止通道</span>
+            <input data-i="${i}" data-f="denyChannels" value="${deny}" placeholder="逗号分隔" style="flex:1;min-width:150px;background:var(--panel-2);border:1px solid var(--hairline);color:var(--ink);border-radius:6px;padding:5px 8px;font-size:12px">
+          </div>
+        </div>`;
+      }).join("");
+      rwRules.querySelectorAll("input,select").forEach(inp => {
+        inp.oninput = () => {
+          const i = +inp.dataset.i, f = inp.dataset.f;
+          const rules = JSON.parse(rwRules.dataset.rules);
+          rules[i][f] = inp.type === "checkbox" ? inp.checked : inp.value;
+          rwRules.dataset.rules = JSON.stringify(rules);
+        };
+      });
+      rwRules.querySelectorAll("[data-del]").forEach(b => {
+        b.onclick = () => {
+          const rules = JSON.parse(rwRules.dataset.rules);
+          rules.splice(+b.dataset.del, 1);
+          rwRules.dataset.rules = JSON.stringify(rules);
+          renderRW();
+        };
+      });
+    }
+    renderRW();
+    el.querySelector("#btn-rw-add").onclick = () => {
+      const rules = JSON.parse(rwRules.dataset.rules);
+      rules.push({ enabled: true, name: "", matchType: "any", match: "", allowChannels: [], denyChannels: [], priority: rules.length });
+      rwRules.dataset.rules = JSON.stringify(rules);
+      renderRW();
+    };
+    el.querySelector("#btn-rw-save").onclick = async () => {
+      const rules = JSON.parse(rwRules.dataset.rules).map((r, i) => ({
+        enabled: !!r.enabled,
+        name: r.name || "",
+        matchType: r.matchType === "model" ? "model" : "any",
+        match: r.match || "",
+        allowChannels: (r.allowChannels || "").split(",").map(x => x.trim()).filter(x => x.length),
+        denyChannels: (r.denyChannels || "").split(",").map(x => x.trim()).filter(x => x.length),
+        priority: (rules.length - 1 - i)
+      }));
+      const j = await api("/settings", { routeWall: rules });
+      if (j) {
+        el.querySelector("#rw-result").textContent = "已保存 " + rules.length + " 条规则";
+        toast("选路规则墙已保存");
+        refresh();
+      }
+    };
+  }
+  // 能力校准审计台：GET 快照 + 事件委托，一次绑定，避免 refresh 重复挂事件
+  const capaCard = el.querySelector("#set-capa");
+  if (capaCard && !capaCard.dataset.bound) {
+    capaCard.dataset.bound = "1";
+    const capaDiff = el.querySelector("#capa-diff");
+    const capaEntries = el.querySelector("#capa-entries");
+    const fmtNum = n => (Number(n) || 0).toLocaleString();
+    const fmtCap = (ctx, out) => `${fmtNum(ctx)} / ${fmtNum(out)}`;
+    const loadCapa = async () => {
+      const j = await api("/capability/audit");
+      if (!j) return;
+      const at = el.querySelector("#capa-at");
+      if (at) at.textContent = (j.refs && j.refs.at) ? "目录快照：" + new Date(j.refs.at).toLocaleString() : "尚无目录快照";
+      const locks = j.locks || {};
+      const diffs = j.diff || [];
+      capaDiff.innerHTML = diffs.length ? diffs.map(d => `
+        <div style="border:1px solid var(--hairline);border-radius:8px;padding:8px 10px;margin-bottom:6px;display:flex;gap:8px;align-items:center;flex-wrap:wrap;font-size:12px">
+          <code class="k">${esc(d.model)}</code>
+          <span class="muted">${esc(d.source)}</span>
+          <span>目录 <b>${fmtCap(d.refContext, d.refOutput)}</b></span>
+          <span class="muted">→</span>
+          <span>本地 <b>${fmtCap(d.localContext, d.localOutput)}</b> <span class="tag" style="opacity:.65">${esc(d.tagSource)}</span></span>
+          <button class="ghost" data-capa-lock="${esc(d.model)}" data-on="${d.locked ? "0" : "1"}" style="margin-left:auto">${d.locked ? "解除锁定" : "锁定"}</button>
+        </div>`).join("") : `<div class="muted" style="font-size:12px">目录与本地当前一致，或还没有目录快照。开启「公开容量参考」并点「立即同步目录」即可生成。</div>`;
+      const entries = j.entries || [];
+      capaEntries.innerHTML = entries.length ? entries.map(e => {
+        const before = e.before ? fmtCap(e.before.contextWindow, e.before.maxOutput) : "策展表（规则）";
+        const after = e.removed ? "回到策展表（规则）" : fmtCap(e.after.contextWindow, e.after.maxOutput);
+        return `<div style="border:1px solid var(--hairline);border-radius:8px;padding:8px 10px;margin-bottom:6px;display:flex;gap:8px;align-items:center;flex-wrap:wrap;font-size:12px">
+          <code class="k">${esc(e.model)}</code>
+          <span class="muted">${esc(e.origin)} · ${new Date(e.at).toLocaleString()}</span>
+          <span>${esc(before)} <span class="muted">→</span> <b>${esc(after)}</b></span>
+          ${locks[e.model] ? '<span class="tag">已锁定</span>' : ""}
+          <button class="ghost" data-capa-rollback="${e.seq}" style="margin-left:auto">回滚此条</button>
+        </div>`;
+      }).join("") : `<div class="muted" style="font-size:12px">还没有外部目录改动记录。</div>`;
+    };
+    capaCard.addEventListener("click", async (ev) => {
+      const lk = ev.target.closest && ev.target.closest("button[data-capa-lock]");
+      if (lk) {
+        const j = await api("/capability/lock", { model: lk.dataset.capaLock, locked: lk.dataset.on === "1" });
+        if (j) { toast(lk.dataset.on === "1" ? "已锁定，自动同步将跳过该模型" : "已解除锁定"); await loadCapa(); }
+        return;
+      }
+      const rb = ev.target.closest && ev.target.closest("button[data-capa-rollback]");
+      if (rb) {
+        const j = await api("/capability/rollback", { seq: Number(rb.dataset.capaRollback) });
+        if (j) { toast("已回滚并锁定该模型"); await loadCapa(); refresh(); }
+      }
+    });
+    const btnReload = el.querySelector("#btn-capa-reload");
+    if (btnReload) btnReload.onclick = loadCapa;
+    const btnRefresh = el.querySelector("#btn-capa-refresh");
+    if (btnRefresh) btnRefresh.onclick = async () => {
+      const j = await api("/capability/refresh", {});
+      if (j) toast("目录同步已在后台开始，稍后点「刷新审计台」查看");
+    };
+    const btnSave = el.querySelector("#btn-capa-save");
+    if (btnSave) btnSave.onclick = async () => {
+      const model = (el.querySelector("#capa-model").value || "").trim();
+      const ctx = Number(el.querySelector("#capa-ctx").value || 0);
+      const out = Number(el.querySelector("#capa-out").value || 0);
+      if (!model) { toast("请填模型 id"); return; }
+      const j = await api("/capability/calibrate", { model, contextWindow: ctx, maxOutput: out });
+      if (j) { toast("已写入人工校准并锁定"); await loadCapa(); refresh(); }
+    };
+    loadCapa();
+  }
+  // 自动签到：积分增量证据 + 确认后零写请求 + 6 小时只读复核
+  const checkinCard = el.querySelector("#set-checkin");
+  if (checkinCard && !checkinCard.dataset.bound) {
+    checkinCard.dataset.bound = "1";
+    const checkinList = el.querySelector("#checkin-list");
+    const ckTime = (sec) => {
+      if (!sec) return "—";
+      const d = new Date(sec * 1000);
+      const p = (n) => String(n).padStart(2, "0");
+      return `${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+    };
+    const ckNum = (v) => (typeof v === "number" && isFinite(v) ? String(Math.round(v * 100) / 100) : "—");
+    const loadCheckin = async () => {
+      const j = await api("/checkin/status");
+      if (!j) return;
+      const at = el.querySelector("#checkin-at");
+      if (at) at.textContent = "本地日历日 " + j.today + " · 确认后每 " + (j.verifyHours || 6) + " 小时只读复核";
+      const rows = j.tasks || [];
+      checkinList.innerHTML = rows.length ? rows.map(t => {
+        const state = !t.wired ? '<span class="tag">待接入</span>'
+          : !t.available ? '<span class="muted">未登录 / 无可用账号</span>'
+          : t.doneToday ? `<span class="pill ok">已确认 · ${esc(t.method || "证据")}</span>`
+          : '<span class="pill warn">今日待办</span>';
+        const facts = [];
+        if (t.hasProbe && t.balance) facts.push(`${esc(t.balanceKind || "余额")} <b>${ckNum(t.balance)}</b>`);
+        if (t.reward > 0) facts.push(`本次奖励 <b>+${ckNum(t.reward)}</b>`);
+        if (t.delta > 0) facts.push(`余额增量 <b>+${ckNum(t.delta)}</b>`);
+        if (t.before || t.after) facts.push(`签到前 ${ckNum(t.before)} → 后 ${ckNum(t.after)}`);
+        if (t.confirmed) facts.push(`确认于 ${ckTime(t.at)}`);
+        if (t.nextCheckAt) facts.push((t.doneToday || !t.wired ? "下次只读复核 " : "下次重试 ") + ckTime(t.nextCheckAt));
+        facts.push("重置 " + String(t.resetHour || 0).padStart(2, "0") + ":00" + (t.resetHour ? "（节点声明）" : "（默认）"));
+        return `<div style="border:1px solid var(--hairline);border-radius:8px;padding:8px 10px;margin-bottom:6px;font-size:12px">
+          <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+            <b>${esc(t.name)}</b><code class="k">${esc(t.channel)}</code>${state}
+            <span class="muted" style="font-size:11.5px">账号日期戳 ${esc(t.lastDate || "—")}</span>
+            ${t.wired && t.available && !t.doneToday ? `<button class="ghost" data-checkin-one="${esc(t.id)}" style="margin-left:auto">单独补签</button>` : ""}
+            ${t.hasProbe ? `<button class="ghost" data-checkin-probe="${esc(t.id)}" ${t.wired && t.available && !t.doneToday ? "" : 'style="margin-left:auto"'}>查余额</button>` : ""}
+          </div>
+          <div class="muted" style="font-size:11.5px;margin-top:4px">${esc(t.detail || "")}</div>
+          ${facts.length ? `<div style="font-size:11.5px;margin-top:4px">${facts.join(" · ")}</div>` : ""}
+          ${t.note ? `<div class="muted" style="font-size:11.5px;margin-top:3px">${esc(t.note)}</div>` : ""}
+        </div>`;
+      }).join("") : '<div class="muted" style="font-size:12px">还没有登记任何签到任务。</div>';
+    };
+    checkinCard.addEventListener("click", async (ev) => {
+      const one = ev.target.closest && ev.target.closest("button[data-checkin-one]");
+      if (one) {
+        const j = await api("/checkin/one", { id: one.dataset.checkinOne });
+        if (j) { toast("已执行该签到任务"); await loadCheckin(); }
+        return;
+      }
+      const probe = ev.target.closest && ev.target.closest("button[data-checkin-probe]");
+      if (probe) {
+        const j = await api("/checkin/refresh", { id: probe.dataset.checkinProbe });
+        if (j) { toast("只读查余额完成（未签到）"); await loadCheckin(); }
+      }
+    });
+    const btnAll = el.querySelector("#btn-checkin-all");
+    if (btnAll) btnAll.onclick = async () => {
+      const j = await api("/checkin/all", {});
+      if (!j) return;
+      toast("签到完成 " + j.claimed + " 项" + (j.failed ? "，失败 " + j.failed + " 项" : ""));
+      await loadCheckin();
+    };
+    const btnProbe = el.querySelector("#btn-checkin-probe");
+    if (btnProbe) btnProbe.onclick = async () => {
+      const j = await api("/checkin/refresh", {});
+      if (!j) return;
+      toast("只读查余额完成" + (j.failed ? "，读不到 " + j.failed + " 项" : ""));
+      await loadCheckin();
+    };
+    const btnReload = el.querySelector("#btn-checkin-reload");
+    if (btnReload) btnReload.onclick = loadCheckin;
+    loadCheckin();
+  }
+  setToggle("#tg-tokensaver", s.settings.tokenSaver);
+  const tsBtn = el.querySelector("#tg-tokensaver");
+  if(tsBtn && !tsBtn.dataset.bound){
+    tsBtn.dataset.bound = "1";
+    tsBtn.onclick = async ()=>{
+      const on = tsBtn.dataset.on !== "1";
+      await api("/settings", { tokenSaver: on });
+      setToggle("#tg-tokensaver", on);
+      toast(on ? "省 Token 已开启" : "省 Token 已关闭");
+      refresh();
+    };
+  }
+  const tsMax = el.querySelector("#set-tokensaver-max");
+  if(tsMax && !tsMax.dataset.bound){
+    tsMax.dataset.bound = "1";
+    tsMax.value = s.settings.tokenSaverMaxChars || "";
+    tsMax.onchange = async ()=>{
+      const v = parseInt(tsMax.value, 10) || 0;
+      await api("/settings", { tokenSaverMaxChars: v });
+      toast(v > 0 ? "每段上限已设为 " + v + " 字符" : "已恢复默认上限");
+      refresh();
+    };
+  }
   setToggle("#tg-smart", s.settings.smartRouting);
   setToggle("#tg-fallback", s.settings.laneFallbackToProviders);
+  setToggle("#tg-freefirst", s.settings.preferFreeProviders);
   setToggle("#tg-autotag", s.settings.autoTagEnabled);
   setToggle("#tg-openref", s.settings.openRefEnabled);
   setToggle("#tg-wbcache", s.settings.workBuddyCacheKey);
@@ -4574,6 +5320,44 @@ function renderSettings(s){
   };
   bindSettingToggle("#tg-smart", "smartRouting", "智能路由已开启：切换会避开不支持本次模态的模型", "智能路由已关闭：恢复目录顺序、不带能力过滤");
   bindSettingToggle("#tg-fallback", "laneFallbackToProviders", "耗尽后回落自定义 API 已开启（消耗你的 Key 额度）", "耗尽后回落自定义 API 已关闭");
+  setToggle("#tg-chain", s.settings.relayChainEnabled);
+  renderRelayChain();
+  const chainBtn = el.querySelector("#tg-chain");
+  if(chainBtn && !chainBtn.dataset.bound){
+    chainBtn.dataset.bound = "1";
+    chainBtn.onclick = async ()=>{
+      const on = chainBtn.dataset.on !== "1";
+      if(on && !((STATE.settings && STATE.settings.relayChain)||[]).length){ toast("先添加至少一个链路步骤，再开启接力链"); return; }
+      const j = await api("/settings", { relayChainEnabled: on });
+      if(!j) return;
+      setToggle("#tg-chain", on);
+      toast(on ? "跨供应商接力链已开启：顺序由链路决定" : "跨供应商接力链已关闭");
+      refresh();
+    };
+  }
+  const addLLane = el.querySelector("#chain-add-lane");
+  if(addLLane && !addLLane.dataset.bound){
+    addLLane.dataset.bound = "1";
+    addLLane.onclick = async ()=>{
+      const rows = JSON.parse(JSON.stringify((STATE.settings&&STATE.settings.relayChain)||[]));
+      const first = (STATE.models||[])[0];
+      if(!first){ toast("车道暂时没有可用模型"); return; }
+      rows.push({ source: "lane", provider: "", model: first.id });
+      await saveRelayChain(rows);
+    };
+  }
+  const addLPv = el.querySelector("#chain-add-pv");
+  if(addLPv && !addLPv.dataset.bound){
+    addLPv.dataset.bound = "1";
+    addLPv.onclick = async ()=>{
+      const rows = JSON.parse(JSON.stringify((STATE.settings&&STATE.settings.relayChain)||[]));
+      const p = (STATE.providers||[]).find(x=>x.enabled && (x.models||[]).length);
+      if(!p){ toast("先添加并启用一个自定义供应商"); return; }
+      rows.push({ source: "provider", provider: p.id, model: p.models[0] });
+      await saveRelayChain(rows);
+    };
+  }
+  bindSettingToggle("#tg-freefirst", "preferFreeProviders", "回落时免费供应商优先", "回落时恢复目录顺序");
   bindSettingToggle("#tg-autotag", "autoTagEnabled", "AI 能力标注已开启", "AI 能力标注已暂停");
   bindSettingToggle("#tg-openref", "openRefEnabled", "公开容量参考已开启：新模型将自动获得上游容量", "公开容量参考已暂停");
   bindSettingToggle("#tg-wbcache", "workBuddyCacheKey",

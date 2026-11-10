@@ -237,6 +237,11 @@ type Request struct {
 	SessionSeed string // stable per-conversation identity; "" → shared
 	TurnSeed    string // stable per-turn identity for request ids; "" → mint fresh
 	Agent       string // caller label for stats (main key → "")
+	// NoModelSwitch keeps the lane from switching to a DIFFERENT model on
+	// failover: same-model channel twins are still tried, but the lane never
+	// picks a catalog replacement. The gateway sets it while a user-ordered
+	// relay chain owns the order across models and providers.
+	NoModelSwitch bool
 	// Needs describes the request's modality footprint; the failover
 	// candidate filter matches it against model capabilities.
 	Needs   Needs

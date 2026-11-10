@@ -2,6 +2,8 @@ package lane
 
 import (
 	"context"
+	"sort"
+	"strings"
 	"sync"
 	"time"
 )
@@ -56,7 +58,11 @@ var upstreamSem = make(chan struct{}, maxConcurrentUpstream)
 
 // CallRecord is emitted after every upstream request (physical, not logical).
 type CallRecord struct {
-	Model     string `json:"model"`
+	Model string `json:"model"`
+	// Channel names the supplier bucket that served this physical request.
+	// Empty means an older build recorded it before channel attribution existed;
+	// the store keeps those under 未标注 rather than guessing a supplier.
+	Channel   string `json:"channel,omitempty"`
 	Agent     string `json:"agent,omitempty"`
 	Ok        bool   `json:"ok"`
 	Truncated bool   `json:"truncated,omitempty"`
@@ -91,6 +97,20 @@ type CallRecord struct {
 }
 
 // Lane orchestrates the free lane: catalog, availability, and completion calls.
+// RouteRule is one entry in the routing wall (渠道墙 / selectable route-wall).
+// A request is tested against every enabled rule, highest Priority first; the
+// matching rules' allow/deny channel sets are unioned and the lane applies the
+// result while picking a failover target. Deny wins over allow on conflict.
+type RouteRule struct {
+	Enabled       bool     `json:"enabled"`
+	Name          string   `json:"name"`
+	MatchType     string   `json:"matchType"`     // "any" | "model"
+	Match         string   `json:"match"`         // model-name prefix/regex; ignored when MatchType=="any"
+	AllowChannels []string `json:"allowChannels"` // channels the matched request MAY use (empty = no allow-constraint)
+	DenyChannels  []string `json:"denyChannels"`  // channels the matched request must NOT use
+	Priority      int      `json:"priority"`      // higher = applied first
+}
+
 type Lane struct {
 	mu           sync.RWMutex
 	catalog      []ModelInfo
@@ -116,10 +136,21 @@ type Lane struct {
 	exposeRegion     bool
 	failoverEnabled  bool
 	failoverMax      int
-	smartRouting     bool
-	strategy         string
-	ttft             TTFTSource
-	throttle         *ThrottleBook
+	// modelFallbackChain is the user-authored ordered list of model ids that
+	// catch a turn when the requested model is refused (quota/region/free-tier/
+	// server error). It sits BETWEEN nextSameModel (same model, different
+	// channel) and nextCandidate (lane's own pick): an explicit user chain
+	// beats the lane's guess, but never overrides a same-model twin. Issue #25.
+	modelFallbackChain []string
+	// routeWall is the user-authored channel routing rules (渠道墙). Each
+	// enabled rule that matches a request constrains which channels the lane may
+	// route that request through; the lane unions every match's allow/deny sets
+	// while picking a failover target. SetRouteWall replaces the whole slice.
+	routeWall    []RouteRule
+	smartRouting bool
+	strategy     string
+	ttft         TTFTSource
+	throttle     *ThrottleBook
 
 	// wbCacheKey asks the WorkBuddy gateways to bucket their prefix cache by
 	// our conversation id (prompt_cache_key). Off by default: the field is
@@ -301,6 +332,83 @@ func (l *Lane) SetFailover(enabled bool, max int) {
 	}
 	l.failoverMax = max
 	l.mu.Unlock()
+}
+
+// SetModelFallbackChain installs the user-authored catch chain (issue #25).
+// Blank entries are dropped; order is preserved as the caller ranked it.
+func (l *Lane) SetModelFallbackChain(chain []string) {
+	clean := make([]string, 0, len(chain))
+	for _, c := range chain {
+		if c = strings.TrimSpace(c); c != "" {
+			clean = append(clean, c)
+		}
+	}
+	l.mu.Lock()
+	l.modelFallbackChain = clean
+	l.mu.Unlock()
+}
+
+// SetRouteWall replaces the routing-wall rules. The lane snapshots the slice
+// under mu, so callers must not edit the passed slice in place afterwards.
+// Order is irrelevant here: applyRouteWall re-sorts by Priority at request time.
+func (l *Lane) SetRouteWall(rules []RouteRule) {
+	cp := make([]RouteRule, len(rules))
+	copy(cp, rules)
+	l.mu.Lock()
+	l.routeWall = cp
+	l.mu.Unlock()
+}
+
+// routeAllowDeny computes the channel allow/deny sets for one request by
+// testing it against every enabled rule, highest Priority first, and unioning
+// the matches. An empty allow set means "no allow-constraint"; a non-empty one
+// means the request may only use those channels. Deny always wins on conflict.
+func (l *Lane) routeAllowDeny(reqModel string) (allow, deny map[string]bool) {
+	l.mu.RLock()
+	rules := l.routeWall
+	l.mu.RUnlock()
+
+	// Highest priority first; the first enabled rule that matches the request
+	// wins (firewall-style short-circuit). Later rules are not consulted — that
+	// is what Priority orders. An empty allow set on the winning rule means "no
+	// allow-constraint": the request may use any channel not in deny.
+	idx := make([]int, len(rules))
+	for i := range idx {
+		idx[i] = i
+	}
+	sort.SliceStable(idx, func(a, b int) bool {
+		return rules[idx[a]].Priority > rules[idx[b]].Priority
+	})
+	for _, i := range idx {
+		r := rules[i]
+		if !r.Enabled {
+			continue
+		}
+		if r.MatchType == "model" && r.Match != "" {
+			if !strings.Contains(strings.ToLower(reqModel), strings.ToLower(r.Match)) {
+				continue
+			}
+		}
+		allowSet := map[string]bool{}
+		denySet := map[string]bool{}
+		for _, c := range r.AllowChannels {
+			if c = strings.TrimSpace(c); c != "" {
+				allowSet[c] = true
+			}
+		}
+		for _, c := range r.DenyChannels {
+			if c = strings.TrimSpace(c); c != "" {
+				denySet[c] = true
+			}
+		}
+		if len(allowSet) == 0 {
+			allow = nil
+		} else {
+			allow = allowSet
+		}
+		return allow, denySet
+	}
+	return nil, nil
 }
 
 // SetThrottleUpdate wires the throttle ledger's persistence callback.
@@ -1073,17 +1181,34 @@ func (l *Lane) Complete(ctx context.Context, req Request, emit func(Chunk)) (Out
 			l.MarkThrottled(model, uerr.RetryAfter)
 		}
 		// No switch after content reached the caller (it would duplicate
-		// output), on egress-wide failures, or when the caller's own model
-		// error can't plausibly be answered by another model.
-		if !failover || sawAny || !switchableFailure(uerr) {
+		// output), or when the caller's own model error can't plausibly be
+		// answered by another model.
+		if sawAny || !switchableFailure(uerr) {
 			return out, uerr
 		}
-		next := l.nextSameModel(req.Needs, model, tried, req.Needs.PromptTokens)
-		if next == "" {
-			// No same-model channel left: fall back to the old behaviour of
-			// switching to whatever model can answer. That changes the model
-			// the user asked for, so it stays the second choice.
-			next = l.nextCandidate(req.Needs, tried)
+		// With NoModelSwitch the gateway owns the cross-model order (its relay
+		// chain), so the lane must not pick a replacement model. It may still
+		// use the same-model channel twins when failover is on — that does not
+		// change what the user asked for — and otherwise reports the turn as
+		// exhausted so the chain can take over.
+		if !failover && !req.NoModelSwitch {
+			return out, uerr
+		}
+		allow, deny := l.routeAllowDeny(model)
+		next := ""
+		if failover {
+			next = l.nextSameModel(req.Needs, model, tried, req.Needs.PromptTokens, allow, deny)
+		}
+		if next == "" && !req.NoModelSwitch {
+			// User-authored catch chain (issue #25): an explicit ranking beats
+			// the lane's own pick, but only after a same-model twin is ruled out.
+			next = l.nextChainModel(req.Needs, tried, allow, deny)
+		}
+		if next == "" && !req.NoModelSwitch {
+			// No same-model channel and no user chain hit: fall back to the old
+			// behaviour of switching to whatever model can answer. That changes
+			// the model the user asked for, so it stays the last choice.
+			next = l.nextCandidate(req.Needs, tried, allow, deny)
 		}
 		if next == "" {
 			// The lane has nothing left to offer this request — tell the
@@ -1160,7 +1285,7 @@ func (l *Lane) Candidates(needs Needs, exclude string, n int) []string {
 	tried := map[string]bool{exclude: true}
 	out := []string{}
 	for len(out) < n {
-		c := l.nextCandidate(needs, tried)
+		c := l.nextCandidate(needs, tried, nil, nil)
 		if c == "" {
 			break
 		}
@@ -1183,7 +1308,20 @@ func (l *Lane) Candidates(needs Needs, exclude string, n int) []string {
 // ⚠️ The group is keyed on the *served* id, not the requested one: a failover
 // already moved to another model, and looking up the original id would let a
 // two-hop chain bounce between models.
-func (l *Lane) nextSameModel(needs Needs, servedModel string, tried map[string]bool, promptTokens int) string {
+// channelAllowed reports whether a model on the given channel may serve a
+// request under the route wall's allow/deny sets. A nil allow set means no
+// allow-constraint; deny always wins on conflict.
+func channelAllowed(ch string, allow, deny map[string]bool) bool {
+	if deny[ch] {
+		return false
+	}
+	if allow != nil && !allow[ch] {
+		return false
+	}
+	return true
+}
+
+func (l *Lane) nextSameModel(needs Needs, servedModel string, tried map[string]bool, promptTokens int, allow, deny map[string]bool) string {
 	l.mu.RLock()
 	groups := AggregateGroups(l.catalog)
 	throttle := l.throttle
@@ -1219,6 +1357,11 @@ func (l *Lane) nextSameModel(needs Needs, servedModel string, tried map[string]b
 				}
 			}
 		}
+		if m, ok := l.modelByID(id); ok {
+			if !channelAllowed(m.Channel, allow, deny) {
+				continue
+			}
+		}
 		return id
 	}
 	return ""
@@ -1242,7 +1385,62 @@ func (l *Lane) modelByID(id string) (ModelInfo, bool) {
 // that cannot carry the request's modalities are hard-filtered and the
 // selected strategy (latency) orders inside the availability band; with it
 // off, or with the catalog strategy, ties keep catalog order.
-func (l *Lane) nextCandidate(needs Needs, tried map[string]bool) string {
+// nextChainModel walks the user-authored fallback chain (issue #25) and returns
+// the first id that is untried, not throttled, not region-blocked/unavailable,
+// and (under smart routing) capable of answering the request. It preserves the
+// caller's ranking: chain order wins over the lane's catalog ordering. A blank
+// or exhausted chain returns "".
+func (l *Lane) nextChainModel(needs Needs, tried map[string]bool, allow, deny map[string]bool) string {
+	l.mu.RLock()
+	chain := l.modelFallbackChain
+	byID := make(map[string]ModelInfo, len(l.catalog))
+	for _, m := range l.catalog {
+		byID[m.ID] = m
+	}
+	av := make(map[string]ProbeResult, len(l.availability))
+	for k, v := range l.availability {
+		av[k] = v
+	}
+	smart := l.smartRouting
+	hidden := l.hidden
+	l.mu.RUnlock()
+
+	for _, id := range chain {
+		if tried[id] || hidden[id] || l.throttle.Throttled(id) {
+			continue
+		}
+		if _, ok := byID[id]; !ok {
+			// Not in the catalog: never route a turn at a phantom model the
+			// upstream has no row for. A typo'd chain entry is silently skipped.
+			continue
+		}
+		if !channelAllowed(byID[id].Channel, allow, deny) {
+			continue
+		}
+		switch FreshState(av[id]) {
+		case StateUnavailable, StateRegionBlock:
+			continue
+		}
+		if smart {
+			m, ok := byID[id]
+			if !ok {
+				continue
+			}
+			if !satisfiesNeeds(m, needs) {
+				continue
+			}
+			if m.ContextWindow > 0 && needs.PromptTokens > 0 {
+				if window := applyHeadroom(m.ContextWindow); window > 0 && needs.PromptTokens > window {
+					continue
+				}
+			}
+		}
+		return id
+	}
+	return ""
+}
+
+func (l *Lane) nextCandidate(needs Needs, tried map[string]bool, allow, deny map[string]bool) string {
 	l.mu.RLock()
 	cat := make([]ModelInfo, 0, len(l.catalog))
 	for _, m := range l.catalog {
@@ -1269,6 +1467,9 @@ func (l *Lane) nextCandidate(needs Needs, tried map[string]bool) string {
 			continue
 		}
 		if tried[m.ID] || l.throttle.Throttled(m.ID) {
+			continue
+		}
+		if !channelAllowed(m.Channel, allow, deny) {
 			continue
 		}
 		switch FreshState(av[m.ID]) {
@@ -1349,7 +1550,14 @@ func (l *Lane) attemptModel(ctx context.Context, req Request, model, effort stri
 	// makes one conversation one exit: the same prompt prefix keeps landing on
 	// the same egress, so the upstream has a chance to reuse its prompt cache
 	// instead of re-prefilling the whole conversation on every turn.
-	plan := ExitPlan{Model: base}
+	// The catalog leaves Zen rows untagged (empty Channel). Naming that bucket
+	// explicitly keeps the usage table honest: "zen" is a real source, not a
+	// missing value.
+	channel := entry.Channel
+	if channel == "" {
+		channel = ChannelZen
+	}
+	plan := ExitPlan{Model: base, Channel: channel}
 	if r := CurrentRotator(); r != nil {
 		plan.NodeID = r.Pick(req.SessionSeed, base)
 		plan.ExitKey = r.ExitKey(plan.NodeID)
@@ -1630,6 +1838,9 @@ func (l *Lane) record(ctx context.Context, rec CallRecord, result StreamResult, 
 		return
 	}
 	rec.Trace = TraceFrom(ctx)
+	if p := ExitPlanFrom(ctx); p.Channel != "" {
+		rec.Channel = p.Channel
+	}
 	if ue := asUpstream(err); ue != nil {
 		rec.ErrCode = ue.Code
 		rec.UpstreamRID = ue.UpstreamRID

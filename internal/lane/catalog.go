@@ -45,6 +45,36 @@ const (
 	ChannelQoder = "qoder"
 )
 
+// ModelFamily reduces a model id to the identity every source serving the same
+// weights shares.
+//
+// The same model reaches a picker under several ids at once: the free lane
+// serves "deepseek-v4.1-flash", the -free variant of the same weights is
+// "deepseek-v4.1-flash-free", and a custom provider publishes
+// "codearts/deepseek-v4.1-flash" or "deepseek-ai/DeepSeek-V4.1-Flash". They are
+// one model with four doors, but a picker shows four rows that look like four
+// different models — which is what makes a real catalog unreadable.
+//
+// What is stripped is routing, not identity:
+//   - a provider prefix ("codearts/", "ernie/") and a vendor namespace
+//     ("deepseek-ai/") both say who carries it, not what it is;
+//   - the trailing "-free" / ":free" says which quota it spends;
+//   - a trailing "(light)" effort tag says how hard it thinks (BaseModelId).
+//
+// Snapshot and date suffixes are deliberately kept: "deepseek-v4-pro" and
+// "deepseek-v4-pro-0813" are different weights, and folding them together would
+// quietly route a request to a model the caller did not choose.
+func ModelFamily(id string) string {
+	s := BaseModelId(strings.TrimSpace(id))
+	if i := strings.LastIndex(s, "/"); i >= 0 {
+		s = s[i+1:]
+	}
+	s = strings.ToLower(s)
+	s = strings.TrimSuffix(s, ":free")
+	s = strings.TrimSuffix(s, "-free")
+	return strings.TrimSpace(s)
+}
+
 var alwaysFree = map[string]bool{"union-alpha": true, "space-bunny-free": true}
 
 var freeLaneRe = regexp.MustCompile(`(?:^|[-_])free(?:$|[-_.])`)

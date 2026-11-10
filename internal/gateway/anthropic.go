@@ -182,7 +182,7 @@ func (s *Server) handleAnthropicMessages(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	agent := s.agentOf(r)
-	unified := convertAnthropicMessages(req.Messages, req.System)
+	unified := s.applyTokenSaver(r, convertAnthropicMessages(req.Messages, req.System))
 	if len(unified) == 0 {
 		writeJSON(w, 400, map[string]any{"type": "error", "error": map[string]any{"type": "invalid_request_error", "message": "messages must not be empty"}})
 		return
@@ -215,24 +215,30 @@ func (s *Server) handleAnthropicMessages(w http.ResponseWriter, r *http.Request)
 	}
 	ctx := r.Context()
 	st := &anthropicStreamState{blockMap: map[int]int{}}
+	chain := s.chainMode()
 
 	if !req.Stream {
 		collector := newResponsesCollector()
 		outcome, uerr := s.Lane.Complete(ctx, lane.Request{
 			Model: model, Effort: effort, Messages: unified, Tools: tools,
 			MaxTokens: req.MaxTokens, SessionSeed: seed, TurnSeed: turn,
-			Agent: agent, Needs: needs,
+			Agent: agent, Needs: needs, NoModelSwitch: chain,
 		}, collector.consume)
 		served := servedModel(outcome, base)
 		if uerr != nil && !collector.hasAnything() {
 			if uerr.Exhausted && s.fallbackEnabled() {
-				if usage, finish, fbServed, _, ok := s.providerFallback(ctx,
-					s.providerFallbackPicks(needs, base), unified, tools,
-					req.MaxTokens, agent, collector.consume); ok {
-					fbOutcome := lane.Outcome{Usage: usage, Finish: finish, ServedModel: fbServed}
-					w.Header().Set("x-zen-gate-served-by", fbServed)
-					writeJSON(w, 200, anthropicResponse(randomID("msg_"), fbServed, collector, fbOutcome))
+				res := s.runChain(ctx, s.fallbackPicks(needs, base), chainTurn{
+					messages: unified, tools: tools, maxTokens: req.MaxTokens,
+					agent: agent, needs: needs, sessionSeed: seed, turnSeed: turn,
+				}, collector.consume)
+				if res.OK {
+					fbOutcome := lane.Outcome{Usage: res.Usage, Finish: res.Finish, ServedModel: res.Served}
+					w.Header().Set("x-zen-gate-served-by", res.Served)
+					writeJSON(w, 200, anthropicResponse(randomID("msg_"), res.Served, collector, fbOutcome))
 					return
+				}
+				if res.Err != nil && res.Emitted {
+					uerr = res.Err
 				}
 			}
 			setRetryAfter(w, uerr)
@@ -271,7 +277,7 @@ func (s *Server) handleAnthropicMessages(w http.ResponseWriter, r *http.Request)
 	outcome, uerr := s.Lane.Complete(ctx, lane.Request{
 		Model: model, Effort: effort, Messages: unified, Tools: tools,
 		MaxTokens: req.MaxTokens, SessionSeed: seed, TurnSeed: turn,
-		Agent: agent, Needs: needs,
+		Agent: agent, Needs: needs, NoModelSwitch: chain,
 	}, feed)
 	stop := "end_turn"
 	switch {
@@ -282,26 +288,27 @@ func (s *Server) handleAnthropicMessages(w http.ResponseWriter, r *http.Request)
 	}
 	if uerr != nil && outcome.Finish == "" && !st.sawAny {
 		if uerr.Exhausted && s.fallbackEnabled() {
-			fbMaxTok := req.MaxTokens
-			if fbMaxTok <= 0 {
-				fbMaxTok = 8192
-			}
-			if usage, finish, _, _, ok := s.providerFallback(ctx,
-				s.providerFallbackPicks(needs, base), unified, tools,
-				fbMaxTok, agent, feed); ok {
+			res := s.runChain(ctx, s.fallbackPicks(needs, base), chainTurn{
+				messages: unified, tools: tools, maxTokens: req.MaxTokens,
+				agent: agent, needs: needs, sessionSeed: seed, turnSeed: turn,
+			}, feed)
+			if res.OK {
 				stop := "end_turn"
 				switch {
-				case finish == lane.FinishToolCalls:
+				case res.Finish == lane.FinishToolCalls:
 					stop = "tool_use"
-				case finish == lane.FinishMaxTokens || finish == "":
+				case res.Finish == lane.FinishMaxTokens || res.Finish == "":
 					stop = "max_tokens"
 				}
 				begin()
 				sse.typedEvent(map[string]any{"type": "message_delta",
 					"delta": map[string]any{"stop_reason": stop, "stop_sequence": nil},
-					"usage": anthropicUsage(usage)})
+					"usage": anthropicUsage(res.Usage)})
 				sse.typedEvent(map[string]any{"type": "message_stop"})
 				return
+			}
+			if res.Err != nil && res.Emitted {
+				uerr = res.Err
 			}
 		}
 		if sse.flushed {
@@ -382,8 +389,8 @@ func anthropicResponse(id, model string, c *responsesCollector, outcome lane.Out
 		"id": id, "type": "message", "role": "assistant", "model": model,
 		"content":     content,
 		"stop_reason": stop, "stop_sequence": nil,
-		"usage":       anthropicUsage(outcome.Usage),
-		"created":     time.Now().Unix(),
+		"usage":   anthropicUsage(outcome.Usage),
+		"created": time.Now().Unix(),
 	}
 }
 

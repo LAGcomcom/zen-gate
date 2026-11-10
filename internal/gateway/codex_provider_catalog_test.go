@@ -157,7 +157,10 @@ func TestCatalogListsAgree(t *testing.T) {
 // ("clash/x" vs "x"), and providerRoute only matches on the prefix before
 // "/". Both entries are legitimate and each routes where its name says —
 // pinned so a future dedup pass does not silently drop one.
-func TestProviderIdRepeatingLaneIdIsDistinct(t *testing.T) {
+// A provider repeating a lane id is the same weights behind a second door, not
+// a second model. The picker gets one row — and it must be the lane's, because
+// that one fails over across models while a provider entry is one key.
+func TestProviderIdRepeatingLaneIdIsMerged(t *testing.T) {
 	s := providerServer(t, []store.Provider{{
 		ID: "clash", Name: "撞名", BaseURL: "http://127.0.0.1:8090",
 		Protocol: store.ProtocolOpenAI, Enabled: true,
@@ -167,11 +170,11 @@ func TestProviderIdRepeatingLaneIdIsDistinct(t *testing.T) {
 	for _, m := range s.InjectableModels() {
 		got[m.ID] = true
 	}
-	if !got["clash/mimo-v2.6-flash-free"] {
-		t.Errorf("provider entry missing: the ids are distinct and both should be offered")
+	if got["clash/mimo-v2.6-flash-free"] {
+		t.Errorf("同名供应商条目不应再单独列出：它与车道那条是同一个模型")
 	}
 	if !got["mimo-v2.6-flash-free"] {
-		t.Errorf("free-lane entry missing: a provider repeating the name must not displace it")
+		t.Errorf("免费车道条目必须保留，不能被供应商条目顶掉")
 	}
 }
 

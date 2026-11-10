@@ -965,7 +965,15 @@ func (l *Lane) probeWorkBuddy(ctx context.Context, m ModelInfo) ProbeResult {
 	wbApplyModelQuirks(body, m.ID, "")
 	start := time.Now()
 	firstAt := int64(0)
-	_, err := l.wbPost(ctx, body, "", func([]byte) error {
+	// The probe is a real turn and must carry the v2 envelope like every other
+	// one: X-Conversation-ID has to be a 32-hex id. Posting an empty string
+	// made the upstream answer 400 code 11128 "conversation id missing", which
+	// the classifier folded into the content-gate bucket — so the card said
+	// "上游内容门拦截了请求里的客户端特征文本" while manual chat to the same
+	// model answered normally (issue #128-3). The seed is fixed per model, so
+	// repeated probe rounds reuse one upstream conversation instead of minting
+	// a new one every time.
+	_, err := l.wbPost(ctx, body, wbConversationID("wb-probe:"+m.ID), func([]byte) error {
 		if firstAt == 0 {
 			firstAt = atLeastMS(start)
 			res.TTFTMs = firstAt

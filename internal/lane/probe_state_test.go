@@ -96,13 +96,13 @@ func TestNextCandidateGivesAStaleVerdictNoVeto(t *testing.T) {
 	l.smartRouting = false
 
 	l.availability["a-free"] = ProbeResult{Model: "a-free", State: StateUnavailable, At: time.Now().UnixMilli()}
-	if got := l.nextCandidate(Needs{}, map[string]bool{}); got != "b-free" {
+	if got := l.nextCandidate(Needs{}, map[string]bool{}, nil, nil); got != "b-free" {
 		t.Errorf("fresh verdict: candidate = %q, want the refused model skipped", got)
 	}
 
 	l.availability["a-free"] = ProbeResult{Model: "a-free", State: StateUnavailable,
 		At: time.Now().Add(-31 * time.Minute).UnixMilli()}
-	if got := l.nextCandidate(Needs{}, map[string]bool{}); got != "a-free" {
+	if got := l.nextCandidate(Needs{}, map[string]bool{}, nil, nil); got != "a-free" {
 		t.Errorf("stale verdict: candidate = %q, want the expired refusal to stop vetoing", got)
 	}
 }

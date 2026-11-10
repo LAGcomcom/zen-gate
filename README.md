@@ -44,8 +44,10 @@ failover 与出口轮换自动消化：
   重启对应 Agent 就能在模型选择器里看到免费模型（WorkBuddy 无需重启，保存后自动热加载；Qoder 注入
   `~/.qoder-cn/settings.json` 自定义供应商，IDE 本地直连）；
 - **自定义 API 接入**：免费车道之外，可添加任意 OpenAI / Anthropic 兼容上游——
-  内置 NVIDIA NIM、Google Gemini、GitHub Models、Groq、Cerebras、Mistral、OpenRouter、
-  HuggingFace、硅基流动、魔搭、智谱、LongCat、书生 Intern 等 14 个免费商预设一键填充，
+  内置 30+ 家一键预设：NVIDIA NIM、Google Gemini、GitHub Models、Groq、Cerebras、Mistral、
+  OpenRouter、HuggingFace、硅基流动、魔搭、智谱、LongCat、书生 Intern 等免费商，
+  以及 DeepSeek、Kimi、百炼 Qwen、火山方舟、腾讯混元、阶跃、千帆、Together、Fireworks、
+  SambaNova、Nebius、Chutes、Novita、OpenAI、xAI、Cohere 和本机 Ollama / LM Studio；
   填上自己的 Key 后自动检索模型列表，模型以 `供应商ID/模型名` 出现在所有 Agent 选择器里；
 - **协议层实测打磨**：会话铸造、指纹门、三种线协议（chat / responses / messages），
   断流续写、空停续写、截断自动续写三重兜底——全部按真实客户端行为逐项实测；
@@ -63,6 +65,8 @@ failover 与出口轮换自动消化：
 |---|---|
 | 🧭 **多模态智能路由** | 请求带图 / 音频 / 文件时，限流切换只会落到支持该模态的模型；模型能力三层打标（内置精选表 → 免费车道大模型 AI 标注 → 一键实测），徽章直接标在模型页 |
 | 🎯 **路由策略** | 智能路由总开关随时启停；failover 候选链按「目录顺序 / 首字延迟优先」排序；免费车道全部耗尽可单向回落到你的自定义 API（默认关，消耗自己的 Key） |
+| ✂️ **省 Token** | 历史里超长的工具结果（文件内容、日志、命令输出）在转发前裁剪到设定字符数，保留头尾并标注省略量；最近两条消息不动，设置页可开关与调上限，请求头 `X-ZG-Token-Saver: off` 可单次绕过 |
+| 🪜 **跨供应商接力链** | 自己排顺序：免费车道模型与自定义 API 模型交替成一条链，跨供应商也能控先后；请求的模型先试一次，之后严格按链走，某一步开始输出后不再切换 |
 | 🔄 **限流自动切换** | 模型被限流时自动换下一个可用模型接住请求，响应头标注实际模型 |
 | 📢 **公告系统** | 编辑仓库根目录 `announcements.json` 即向所有用户发公告（info/warn/critical 分级、生效时段、已读跟踪），总览页每 6 小时同步 |
 | 🔌 **自定义 API** | 免费商预设一键填充 + 自动检索模型列表，自己的 Key 自己填，用量照常入账 |

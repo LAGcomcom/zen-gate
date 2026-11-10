@@ -58,11 +58,30 @@ func (c *claude) read() (map[string]any, error) {
 	return doc, nil
 }
 
+// hasOwnClaudeEnv reports whether a settings document already carries
+// zen-gate's injected env — i.e. it is not a pristine restore point. A file
+// that cannot be parsed is treated as foreign so it still gets backed up before
+// read() reports the parse error.
+func hasOwnClaudeEnv(data []byte) bool {
+	doc := map[string]any{}
+	if json.Unmarshal(data, &doc) != nil {
+		return false
+	}
+	env, _ := doc["env"].(map[string]any)
+	base, _ := env["ANTHROPIC_BASE_URL"].(string)
+	return strings.Contains(base, "127.0.0.1")
+}
+
 func (c *claude) Enable(o Options) error {
 	path := c.settingsPath()
 	if data, err := os.ReadFile(path); err == nil {
-		// back up the pristine file once per enable
-		_, _ = backupFile("claude", path, data)
+		// Re-enabling (ResyncEnabled calls Enable on every model-list change)
+		// must not overwrite the pristine restore point with already-injected
+		// content: that would make Disable restore the gateway URL and leave
+		// Claude Code pointing at a local port.
+		if !hasOwnClaudeEnv(data) {
+			_, _ = backupFile("claude", path, data)
+		}
 	}
 	doc, err := c.read()
 	if err != nil {

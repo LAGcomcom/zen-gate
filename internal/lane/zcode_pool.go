@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -277,17 +278,28 @@ func hasRung(levels []string, want string) bool {
 // first system block on every turn.
 const zcodeIdentitySystem = `You are ZCode, a coding assistant made by Zhipu AI. You help with software engineering tasks: reading and writing code, debugging, refactoring, and explaining technical decisions. Answer directly, prefer concrete code over prose, and never invent APIs you have not seen in the user's files.`
 
-// zcodeLevels holds model → accepted rungs, filled by the roster sync.
-var zcodeLevels = map[string][]string{}
+// zcodeLevels holds model → accepted rungs, filled by the roster sync. The
+// roster refresh runs on a background loop while requests read the table, so it
+// needs the same lock discipline as traeRoutes.
+var (
+	zcodeLevelsMu sync.RWMutex
+	zcodeLevels   = map[string][]string{}
+)
 
-func modelLevels(model string) []string { return zcodeLevels[BaseModelId(model)] }
+func modelLevels(model string) []string {
+	zcodeLevelsMu.RLock()
+	defer zcodeLevelsMu.RUnlock()
+	return zcodeLevels[BaseModelId(model)]
+}
 
 func setZcodeLevels(rows []zcodeConfigRow) {
 	next := map[string][]string{}
 	for _, r := range rows {
 		next[r.ModelID] = r.Levels
 	}
+	zcodeLevelsMu.Lock()
 	zcodeLevels = next
+	zcodeLevelsMu.Unlock()
 }
 
 // zcodeBuildBody converts a unified Anthropic-shaped body into the one this wire

@@ -108,10 +108,11 @@ func FetchModelsDev(ctx context.Context, client *http.Client) (map[string]ModelM
 //
 // Rows already stating exactly these capacities are not rewritten, so the six
 // hourly pull does not churn tags.json.
-func ApplyExact(st *store.Store, cat []lane.ModelInfo, meta map[string]ModelMeta) []mergeLog {
+func ApplyExact(st *store.Store, cat []lane.ModelInfo, meta map[string]ModelMeta, locked ...func(string) bool) []mergeLog {
 	if len(meta) == 0 {
 		return nil
 	}
+	isLocked := resolveLocked(locked)
 	now := time.Now().UnixMilli()
 	taken := st.SnapshotTags()
 	var applied []mergeLog
@@ -120,9 +121,12 @@ func ApplyExact(st *store.Store, cat []lane.ModelInfo, meta map[string]ModelMeta
 			continue // the Kilo pool carries its own declared capacities
 		}
 		base := lane.BaseModelId(m.ID)
+		if isLocked(base) {
+			continue // user veto: this verdict is theirs, not the catalog's
+		}
 		row, has := taken[base]
-		if has && row.Source == store.TagSourceProbe {
-			continue // 实测 > 上游声明
+		if has && (row.Source == store.TagSourceProbe || row.Source == store.TagSourceManual) {
+			continue // 实测 / 人工校准 > 上游声明
 		}
 		mm, ok := meta[base]
 		if !ok {
@@ -149,7 +153,7 @@ func ApplyExact(st *store.Store, cat []lane.ModelInfo, meta map[string]ModelMeta
 			tag.Vision, tag.Audio, tag.File, tag.Reasoning = row.Vision, row.Audio, row.File, row.Reasoning
 			tag.CapsOnly = false
 		}
-		st.SetModelTag(base, tag)
+		st.SetModelTagTracked(base, tag, store.CapOriginModelsDev)
 		applied = append(applied, mergeLog{ID: base, Ctx: mm.ContextWindow, Out: mm.MaxOutput})
 	}
 	sort.Slice(applied, func(i, j int) bool { return applied[i].ID < applied[j].ID })

@@ -53,21 +53,6 @@ func (m *Manager) Pick(seed, model string) string {
 		return !m.bannedFor(node.ID, model, now)
 	}
 
-	// Sticky: a conversation prefers the exit it already used. This is a
-	// preference, never a lock — an exit that is dead or cooling is dropped
-	// here and the rotation below picks a new one, so an exhausted exit cannot
-	// strand a conversation.
-	if seed != "" {
-		if id, ok := m.sticky[seed]; ok {
-			if node, found := m.nodeByID(id); found && usable(node) {
-				m.stickyAt[seed] = now.UnixMilli()
-				return id
-			}
-			delete(m.sticky, seed)
-			delete(m.stickyAt, seed)
-		}
-	}
-
 	// Group by egress IP. Nodes whose IP was never probed stay separate (keyed
 	// by node id) so "unknown" is not mistaken for "same exit".
 	type group struct {
@@ -101,8 +86,28 @@ func (m *Manager) Pick(seed, model string) string {
 	if len(order) == 0 {
 		return ""
 	}
+
+	// Sticky: a conversation prefers the *exit* it already used, and the unit
+	// of exit identity is the egress IP — the same unit ExitKey() reports to
+	// the lane and the same unit quota is billed in. Pinning the node id
+	// instead lost the conversation whenever a sibling behind the same IP took
+	// over: the id changed, the exit did not, and the re-rotation threw away
+	// the upstream prompt cache for no reason. Preference, never a lock — a
+	// group that is gone (dead or cooling) falls through to the rotation.
+	if seed != "" {
+		if key, ok := m.sticky[seed]; ok {
+			if g, found := groups[key]; found {
+				m.stickyAt[seed] = now.UnixMilli()
+				return g.best.ID
+			}
+			delete(m.sticky, seed)
+			delete(m.stickyAt, seed)
+		}
+	}
+
 	idx := int(m.rr.Add(1)-1) % len(order)
-	chosen := groups[order[idx]].best.ID
+	chosenKey := order[idx]
+	chosen := groups[chosenKey].best.ID
 
 	if seed != "" {
 		if len(m.sticky) >= stickyConversations {
@@ -117,7 +122,7 @@ func (m *Manager) Pick(seed, model string) string {
 				delete(m.stickyAt, oldest)
 			}
 		}
-		m.sticky[seed] = chosen
+		m.sticky[seed] = chosenKey
 		m.stickyAt[seed] = now.UnixMilli()
 	}
 	return chosen
@@ -156,34 +161,32 @@ func (m *Manager) ExitKey(nodeID string) string {
 	return nodeID
 }
 
-// nodeByID looks a node up by id. The caller must hold m.mu.
-func (m *Manager) nodeByID(id string) (Node, bool) {
-	for _, n := range m.nodes {
-		if n.ID == id {
-			return n, true
-		}
-	}
-	return Node{}, false
-}
-
 // dialVia opens one TCP connection through one node's socks inbound.
 func (m *Manager) dialVia(ctx context.Context, network, addr string, h NodeHealth) (net.Conn, error) {
 	// proxy.SOCKS5(network, proxyAddr, auth, forward): the target is resolved
 	// at the node, because the CONNECT request carries the hostname.
 	dialer, err := proxy.SOCKS5("tcp", fmt.Sprintf("127.0.0.1:%d", h.Port), nil, proxy.Direct)
 	if err != nil {
-		m.park(h.ID)
+		m.coolNode(h.ID)
 		return nil, err
 	}
 	cd, ok := dialer.(proxy.ContextDialer)
 	if !ok {
-		m.park(h.ID)
+		m.coolNode(h.ID)
 		return nil, fmt.Errorf("socks5 dialer 不支持 context")
 	}
 	conn, derr := cd.DialContext(ctx, network, addr)
 	if derr != nil {
-		m.park(h.ID)
+		// Same escalation the round-robin path uses. This is the path Pick
+		// actually drives, so a flat one-minute park here meant a node that
+		// fails every time was re-tried at full price every minute, while the
+		// rarely-used fallback escalated properly. One failure, one rule.
+		m.coolNode(h.ID)
 		return nil, derr
 	}
+	// A served connection clears the streak, exactly like a successful
+	// round-robin dial does; without it the escalation above would keep
+	// counting a node that just proved it works.
+	m.warmNode(h.ID)
 	return conn, nil
 }
