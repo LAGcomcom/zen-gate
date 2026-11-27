@@ -54,6 +54,17 @@ func backupBeforeWrite(agentID, path string) {
 
 // latestBackup returns the newest backup of a given base filename, if any.
 func latestBackup(agentID, base string) string {
+	return backupByAge(agentID, base, true)
+}
+
+// oldestBackup returns the oldest backup of a given base filename, if any.
+// Adapters that back up on every write need it to find the user's true original
+// rather than a copy of their own earlier injection.
+func oldestBackup(agentID, base string) string {
+	return backupByAge(agentID, base, false)
+}
+
+func backupByAge(agentID, base string, newest bool) string {
 	dir := filepath.Join(store.Home(), "backups", agentID)
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -69,5 +80,8 @@ func latestBackup(agentID, base string) string {
 		return ""
 	}
 	sort.Sort(sort.Reverse(sort.StringSlice(names)))
-	return filepath.Join(dir, names[0])
+	if newest {
+		return filepath.Join(dir, names[0])
+	}
+	return filepath.Join(dir, names[len(names)-1])
 }
