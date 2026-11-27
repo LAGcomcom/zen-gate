@@ -91,6 +91,7 @@ func NewRegistry(st *store.Store) *Registry {
 			newWorkBuddy(),
 			newWorkBuddyAI(),
 			newQoder(),
+			newOpenHands(),
 		},
 	}
 }
